@@ -2,8 +2,9 @@
 vendor/
 node_modules/
 public/build/
+public/hot
 storage/logs/*.log
-storage/framework/cache/
+storage/framework/cache/data/
 storage/framework/sessions/
 storage/framework/views/
-*.DS_Store
+.DS_Store
