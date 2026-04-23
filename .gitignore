@@ -1,0 +1,9 @@
+.env
+vendor/
+node_modules/
+public/build/
+storage/logs/*.log
+storage/framework/cache/
+storage/framework/sessions/
+storage/framework/views/
+*.DS_Store
