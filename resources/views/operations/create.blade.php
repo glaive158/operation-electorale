@@ -51,8 +51,8 @@
             @php
                 $types = [
                     ['val'=>'inscription',  'num'=>'1', 'label'=>'Inscription',          'sub'=>'sur liste électorale',           'color'=>'#009A44'],
-                    ['val'=>'modification', 'num'=>'2', 'label'=>'Modification',          'sub'=>'changement commune / adresse',    'color'=>'#0284c7'],
-                    ['val'=>'changement',   'num'=>'3', 'label'=>'Changement de statut',  'sub'=>'civil ↔ militaire/paramilitaire', 'color'=>'#d97706'],
+                    ['val'=>'modification', 'num'=>'2', 'label'=>'Modification',          'sub'=>'changement commune / adresse',    'color'=>'#ca8a04'],
+                    ['val'=>'changement',   'num'=>'3', 'label'=>'Changement de statut',  'sub'=>'civil ↔ militaire/paramilitaire', 'color'=>'#0284c7'],
                     ['val'=>'radiation',    'num'=>'4', 'label'=>'Radiation',              'sub'=>"d'un électeur",                  'color'=>'#EE1C25'],
                 ];
             @endphp
@@ -265,13 +265,13 @@
                                 <label class="flex items-start gap-2 text-sm text-slate-700">
                                     <input type="radio" name="statut_changement" value="civil_vers_militaire"
                                            {{ old('statut_changement') === 'civil_vers_militaire' ? 'checked' : '' }}
-                                           class="mt-0.5" style="accent-color:#d97706;">
+                                           class="mt-0.5" style="accent-color:#0284c7;">
                                     <span>Électeur civil passant dans un corps militaire ou paramilitaire</span>
                                 </label>
                                 <label class="flex items-start gap-2 text-sm text-slate-700">
                                     <input type="radio" name="statut_changement" value="militaire_vers_civil"
                                            {{ old('statut_changement') === 'militaire_vers_civil' ? 'checked' : '' }}
-                                           class="mt-0.5" style="accent-color:#d97706;">
+                                           class="mt-0.5" style="accent-color:#0284c7;">
                                     <span>Électeur militaire ou paramilitaire redevenu civil</span>
                                 </label>
                             </div>
@@ -280,11 +280,11 @@
                             <p class="text-xs font-medium text-slate-600 mb-2">Modification d'adresse électorale également ?</p>
                             <div class="flex gap-4">
                                 <label class="flex items-center gap-2 text-sm text-slate-600">
-                                    <input type="radio" name="avec_modification" value="0" id="avec_modif_non" checked style="accent-color:#d97706;">Non
+                                    <input type="radio" name="avec_modification" value="0" id="avec_modif_non" checked style="accent-color:#0284c7;">Non
                                 </label>
                                 <label class="flex items-center gap-2 text-sm text-slate-600">
                                     <input type="radio" name="avec_modification" value="1" id="avec_modif_oui"
-                                           {{ old('avec_modification') == '1' ? 'checked' : '' }} style="accent-color:#d97706;">Oui
+                                           {{ old('avec_modification') == '1' ? 'checked' : '' }} style="accent-color:#0284c7;">Oui
                                 </label>
                             </div>
                         </div>

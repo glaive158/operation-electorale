@@ -40,8 +40,8 @@
             @php
                 $types = [
                     ['key'=>'inscriptions',  'label'=>'Inscriptions',        'color'=>'#009A44'],
-                    ['key'=>'modifications', 'label'=>'Modifications',       'color'=>'#0284c7'],
-                    ['key'=>'changements',   'label'=>'Changements statut',  'color'=>'#d97706'],
+                    ['key'=>'modifications', 'label'=>'Modifications',       'color'=>'#ca8a04'],
+                    ['key'=>'changements',   'label'=>'Changements statut',  'color'=>'#0284c7'],
                     ['key'=>'radiations',    'label'=>'Radiations',          'color'=>'#EE1C25'],
                 ];
                 $total = max($statsOps->total ?? 1, 1);
@@ -97,8 +97,8 @@
                     @php
                         $actions = [
                             ['label'=>'Inscription',        'type'=>'inscription',  'color'=>'#009A44'],
-                            ['label'=>'Modification',       'type'=>'modification', 'color'=>'#0284c7'],
-                            ['label'=>'Changement statut',  'type'=>'changement',   'color'=>'#d97706'],
+                            ['label'=>'Modification',       'type'=>'modification', 'color'=>'#ca8a04'],
+                            ['label'=>'Changement statut',  'type'=>'changement',   'color'=>'#0284c7'],
                             ['label'=>'Radiation',          'type'=>'radiation',    'color'=>'#EE1C25'],
                         ];
                     @endphp
@@ -142,7 +142,7 @@
                 <tbody class="divide-y divide-slate-50">
                     @forelse($dernieres as $op)
                         @php
-                            $typeColors = ['inscription'=>'#009A44','modification'=>'#0284c7','changement'=>'#d97706','radiation'=>'#EE1C25'];
+                            $typeColors = ['inscription'=>'#009A44','modification'=>'#ca8a04','changement'=>'#0284c7','radiation'=>'#EE1C25'];
                             $statColors = ['en_attente'=>'#d97706','validee'=>'#009A44','rejetee'=>'#EE1C25'];
                             $tc = $typeColors[$op->type] ?? '#666';
                             $sc = $statColors[$op->statut] ?? '#666';
