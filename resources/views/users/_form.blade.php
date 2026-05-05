@@ -135,7 +135,11 @@
     function fillSelect(sel, items, placeholder) {
         if (!sel) return;
         sel.innerHTML = '<option value="">' + placeholder + '</option>';
-        (items || []).forEach(function(d) {
+        // Defensive: handle if API returns object instead of array
+        if (!Array.isArray(items)) {
+            items = items && items.data ? items.data : [];
+        }
+        items.forEach(function(d) {
             var o = document.createElement('option');
             o.value = d.id; o.textContent = d.nom;
             sel.appendChild(o);

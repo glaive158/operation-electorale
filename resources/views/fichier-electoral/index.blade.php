@@ -285,6 +285,10 @@
 
     function fillSelect(sel, items, enabled) {
         sel.innerHTML = '<option value="">-- Tous --</option>';
+        // Defensive: handle if API returns object instead of array
+        if (!Array.isArray(items)) {
+            items = items && items.data ? items.data : [];
+        }
         items.forEach(function(item) {
             var opt = document.createElement('option');
             opt.value = item.id;

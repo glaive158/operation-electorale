@@ -433,6 +433,10 @@ async function apiGet(url) {
 
 function fillSelect(sel, data, placeholder) {
     sel.innerHTML = '<option value="">' + (placeholder || '-- Sélectionner --') + '</option>';
+    // Defensive: handle if API returns object instead of array
+    if (!Array.isArray(data)) {
+        data = data && data.data ? data.data : [];
+    }
     data.forEach(d => {
         const o = document.createElement('option');
         o.value = d.id; o.textContent = d.nom;
