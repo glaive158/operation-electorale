@@ -28,8 +28,22 @@ class CarteElectoraleController extends Controller
         $selCol1 = $request->input('sel_col1');
         $selCol2 = $request->input('sel_col2');
         $selCol3 = $request->input('sel_col3');
+        $selCol4 = $request->input('sel_col4');
 
         $regions = static::fe()->table('regions')->orderBy('nom')->get(['id', 'nom']);
+
+        // Pre-load all geo data for client-side cascade filtering (~800 rows total)
+        $geoCache = Cache::remember('ce_geo_all', 3600, function () {
+            $fe = DB::connection('recensement');
+            return [
+                'departements'    => $fe->table('departements')->orderBy('nom')->get(['id', 'nom', 'region_id'])->all(),
+                'arrondissements' => $fe->table('arrondissements')->orderBy('nom')->get(['id', 'nom', 'departement_id'])->all(),
+                'communes'        => $fe->table('communes')->orderBy('nom')->get(['id', 'nom', 'arrondissement_id'])->all(),
+            ];
+        });
+        $allDepts    = $geoCache['departements'];
+        $allArrs     = $geoCache['arrondissements'];
+        $allCommunes = $geoCache['communes'];
 
         $filtres = array_filter([
             'region_id'  => $regionId,
@@ -43,7 +57,7 @@ class CarteElectoraleController extends Controller
 
         if (!empty($filtres) || $isDrill) {
             $searched = true;
-            $cacheKey = 'ce_stats_' . md5(serialize(compact('filtres', 'niveau', 'selCol1', 'selCol2', 'selCol3')));
+            $cacheKey = 'ce_stats_' . md5(serialize(compact('filtres', 'niveau', 'selCol1', 'selCol2', 'selCol3', 'selCol4')));
 
             if ($isEtranger || ($isDrill && $request->input('mode') === 'etranger')) {
 
@@ -91,7 +105,7 @@ class CarteElectoraleController extends Controller
                 $arrNom     = $arrId     ? optional($fe->table('arrondissements')->find($arrId))->nom    : null;
                 $communeNom = $communeId ? optional($fe->table('communes')->find($communeId))->nom       : null;
 
-                $stats = Cache::remember($cacheKey, 1800, function () use ($regionNom, $deptNom, $arrNom, $communeNom, $niveau, $selCol1, $selCol2, $selCol3) {
+                $stats = Cache::remember($cacheKey, 1800, function () use ($regionNom, $deptNom, $arrNom, $communeNom, $niveau, $selCol1, $selCol2, $selCol3, $selCol4) {
                     $fe = DB::connection('recensement');
                     $q  = $fe->table('fichier_electoral')->where('origine', 'national');
 
@@ -134,7 +148,7 @@ class CarteElectoraleController extends Controller
                             'detail'       => $detail->map(fn($r) => (array)$r)->all(), 'mode' => 'national', 'niveau' => 2,
                             'col_labels'   => ['Commune'], 'drillable' => true,
                         ];
-                    } else {
+                    } elseif ($niveau === 3) {
                         $q->where('departement', $selCol1)->where('arrondissement', $selCol2)->where('commune', $selCol3);
                         $detail = $q->select(
                                 'lieu_vote as col1',
@@ -146,7 +160,23 @@ class CarteElectoraleController extends Controller
                             'nb_bureaux'   => $detail->sum('nb_bureaux'),
                             'nb_communes'  => $detail->count(),
                             'detail'       => $detail->map(fn($r) => (array)$r)->all(), 'mode' => 'national', 'niveau' => 3,
-                            'col_labels'   => ['Lieu de vote'], 'drillable' => false,
+                            'col_labels'   => ['Lieu de vote'], 'drillable' => true,
+                        ];
+                    } else {
+                        $q->where('departement', $selCol1)->where('arrondissement', $selCol2)->where('commune', $selCol3)->where('lieu_vote', $selCol4);
+                        $detail = $q->select(
+                                'code_bureau',
+                                DB::raw('SUBSTRING(code_bureau, -2) as col1'),
+                                DB::raw('COUNT(*) as nb_electeurs'))
+                            ->groupBy('code_bureau')
+                            ->orderBy('code_bureau')
+                            ->get();
+                        return [
+                            'nb_electeurs' => $detail->sum('nb_electeurs'),
+                            'nb_bureaux'   => $detail->count(),
+                            'nb_communes'  => 0,
+                            'detail'       => $detail->map(fn($r) => (array)$r)->all(), 'mode' => 'national', 'niveau' => 4,
+                            'col_labels'   => ['Bureau'], 'drillable' => true,
                         ];
                     }
                 });
@@ -164,12 +194,13 @@ class CarteElectoraleController extends Controller
                 } else {
                     $breadcrumb[] = ['label' => 'Vue régions/départements', 'url' => route('carte-electorale') . '?' . $baseParams];
                     if ($niveau >= 2) $breadcrumb[] = ['label' => $selCol1 . ' / ' . $selCol2, 'url' => $niveau > 2 ? route('carte-electorale') . '?' . $baseParams . '&niveau=2&sel_col1=' . urlencode($selCol1) . '&sel_col2=' . urlencode($selCol2) : null];
-                    if ($niveau >= 3) $breadcrumb[] = ['label' => $selCol3, 'url' => null];
+                    if ($niveau >= 3) $breadcrumb[] = ['label' => $selCol3, 'url' => $niveau > 3 ? route('carte-electorale') . '?' . $baseParams . '&niveau=3&sel_col1=' . urlencode($selCol1) . '&sel_col2=' . urlencode($selCol2) . '&sel_col3=' . urlencode($selCol3) : null];
+                    if ($niveau >= 4) $breadcrumb[] = ['label' => $selCol4, 'url' => null];
                 }
             }
         }
 
-        return view('fichier-electoral.carte', compact('searched', 'filtres', 'regions', 'stats', 'breadcrumb'));
+        return view('fichier-electoral.carte', compact('searched', 'filtres', 'regions', 'stats', 'breadcrumb', 'allDepts', 'allArrs', 'allCommunes'));
     }
 
     public function apiPays()

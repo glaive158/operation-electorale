@@ -167,7 +167,7 @@
                 <p class="text-2xl font-bold text-slate-800">{{ number_format($stats['nb_communes']) }}</p>
                 <p class="text-xs text-slate-500">
                     @if($modeEtr){{ $niveau===1 ? 'Villes' : 'Lieux de vote' }}
-                    @else{{ $niveau===1 ? 'Départements' : ($niveau===2 ? 'Communes' : 'Lieux de vote') }}
+                    @else{{ $niveau===1 ? 'Départements' : ($niveau===2 ? 'Communes' : ($niveau===3 ? 'Lieux de vote' : 'Bureaux')) }}
                     @endif
                 </p>
             </div>
@@ -181,7 +181,7 @@
                 @if($modeEtr)
                     {{ $niveau===1 ? 'Pays / Ville' : 'Lieux de vote' }}
                 @else
-                    {{ $niveau===1 ? 'Régions / Départements' : ($niveau===2 ? 'Communes' : 'Lieux de vote') }}
+                    {{ $niveau===1 ? 'Régions / Départements' : ($niveau===2 ? 'Communes' : ($niveau===3 ? 'Lieux de vote' : 'Bureaux de vote')) }}
                 @endif
             </strong>
             <span class="px-2.5 py-1 rounded-full text-xs font-medium text-white" style="background:#d97706;">
@@ -245,10 +245,30 @@
                                     Lieux →
                                 </a>
                             </td>
-                        @else
+                        @elseif(!$modeEtr && $niveau===3)
                             <td class="px-5 py-3 text-slate-700">{{ $row->col1 }}</td>
                             <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ number_format($row->nb_electeurs) }}</td>
                             <td class="px-5 py-3 text-right text-slate-500">{{ number_format($row->nb_bureaux) }}</td>
+                            <td class="px-5 py-3">
+                                <a href="{{ route('carte-electorale') }}?{{ $baseQuery }}&niveau=4&sel_col1={{ urlencode(request('sel_col1')) }}&sel_col2={{ urlencode(request('sel_col2')) }}&sel_col3={{ urlencode(request('sel_col3')) }}&sel_col4={{ urlencode($row->col1) }}"
+                                   class="px-2.5 py-1 rounded-lg text-xs font-medium text-white hover:opacity-90" style="background:#d97706;">
+                                    Bureaux →
+                                </a>
+                            </td>
+                        @elseif(!$modeEtr && $niveau===4)
+                            <td class="px-5 py-3 font-mono text-xs text-slate-700">{{ $row->col1 }}</td>
+                            <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ number_format($row->nb_electeurs) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-500">-</td>
+                            <td class="px-5 py-3">
+                                <a href="{{ route('charge-electorale.bureau', $row->code_bureau) }}"
+                                   class="px-2.5 py-1 rounded-lg text-xs font-medium text-white hover:opacity-90" style="background:#0284c7;">
+                                    Liste →
+                                </a>
+                            </td>
+                        @else
+                            <td class="px-5 py-3 text-slate-700">{{ $row->col1 }}</td>
+                            <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ number_format($row->nb_electeurs) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-500">{{ isset($row->nb_bureaux) ? number_format($row->nb_bureaux) : '-' }}</td>
                         @endif
                     </tr>
                     @endforeach
@@ -310,6 +330,11 @@
 
     function isEtranger() { return ceRegion.value === 'etranger'; }
 
+    // Pre-loaded geo data for instant client-side cascade filtering
+    var allDepts    = @json($allDepts);
+    var allArrs     = @json($allArrs);
+    var allCommunes = @json($allCommunes);
+
     function resetFrom(level) {
         if (level <= 1) { fillSelect(ceDept, [], false); }
         if (level <= 2) { fillSelect(ceArr, [], false); }
@@ -322,32 +347,37 @@
         setLabels(etr);
         if (!this.value) return;
 
-        var url = etr
-            ? '/carte-electorale/api/pays'
-            : '/geo/region/' + this.value + '/departements';
-
-        fetch(url).then(r => r.json()).then(data => fillSelect(ceDept, data, true));
+        if (etr) {
+            // Etranger: query DB (small dataset, fast cached)
+            fetch('/carte-electorale/api/pays').then(r => r.json()).then(data => fillSelect(ceDept, data, true));
+        } else {
+            // National: filter pre-loaded depts client-side
+            var depts = allDepts.filter(d => d.region_id == this.value);
+            fillSelect(ceDept, depts, true);
+        }
     });
 
     ceDept.addEventListener('change', function () {
         resetFrom(2);
         if (!this.value) return;
 
-        var url = isEtranger()
-            ? '/carte-electorale/api/villes/' + encodeURIComponent(this.value)
-            : '/geo/departement/' + this.value + '/arrondissements';
-
-        fetch(url).then(r => r.json()).then(data => fillSelect(ceArr, data, true));
+        if (isEtranger()) {
+            fetch('/carte-electorale/api/villes/' + encodeURIComponent(this.value))
+                .then(r => r.json()).then(data => fillSelect(ceArr, data, true));
+        } else {
+            var arrs = allArrs.filter(a => a.departement_id == this.value);
+            fillSelect(ceArr, arrs, true);
+        }
     });
 
     ceArr.addEventListener('change', function () {
         resetFrom(3);
         if (!this.value || isEtranger()) return;
-        fetch('/geo/arrondissement/' + this.value + '/communes')
-            .then(r => r.json()).then(data => fillSelect(ceCommune, data, true));
+        var communes = allCommunes.filter(c => c.arrondissement_id == this.value);
+        fillSelect(ceCommune, communes, true);
     });
 
-    // Restaurer cascade après soumission
+    // Restaurer cascade après soumission (instantané, client-side)
     var savedRegionId = ceRegion.value;
     var savedDeptId   = '{{ $filtres["dept_id"] ?? "" }}';
     var savedArrId    = '{{ $filtres["arr_id"] ?? "" }}';
@@ -355,31 +385,33 @@
     if (savedRegionId) {
         var etr = savedRegionId === 'etranger';
         setLabels(etr);
-        var url1 = etr ? '/carte-electorale/api/pays' : '/geo/region/' + savedRegionId + '/departements';
 
-        fetch(url1).then(r => r.json())
-            .then(function(data) {
+        if (etr) {
+            // Etranger restoration via fetch (small)
+            fetch('/carte-electorale/api/pays').then(r => r.json()).then(function(data) {
                 fillSelect(ceDept, data, true);
                 if (savedDeptId) {
                     ceDept.value = savedDeptId;
-                    var url2 = etr
-                        ? '/carte-electorale/api/villes/' + encodeURIComponent(savedDeptId)
-                        : '/geo/departement/' + savedDeptId + '/arrondissements';
-                    return fetch(url2).then(r => r.json());
+                    return fetch('/carte-electorale/api/villes/' + encodeURIComponent(savedDeptId)).then(r => r.json());
                 }
-            })
-            .then(function(data) {
-                if (!data || !savedDeptId) return;
-                fillSelect(ceArr, data, true);
-                if (savedArrId && !etr) {
-                    ceArr.value = savedArrId;
-                    return fetch('/geo/arrondissement/' + savedArrId + '/communes').then(r => r.json());
-                }
-            })
-            .then(function(data) {
-                if (!data || !savedArrId) return;
-                fillSelect(ceCommune, data, true);
+            }).then(function(data) {
+                if (data) fillSelect(ceArr, data, true);
             });
+        } else {
+            // National: client-side restoration
+            var depts = allDepts.filter(d => d.region_id == savedRegionId);
+            fillSelect(ceDept, depts, true);
+            if (savedDeptId) {
+                ceDept.value = savedDeptId;
+                var arrs = allArrs.filter(a => a.departement_id == savedDeptId);
+                fillSelect(ceArr, arrs, true);
+                if (savedArrId) {
+                    ceArr.value = savedArrId;
+                    var communes = allCommunes.filter(c => c.arrondissement_id == savedArrId);
+                    fillSelect(ceCommune, communes, true);
+                }
+            }
+        }
     }
 })();
 </script>
