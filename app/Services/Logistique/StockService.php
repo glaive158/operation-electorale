@@ -22,7 +22,9 @@ use LogicException;
  * Au-dessus du physique, deux engagements par cycle :
  *  - réservé : stock promis à des expéditions (réservations actives) ;
  *  - attribué : stock libre mis de côté pour un cycle ouvert.
- * Invariant tenu à chaque écriture : attribué (tous cycles) <= libre = physique - réservé.
+ * Invariant tenu à chaque écriture : réservé + attribué (tous cycles) <= physique (état bon),
+ * soit libre >= attribué. Une réservation ou une attribution ne dépasse jamais le libre, et un
+ * mouvement négatif (sortie, compensation...) ne fait jamais passer le physique sous l'engagé.
  *
  * Ordre des verrous, identique partout pour éviter les interblocages :
  * cycle (partagé, exclusif pour la clôture) puis matériel(s), par id croissant.
@@ -78,6 +80,7 @@ class StockService
      */
     public function attribuer(Cycle $cycle, Materiel $materiel, int $quantite, string $motif): AttributionStock
     {
+        $this->exigerAuteur();
         if ($quantite < 0) {
             throw new InvalidArgumentException('La quantité attribuée à un cycle ne peut pas être négative.');
         }
@@ -177,6 +180,8 @@ class StockService
      */
     public function liberer(ReservationStock $reservation, string $motif, bool $versStockCommun = false): void
     {
+        $this->exigerAuteur();
+
         DB::transaction(function () use ($reservation, $motif, $versStockCommun) {
             $cycle = $this->cycleVerrouille($reservation->cycle_id);
             Materiel::whereKey($reservation->materiel_id)->lockForUpdate()->firstOrFail();
@@ -214,6 +219,8 @@ class StockService
      */
     public function cloturerCycle(Cycle $cycle, string $motif): void
     {
+        $this->exigerAuteur();
+
         DB::transaction(function () use ($cycle, $motif) {
             $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->firstOrFail();
             if (! $actuel->estOuvert()) {
@@ -332,6 +339,18 @@ class StockService
                 ));
             }
 
+            // Le physique bon ne descend jamais sous le stock engagé (réservé + attribué).
+            if ($etat === 'bon' && $quantite < 0) {
+                $reserve = $this->reserveVerrouille($materiel);
+                $attribue = $this->attribueVerrouille($materiel);
+                if ($solde < $reserve + $attribue) {
+                    throw new StockInsuffisant(
+                        "Stock engagé pour {$materiel->libelle} : réservé {$reserve}, attribué {$attribue}, "
+                        . "physique après mouvement {$solde} — mouvement impossible."
+                    );
+                }
+            }
+
             return MouvementStock::create([
                 'materiel_id'           => $materiel->id,
                 'type'                  => $type,
@@ -356,6 +375,16 @@ class StockService
             ->where('etat', $etat)
             ->lockForUpdate()
             ->sum('quantite');
+    }
+
+    /**
+     * Toute écriture d'engagement est imputable : sans utilisateur connecté, le journal serait anonyme.
+     */
+    private function exigerAuteur(): void
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Opération de stock sans auteur.');
+        }
     }
 
     /*

@@ -318,6 +318,131 @@ class ReservationsTest extends TestCase
         $this->assertSame(0, ReservationStock::count());
     }
 
+    public function test_sortie_qui_entamerait_le_stock_reserve_refusee(): void
+    {
+        $urne = $this->urne(500);
+        $a = $this->cycle('Cycle A');
+        $this->stock->reserver($a, $urne, 400);
+
+        try {
+            $this->stock->enregistrer($urne, 'sortie_expedition', -200, null, 'Sortie');
+            $this->fail('Une StockInsuffisant était attendue.');
+        } catch (StockInsuffisant $e) {
+            $this->assertSame(
+                'Stock engagé pour Urne : réservé 400, attribué 0, physique après mouvement 300 — mouvement impossible.',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(500, $this->stock->physique($urne));
+        $this->assertSame(100, $this->stock->libre($urne));
+
+        // Dans la limite du libre, la sortie passe comme avant.
+        $this->stock->enregistrer($urne, 'sortie_expedition', -100, null, 'Sortie du libre');
+        $this->assertSame(400, $this->stock->physique($urne));
+        $this->assertSame(0, $this->stock->libre($urne));
+    }
+
+    public function test_compensation_qui_entamerait_le_stock_attribue_refusee(): void
+    {
+        $urne = Materiel::create(['libelle' => 'Urne', 'categorie' => 'materiel_lourd']);
+        $inventaire = $this->stock->inventaireInitial($urne, 100, 'Inventaire');
+        $a = $this->cycle('Cycle A');
+        $this->stock->attribuer($a, $urne, 100, 'Dotation');
+
+        try {
+            $this->stock->compenser($inventaire, 'Erreur de saisie');
+            $this->fail('Une StockInsuffisant était attendue.');
+        } catch (StockInsuffisant $e) {
+            $this->assertSame(
+                'Stock engagé pour Urne : réservé 0, attribué 100, physique après mouvement 0 — mouvement impossible.',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(100, $this->stock->physique($urne));
+        $this->assertSame(1, MouvementStock::count());
+    }
+
+    public function test_reservation_sur_attribution_apres_sortie_refusee(): void
+    {
+        $urne = $this->urne(500);
+        $a = $this->cycle('Cycle A');
+        $this->stock->reserver($a, $urne, 400);
+        try {
+            $this->stock->enregistrer($urne, 'sortie_expedition', -200, null, 'Sortie');
+        } catch (StockInsuffisant) {
+            // Refus attendu : rien n'a bougé.
+        }
+
+        $this->stock->attribuer($a, $urne, 100, 'Dotation');
+        $r = $this->stock->reserver($a, $urne, 50);
+
+        $this->assertSame(50, $r->quantite_sur_attribution);
+        $this->assertSame(450, $this->stock->reserve($urne));
+        $this->assertSame(50, $this->stock->attribue($urne, $a));
+        $this->assertSame(0, $this->stock->libreNonAttribue($urne));
+    }
+
+    public function test_mouvement_a_reparer_non_concerne_par_l_engagement(): void
+    {
+        $urne = $this->urne(100);
+        $a = $this->cycle('Cycle A');
+        $this->stock->attribuer($a, $urne, 100, 'Dotation');
+        $this->stock->enregistrer($urne, 'reclassement', 5, null, 'Urnes abîmées', 'a_reparer');
+
+        $this->stock->enregistrer($urne, 'reforme', -5, null, 'Réforme', 'a_reparer');
+
+        $this->assertSame(0, $this->stock->physique($urne, 'a_reparer'));
+        $this->assertSame(100, $this->stock->physique($urne));
+    }
+
+    public function test_attribution_sans_auteur_refusee(): void
+    {
+        $urne = $this->urne(100);
+        $a = $this->cycle('Cycle A');
+        auth()->logout();
+
+        try {
+            $this->stock->attribuer($a, $urne, 10, 'Dotation');
+            $this->fail('Une LogicException était attendue.');
+        } catch (LogicException $e) {
+            $this->assertSame('Opération de stock sans auteur.', $e->getMessage());
+        }
+        $this->assertSame(0, AttributionStock::count());
+    }
+
+    public function test_liberation_sans_auteur_refusee(): void
+    {
+        $urne = $this->urne(100);
+        $a = $this->cycle('Cycle A');
+        $r = $this->stock->reserver($a, $urne, 10);
+        auth()->logout();
+
+        try {
+            $this->stock->liberer($r, 'Annulation');
+            $this->fail('Une LogicException était attendue.');
+        } catch (LogicException $e) {
+            $this->assertSame('Opération de stock sans auteur.', $e->getMessage());
+        }
+        $this->assertSame('active', $r->fresh()->statut);
+    }
+
+    public function test_cloture_sans_auteur_refusee(): void
+    {
+        $a = $this->cycle('Cycle A');
+        auth()->logout();
+
+        try {
+            $this->stock->cloturerCycle($a, 'Fin');
+            $this->fail('Une LogicException était attendue.');
+        } catch (LogicException $e) {
+            $this->assertSame('Opération de stock sans auteur.', $e->getMessage());
+        }
+        $this->assertSame('ouvert', $a->fresh()->statut);
+        $this->assertSame(0, JournalEntree::where('objet_type', 'cycle')->count());
+    }
+
     public function test_suppression_d_un_utilisateur_auteur_de_reservation_refusee(): void
     {
         $urne = $this->urne(100);
