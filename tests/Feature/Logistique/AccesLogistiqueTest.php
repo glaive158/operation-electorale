@@ -11,6 +11,8 @@ use App\Services\Logistique\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Route;
+use RuntimeException;
 use Tests\TestCase;
 
 class AccesLogistiqueTest extends TestCase
@@ -151,5 +153,56 @@ class AccesLogistiqueTest extends TestCase
             $this->assertSame('Logistique centrale', User::factory()->make(['role' => $role])->zone_label);
         }
         $this->assertSame('Toutes zones', User::factory()->make(['role' => 'admin'])->zone_label);
+    }
+
+    public function test_retour_arriere_de_la_migration_des_roles_refuse_avec_des_comptes_logistique(): void
+    {
+        User::factory()->create(['role' => 'logistique_responsable']);
+        $migration = require base_path('database/migrations/2026_11_01_100001_add_logistique_roles_to_users.php');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('des comptes logistique existent');
+        $migration->down();
+    }
+
+    public function test_compte_logistique_ferme_a_toutes_les_pages_existantes(): void
+    {
+        $exclues = ['login', 'logout', 'dashboard', 'profile'];
+        $routes = collect(Route::getRoutes()->getRoutes())
+            ->filter(fn ($r) => in_array('GET', $r->methods(), true))
+            ->filter(fn ($r) => $r->getName() !== null)
+            // Pages de l'application seulement : pas les routes du framework (sanctum, storage, up...).
+            ->filter(fn ($r) => str_starts_with($r->getActionName(), 'App\\Http\\Controllers\\'))
+            ->reject(fn ($r) => str_starts_with($r->getName(), 'logistique.'))
+            ->reject(fn ($r) => in_array($r->getName(), $exclues, true) || str_starts_with($r->getName(), 'profile.'))
+            ->filter(fn ($r) => $r->parameterNames() === [])
+            ->values();
+
+        $this->assertGreaterThan(8, $routes->count(), 'Le parcours des routes existantes est vide : le filtre est faux.');
+
+        foreach (['logistique_gestionnaire', 'logistique_responsable'] as $role) {
+            $compte = User::factory()->create(['role' => $role]);
+            foreach ($routes as $route) {
+                $statut = $this->actingAs($compte)->get($route->uri())->getStatusCode();
+                $this->assertTrue(
+                    $statut === 403 || ($statut >= 300 && $statut < 400),
+                    "{$role} atteint {$route->getName()} (HTTP {$statut}).",
+                );
+            }
+        }
+    }
+
+    public function test_tableau_de_bord_dirige_les_comptes_logistique_vers_le_stock(): void
+    {
+        $g = User::factory()->create(['role' => 'logistique_gestionnaire']);
+        $this->actingAs($g)->get(route('dashboard'))->assertRedirect(route('logistique.stock.index'));
+        $this->actingAs($g)->get('/dashboard')->assertRedirect(route('logistique.stock.index'));
+    }
+
+    public function test_pages_existantes_inchangees_pour_un_prefet(): void
+    {
+        $p = User::factory()->create(['role' => 'prefet']);
+        $this->actingAs($p)->get(route('operations.index'))->assertOk();
+        $this->actingAs($p)->get(route('dashboard'))->assertOk();
     }
 }
