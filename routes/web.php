@@ -9,6 +9,8 @@ use App\Http\Controllers\ChargeElectoraleController;
 use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
+use App\Http\Controllers\Logistique\CycleController;
+use App\Http\Controllers\Logistique\MaterielController;
 use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
@@ -104,6 +106,13 @@ Route::middleware(['auth'])->group(function () {
     /* ── Logistique matériel électoral ── */
     Route::middleware('can:logistique-gerer')->prefix('logistique')->name('logistique.')->group(function () {
         Route::get('stock', [StockController::class, 'index'])->name('stock.index');
+
+        Route::resource('materiels', MaterielController::class)->except(['show', 'destroy']);
+
+        Route::middleware('can:logistique-administrer')->group(function () {
+            Route::resource('cycles', CycleController::class)->only(['create', 'store', 'edit', 'update']);
+        });
+        Route::resource('cycles', CycleController::class)->only(['index']);
     });
 
 });
