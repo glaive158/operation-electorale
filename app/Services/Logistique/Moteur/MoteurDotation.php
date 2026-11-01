@@ -4,11 +4,15 @@ namespace App\Services\Logistique\Moteur;
 
 /**
  * Calcul pur d'une dotation : aucune base de données, aucun flottant.
- * Toutes les opérations intermédiaires utilisent bcmath à l'échelle 6.
+ * Les opérations intermédiaires utilisent bcmath à l'échelle 6 ; le produit par le facteur de
+ * majoration (4 décimales × 4 décimales) est calculé à l'échelle 8, sans troncature avant le plafond.
  */
 class MoteurDotation
 {
     private const ECHELLE = 6;
+
+    /** Ratio (4 décimales) × facteur (4 décimales) : le produit est exact à 8 décimales. */
+    private const ECHELLE_MAJOREE = 8;
 
     private const MULTIPLES = ['unite' => 1, 'dizaine' => 10, 'cinquantaine' => 50, 'centaine' => 100];
 
@@ -41,14 +45,14 @@ class MoteurDotation
                     continue;
                 }
                 $exactC = bcmul((string) $u, $p->ratio, self::ECHELLE);
-                $majoreC = bcmul($exactC, $facteur, self::ECHELLE);
+                $majoreC = bcmul($exactC, $facteur, self::ECHELLE_MAJOREE);
                 $exact = bcadd($exact, $exactC, self::ECHELLE);
-                $majore = bcadd($majore, $majoreC, self::ECHELLE);
-                $brut = bcadd($brut, $this->maximum((string) $p->minimum, $majoreC), self::ECHELLE);
+                $majore = bcadd($majore, $majoreC, self::ECHELLE_MAJOREE);
+                $brut = bcadd($brut, $this->maximum((string) $p->minimum, $majoreC), self::ECHELLE_MAJOREE);
             }
         } else {
             $exact = bcmul((string) $unites, $p->ratio, self::ECHELLE);
-            $majore = bcmul($exact, $facteur, self::ECHELLE);
+            $majore = bcmul($exact, $facteur, self::ECHELLE_MAJOREE);
             $brut = $this->maximum((string) $p->minimum, $majore);
         }
 
@@ -77,16 +81,16 @@ class MoteurDotation
 
     private function maximum(string $a, string $b): string
     {
-        return bccomp($a, $b, self::ECHELLE) >= 0 ? $a : $b;
+        return bccomp($a, $b, self::ECHELLE_MAJOREE) >= 0 ? $a : $b;
     }
 
     /** Partie entière, + 1 si le reste est strictement positif. */
     private function plafond(string $valeur): int
     {
         $entier = bcadd($valeur, '0', 0);
-        $reste = bcsub($valeur, $entier, self::ECHELLE);
+        $reste = bcsub($valeur, $entier, self::ECHELLE_MAJOREE);
 
-        return (int) (bccomp($reste, '0', self::ECHELLE) > 0 ? bcadd($entier, '1', 0) : $entier);
+        return (int) (bccomp($reste, '0', self::ECHELLE_MAJOREE) > 0 ? bcadd($entier, '1', 0) : $entier);
     }
 
     private function multipleSuperieur(int $n, int $multiple): int

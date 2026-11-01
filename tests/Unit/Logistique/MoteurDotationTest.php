@@ -51,6 +51,27 @@ class MoteurDotationTest extends TestCase
         $this->assertSame(4769, $r->dotation);
     }
 
+    public function test_majoration_calculee_sans_troncature_avant_le_plafond(): void
+    {
+        // 9 999,0001 × 1,0001 = 10 000,00000001 : huit décimales, tronquées à six on perdrait une unité.
+        $r = (new MoteurDotation)->doter(
+            $this->cle(['base' => 'electeur', 'ratio' => '9999.0001', 'majoration' => '0.01']),
+            [$this->loc(1)],
+            1,
+        );
+
+        $this->assertSame('9999.0001', $r->exact);
+        $this->assertSame('10000.0000', $r->majore);
+        $this->assertSame(10001, $r->dotation);
+
+        $parCommune = (new MoteurDotation)->doter(
+            $this->cle(['base' => 'electeur', 'ratio' => '9999.0001', 'majoration' => '0.01', 'minimumParCommune' => true, 'minimum' => 1]),
+            [$this->loc(1), $this->loc(1)],
+            1,
+        );
+        $this->assertSame(20001, $parCommune->dotation);
+    }
+
     public function test_aucune_erreur_de_flottant(): void
     {
         $moteur = new MoteurDotation;
