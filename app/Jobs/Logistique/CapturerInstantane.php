@@ -46,7 +46,7 @@ class CapturerInstantane implements ShouldQueue
             ->where('statut', 'en_cours')
             ->update([
                 'statut' => 'echec',
-                'erreur' => mb_substr($exception?->getMessage() ?: 'Capture interrompue.', 0, 1000),
+                'erreur' => InstantaneService::messageEchec($exception),
             ]);
     }
 }

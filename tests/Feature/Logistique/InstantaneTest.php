@@ -18,6 +18,7 @@ use App\Services\Logistique\DecoupageService;
 use App\Services\Logistique\InstantaneService;
 use App\Services\Logistique\LectureRecensement;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Queue;
 use LogicException;
@@ -368,7 +369,8 @@ class InstantaneTest extends TestCase
         $i = $this->capturer();
 
         $this->assertSame('echec', $i->statut);
-        $this->assertSame('Base du recensement indisponible', $i->erreur);
+        // Message générique : le détail (éventuellement une requête SQL) reste au journal du serveur.
+        $this->assertSame('Échec de la capture, voir le journal du serveur. (RuntimeException)', $i->erreur);
         $this->assertSame(0, InstantaneLigne::count());
 
         // Un échec ne bloque pas la capture suivante.
@@ -415,6 +417,76 @@ class InstantaneTest extends TestCase
         $this->assertSame(3600, (new CapturerInstantane(1))->timeout);
         $this->assertSame(1, (new CapturerInstantane(1))->tries);
         $this->assertGreaterThan(3600, config('queue.connections.database_long.retry_after'));
+    }
+
+    public function test_capture_dediee_a_la_file_longue_par_defaut(): void
+    {
+        $nom = 'LOGISTIQUE_QUEUE_CAPTURE';
+        $sauvegarde = [$_ENV[$nom] ?? null, $_SERVER[$nom] ?? null, getenv($nom)];
+        unset($_ENV[$nom], $_SERVER[$nom]);
+        putenv($nom);
+        try {
+            $config = require config_path('logistique.php');
+        } finally {
+            [$env, $server, $put] = $sauvegarde;
+            if ($env !== null) {
+                $_ENV[$nom] = $env;
+            }
+            if ($server !== null) {
+                $_SERVER[$nom] = $server;
+            }
+            if ($put !== false) {
+                putenv("{$nom}={$put}");
+            }
+        }
+
+        $this->assertSame('database_long', $config['queue_capture']);
+        // Les tests forcent une valeur vide : capture synchrone.
+        $this->assertNull(config('logistique.queue_capture'));
+    }
+
+    public function test_capture_en_cours_expiree_apres_70_minutes(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow('2026-11-02 08:00:00');
+        try {
+            $ancien = $this->service()->demarrer($this->cycle);
+
+            Carbon::setTestNow('2026-11-02 09:09:59');
+            try {
+                $this->service()->demarrer($this->cycle);
+                $this->fail('Une capture de moins de 70 minutes bloque la suivante.');
+            } catch (RegleLogistique $e) {
+                $this->assertSame('Une capture est déjà en cours pour ce cycle.', $e->getMessage());
+            }
+            $this->assertSame('en_cours', $ancien->fresh()->statut);
+
+            Carbon::setTestNow('2026-11-02 09:10:01');
+            $nouveau = $this->service()->demarrer($this->cycle);
+        } finally {
+            Carbon::setTestNow();
+        }
+
+        $this->assertSame(2, $nouveau->version);
+        $this->assertSame('en_cours', $nouveau->statut);
+        $ancien->refresh();
+        $this->assertSame('echec', $ancien->statut);
+        $this->assertSame('Capture expirée (aucun résultat après 70 minutes).', $ancien->erreur);
+        $entree = JournalEntree::where('objet_type', 'instantane_effectifs')->where('objet_id', $ancien->id)
+            ->where('action', 'expiration_instantane')->sole();
+        $this->assertSame($this->utilisateur->id, $entree->user_id);
+        $this->assertSame('echec', $entree->apres['statut']);
+    }
+
+    public function test_arret_du_job_ne_stocke_pas_le_texte_de_l_erreur(): void
+    {
+        Queue::fake();
+        $i = $this->service()->demarrer($this->cycle);
+
+        (new CapturerInstantane($i->id))->failed(new RuntimeException('SQLSTATE[HY000]: select * from fichier_electoral'));
+
+        $this->assertSame('echec', $i->fresh()->statut);
+        $this->assertSame('Échec de la capture, voir le journal du serveur. (RuntimeException)', $i->fresh()->erreur);
     }
 
     public function test_demarrer_refuse_un_cycle_clos(): void

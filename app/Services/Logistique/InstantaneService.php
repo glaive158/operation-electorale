@@ -24,6 +24,13 @@ class InstantaneService
 
     public const ETRANGER = 'Étranger';
 
+    /** Délai du job (3600 s) plus une marge : au-delà, une capture « en cours » n'aboutira plus. */
+    public const EXPIRATION_SECONDES = 3600 + 600;
+
+    public const MESSAGE_EXPIRATION = 'Capture expirée (aucun résultat après 70 minutes).';
+
+    public const MESSAGE_ECHEC = 'Échec de la capture, voir le journal du serveur.';
+
     public function __construct(
         private readonly LectureRecensement $recensement,
         private readonly CorrespondanceService $correspondances,
@@ -37,6 +44,7 @@ class InstantaneService
 
         $instantane = DB::transaction(function () use ($cycle) {
             $this->verrouillerCycleOuvert($cycle, 'Cycle clôturé : capture impossible.');
+            $this->expirerCapturesAnciennes($cycle);
 
             if (InstantaneEffectifs::where('cycle_id', $cycle->id)->where('statut', 'en_cours')->exists()) {
                 throw new RegleLogistique('Une capture est déjà en cours pour ce cycle.');
@@ -307,14 +315,43 @@ class InstantaneService
         }
     }
 
+    /**
+     * Message conservé sur l'instantané en échec : une règle métier garde son texte ; toute autre
+     * erreur (base, file) reste au journal du serveur, seul le type d'erreur est indiqué.
+     */
+    public static function messageEchec(?Throwable $e): string
+    {
+        if ($e instanceof RegleLogistique) {
+            return mb_substr($e->getMessage(), 0, 1000);
+        }
+
+        return $e === null ? self::MESSAGE_ECHEC : self::MESSAGE_ECHEC.' ('.class_basename($e).')';
+    }
+
     /** Hors de toute transaction applicative : le statut « echec » doit survivre à l'annulation. */
     private function marquerEchec(InstantaneEffectifs $instantane, Throwable $e): void
     {
         InstantaneEffectifs::whereKey($instantane->id)
             ->where('statut', 'en_cours')
-            ->update(['statut' => 'echec', 'erreur' => mb_substr($e->getMessage() ?: $e::class, 0, 1000)]);
+            ->update(['statut' => 'echec', 'erreur' => self::messageEchec($e)]);
 
         $instantane->refresh();
+    }
+
+    /** À appeler dans la transaction de demarrer : une capture restée « en cours » trop longtemps passe en échec. */
+    private function expirerCapturesAnciennes(Cycle $cycle): void
+    {
+        $limite = now()->subSeconds(self::EXPIRATION_SECONDES);
+        $expirees = InstantaneEffectifs::where('cycle_id', $cycle->id)->where('statut', 'en_cours')
+            ->where('created_at', '<', $limite)->lockForUpdate()->get();
+
+        foreach ($expirees as $instantane) {
+            $instantane->forceFill(['statut' => 'echec', 'erreur' => self::MESSAGE_EXPIRATION])->save();
+            Journal::noter('instantane_effectifs', $instantane->id, 'expiration_instantane', ['statut' => 'en_cours'], [
+                'statut' => 'echec', 'cycle_id' => $cycle->id, 'version' => $instantane->version,
+                'demarre_le' => $instantane->created_at?->toDateTimeString(),
+            ]);
+        }
     }
 
     /** À appeler dans une transaction : verrouille le cycle et refuse s'il est clos. */
