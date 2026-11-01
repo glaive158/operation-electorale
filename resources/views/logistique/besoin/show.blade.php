@@ -18,6 +18,19 @@
             <a href="{{ route('logistique.plans.index', $cycle) }}" class="underline">Voir les plans</a>
         </div>
     @else
+        @if($brouillons->isNotEmpty())
+            <div class="p-4 rounded-xl border border-amber-200 bg-amber-50 text-sm text-amber-800">
+                <p class="font-semibold">Des commandes brouillon existent déjà pour ce cycle.</p>
+                <ul class="list-disc ml-5 mt-1">
+                    @foreach($brouillons as $c)
+                        <li>
+                            <a href="{{ route('logistique.commandes.show', $c) }}" class="underline">{{ $c->reference }}</a>
+                            — {{ $c->date_commande?->format('d/m/Y') }} — {{ $c->lignes_count }} {{ $c->lignes_count > 1 ? 'lignes' : 'ligne' }}
+                        </li>
+                    @endforeach
+                </ul>
+            </div>
+        @endif
         <form method="POST" action="{{ route('logistique.besoin.commander', $cycle) }}" class="space-y-5">
             @csrf
             <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">

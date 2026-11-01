@@ -22,6 +22,7 @@ class BesoinController extends Controller
             'cycle' => $cycle,
             'plan' => PlanDotation::courantApprouve($cycle),
             'tableau' => $this->besoin->tableau($cycle),
+            'brouillons' => $this->besoin->commandesBrouillon($cycle),
         ]);
     }
 

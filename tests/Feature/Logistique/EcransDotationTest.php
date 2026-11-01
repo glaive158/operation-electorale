@@ -171,6 +171,24 @@ class EcransDotationTest extends TestCase
         $this->assertSame($this->cycle->id, $commande->lignes()->firstOrFail()->cycle_id);
     }
 
+    public function test_commandes_brouillon_du_cycle_rappelees_avant_la_proposition(): void
+    {
+        app(PlanDotationService::class)->approuver($this->plan);
+        $this->get(route('logistique.besoin.show', $this->cycle))
+            ->assertOk()->assertDontSee('Des commandes brouillon existent déjà pour ce cycle.');
+
+        $this->post(route('logistique.besoin.commander', $this->cycle), [
+            'reference' => 'CMD-DOT-1', 'fournisseur' => 'Imprimerie nationale', 'date_commande' => '2026-11-10',
+            'quantites' => [$this->urnes->id => 31],
+        ])->assertRedirect();
+        Commande::create(['reference' => 'CMD-HORS-CYCLE', 'fournisseur' => 'Autre', 'date_commande' => '2026-11-11', 'user_id' => $this->responsable->id]);
+
+        $this->get(route('logistique.besoin.show', $this->cycle))
+            ->assertOk()
+            ->assertSeeInOrder(['Des commandes brouillon existent déjà pour ce cycle.', 'CMD-DOT-1', '10/11/2026', '1 ligne', 'Proposition'])
+            ->assertDontSee('CMD-HORS-CYCLE');
+    }
+
     public function test_gestionnaire_ne_modifie_pas_les_cles(): void
     {
         $this->actingAs($this->gestionnaire);

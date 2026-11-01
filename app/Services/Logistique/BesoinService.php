@@ -141,6 +141,21 @@ class BesoinService
     }
 
     /**
+     * Commandes brouillon déjà rattachées au cycle (au moins une ligne), pour éviter une double
+     * conversion de la proposition. Lecture seule.
+     *
+     * @return Collection<int, Commande>
+     */
+    public function commandesBrouillon(Cycle $cycle): Collection
+    {
+        return Commande::where('statut', 'brouillon')
+            ->whereHas('lignes', fn ($q) => $q->where('cycle_id', $cycle->id))
+            ->withCount('lignes')
+            ->orderBy('date_commande')->orderBy('id')
+            ->get();
+    }
+
+    /**
      * Transforme la proposition en commande brouillon affectée au cycle.
      *
      * @param  array<string, mixed>  $entete  reference, fournisseur, date_commande
