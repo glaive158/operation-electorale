@@ -16,6 +16,14 @@ class Commande extends Model
 
     public const STATUTS = ['brouillon', 'confirmee', 'partiellement_recue', 'recue', 'annulee'];
 
+    public const LIBELLES_STATUT = [
+        'brouillon'           => 'Brouillon',
+        'confirmee'           => 'Confirmée',
+        'partiellement_recue' => 'Partiellement reçue',
+        'recue'               => 'Reçue',
+        'annulee'             => 'Annulée',
+    ];
+
     protected $fillable = ['reference', 'fournisseur', 'date_commande', 'statut', 'user_id'];
 
     protected $attributes = [

@@ -4,6 +4,7 @@
 
 @section('content')
 <div class="space-y-5">
+    @include('logistique._erreurs')
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
             <h3 class="font-semibold text-slate-800">{{ $cycles->count() }} cycle(s)</h3>
@@ -43,7 +44,20 @@
                             </td>
                             @can('logistique-administrer')
                                 <td class="px-5 py-3">
-                                    <a href="{{ route('logistique.cycles.edit', $c) }}" class="px-2.5 py-1 rounded text-xs text-white hover:opacity-90" style="background:#0284c7;">Modifier</a>
+                                    @if($c->estOuvert())
+                                        <div class="flex flex-wrap gap-2 items-center">
+                                            <a href="{{ route('logistique.cycles.edit', $c) }}" class="px-2.5 py-1 rounded text-xs text-white hover:opacity-90" style="background:#0284c7;">Modifier</a>
+                                            <form method="POST" action="{{ route('logistique.cycles.cloturer', $c) }}" class="flex gap-2 items-center"
+                                                  onsubmit="return confirm('Clôturer ce cycle ? Ses réservations et attributions retournent au stock commun.');">
+                                                @csrf
+                                                <input type="text" name="motif" required maxlength="500" placeholder="Motif de la clôture" aria-label="Motif de la clôture"
+                                                       class="w-48 px-2 py-1 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-green-500">
+                                                <button type="submit" class="px-2.5 py-1 rounded text-xs text-white hover:opacity-90" style="background:#EE1C25;">Clôturer</button>
+                                            </form>
+                                        </div>
+                                    @else
+                                        <span class="text-xs text-slate-400">Clôturé{{ $c->clos_le ? ' le '.$c->clos_le->format('d/m/Y') : '' }}</span>
+                                    @endif
                                 </td>
                             @endcan
                         </tr>

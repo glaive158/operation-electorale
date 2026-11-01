@@ -9,9 +9,14 @@ class Cycle extends Model
 {
     protected $table = 'cycles_electoraux';
 
+    // statut et clos_le ne sont pas assignables en masse : la clôture passe par StockService::cloturerCycle.
     protected $fillable = [
-        'libelle', 'type', 'date_scrutin', 'statut',
-        'majoration_distribuee', 'reserve_centrale', 'circuit_defaut', 'clos_le',
+        'libelle', 'type', 'date_scrutin',
+        'majoration_distribuee', 'reserve_centrale', 'circuit_defaut',
+    ];
+
+    protected $attributes = [
+        'statut' => 'ouvert',
     ];
 
     protected function casts(): array

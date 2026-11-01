@@ -254,7 +254,8 @@ class StockService
             $liberees = ReservationStock::where('cycle_id', $actuel->id)->where('statut', 'active')->update(['statut' => 'liberee']);
             $attributions = AttributionStock::where('cycle_id', $actuel->id)->where('quantite', '>', 0)->update(['quantite' => 0]);
 
-            $actuel->update(['statut' => 'clos', 'clos_le' => now()]);
+            // statut et clos_le ne sont pas assignables en masse : la clôture n'a que ce chemin.
+            $actuel->forceFill(['statut' => 'clos', 'clos_le' => now()])->save();
 
             Journal::noter(
                 'cycle', $actuel->id, 'cloture',

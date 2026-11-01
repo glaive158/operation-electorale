@@ -5,10 +5,15 @@ namespace App\Http\Controllers\Logistique;
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Cycle;
 use App\Services\Logistique\Journal;
+use App\Services\Logistique\StockService;
 use Illuminate\Http\Request;
 
 class CycleController extends Controller
 {
+    use ExecuteAction;
+
+    private const CYCLE_CLOS = 'Cycle clôturé : modification impossible.';
+
     public function index()
     {
         $cycles = Cycle::orderByDesc('date_scrutin')->orderByDesc('id')->get();
@@ -31,16 +36,34 @@ class CycleController extends Controller
 
     public function edit(Cycle $cycle)
     {
+        if (! $cycle->estOuvert()) {
+            return redirect()->route('logistique.cycles.index')->with('error', self::CYCLE_CLOS);
+        }
+
         return view('logistique.cycles.edit', compact('cycle'));
     }
 
     public function update(Request $request, Cycle $cycle)
     {
+        if (! $cycle->estOuvert()) {
+            return redirect()->route('logistique.cycles.index')->with('error', self::CYCLE_CLOS);
+        }
+
         $avant = $cycle->only($cycle->getFillable());
         $cycle->update($this->valider($request));
         Journal::noter('cycle', $cycle->id, 'modification', $avant, $cycle->only($cycle->getFillable()));
 
         return redirect()->route('logistique.cycles.index')->with('success', 'Cycle mis à jour.');
+    }
+
+    public function cloturer(Request $request, Cycle $cycle, StockService $stock)
+    {
+        $donnees = $request->validate(['motif' => 'required|string|max:500']);
+
+        return $this->executer(
+            fn () => $stock->cloturerCycle($cycle, $donnees['motif']),
+            'Cycle clôturé.',
+        );
     }
 
     private function valider(Request $request): array

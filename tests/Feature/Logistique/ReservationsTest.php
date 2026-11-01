@@ -131,7 +131,7 @@ class ReservationsTest extends TestCase
             $this->assertSame(0, AttributionStock::count());
         }
 
-        $a->update(['statut' => 'clos']);
+        $a->forceFill(['statut' => 'clos'])->save();
         $this->expectException(RegleLogistique::class);
         $this->expectExceptionMessage('Cycle clos : attribution impossible.');
         $this->stock->attribuer($a, $urne, 10, 'Dotation');

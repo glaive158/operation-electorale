@@ -9,6 +9,7 @@ use App\Http\Controllers\ChargeElectoraleController;
 use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
+use App\Http\Controllers\Logistique\CommandeController;
 use App\Http\Controllers\Logistique\CycleController;
 use App\Http\Controllers\Logistique\MaterielController;
 use App\Http\Controllers\Logistique\StockController;
@@ -106,10 +107,25 @@ Route::middleware(['auth'])->group(function () {
     /* ── Logistique matériel électoral ── */
     Route::middleware('can:logistique-gerer')->prefix('logistique')->name('logistique.')->group(function () {
         Route::get('stock', [StockController::class, 'index'])->name('stock.index');
+        Route::get('stock/{materiel}/mouvements', [StockController::class, 'mouvements'])->name('stock.mouvements');
+        Route::post('stock/inventaire', [StockController::class, 'inventaire'])->name('stock.inventaire');
 
         Route::resource('materiels', MaterielController::class)->except(['show', 'destroy']);
 
+        Route::get('commandes', [CommandeController::class, 'index'])->name('commandes.index');
+        Route::get('commandes/create', [CommandeController::class, 'create'])->name('commandes.create');
+        Route::post('commandes', [CommandeController::class, 'store'])->name('commandes.store');
+        Route::get('commandes/{commande}', [CommandeController::class, 'show'])->name('commandes.show');
+        Route::post('commandes/{commande}/confirmation', [CommandeController::class, 'confirmer'])->name('commandes.confirmer');
+        Route::post('commandes/{commande}/receptions', [CommandeController::class, 'recevoir'])->name('commandes.receptions.store');
+
         Route::middleware('can:logistique-administrer')->group(function () {
+            Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
+            Route::put('cycles/{cycle}/attributions/{materiel}', [StockController::class, 'attribuer'])->name('attributions.update');
+            Route::post('cycles/{cycle}/cloture', [CycleController::class, 'cloturer'])->name('cycles.cloturer');
+            Route::post('commandes/{commande}/annulation', [CommandeController::class, 'annuler'])->name('commandes.annuler');
+            Route::post('commande-lignes/{ligne}/abandon', [CommandeController::class, 'abandonner'])->name('commande-lignes.abandonner');
+
             Route::resource('cycles', CycleController::class)->only(['create', 'store', 'edit', 'update']);
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
