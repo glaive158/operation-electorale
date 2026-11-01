@@ -46,18 +46,26 @@ class BesoinService
         return $plan ? $this->besoinDuPlan($plan, $materiel->id) : 0;
     }
 
-    /** Σ des sorties d'expédition imputées aux réservations du cycle pour cet article. */
+    /**
+     * Σ des sorties d'expédition imputées aux réservations du cycle pour cet article, nette des
+     * compensations de ces sorties (la compensation n'a pas de référence : elle pointe la sortie
+     * qu'elle annule).
+     */
     public function expedie(Cycle $cycle, Materiel $materiel): int
     {
         $reservations = ReservationStock::where('cycle_id', $cycle->id)->where('materiel_id', $materiel->id)->select('id');
-
-        $sorties = (int) MouvementStock::where('materiel_id', $materiel->id)
+        $sorties = fn () => MouvementStock::where('materiel_id', $materiel->id)
             ->where('type', 'sortie_expedition')
             ->where('reference_type', (new ReservationStock)->getTable())
-            ->whereIn('reference_id', $reservations)
+            ->whereIn('reference_id', $reservations);
+
+        $net = (int) MouvementStock::where('materiel_id', $materiel->id)
+            ->where(fn ($q) => $q
+                ->whereIn('id', $sorties()->select('id'))
+                ->orWhere(fn ($c) => $c->where('type', 'compensation')->whereIn('mouvement_compense_id', $sorties()->select('id'))))
             ->sum('quantite');
 
-        return -$sorties;
+        return -$net;
     }
 
     public function resteAExpedier(Cycle $cycle, Materiel $materiel): int

@@ -196,6 +196,48 @@ class BesoinTest extends TestCase
         $this->assertSame(200, $this->besoin()->expedie($autre, $this->urnes));
     }
 
+    public function test_sortie_compensee_n_est_plus_expediee(): void
+    {
+        $this->planUrnes();
+        $this->stock()->inventaireInitial($this->urnes, 1000, 'Stock existant');
+        $reservation = $this->stock()->reserver($this->cycle, $this->urnes, 1000);
+        $reservation->update(['statut' => 'consommee']);
+        $sortie = $this->stock()->enregistrer($this->urnes, 'sortie_expedition', -1000, $reservation);
+        $this->assertSame(1000, $this->besoin()->expedie($this->cycle, $this->urnes));
+
+        $this->stock()->compenser($sortie, 'Saisie erronée');
+
+        $this->assertSame(0, $this->besoin()->expedie($this->cycle, $this->urnes));
+        $this->assertSame(1000, $this->besoin()->resteAExpedier($this->cycle, $this->urnes));
+        $this->assertSame(0, $this->besoin()->surplusExpedie($this->cycle, $this->urnes));
+    }
+
+    public function test_compensation_d_un_autre_mouvement_ne_change_pas_l_expedie(): void
+    {
+        $this->planUrnes();
+        $this->stock()->inventaireInitial($this->urnes, 1000, 'Stock existant');
+        $this->stock()->enregistrer($this->urnes, 'reforme', -10);
+        $reservation = $this->stock()->reserver($this->cycle, $this->urnes, 300);
+        $reservation->update(['statut' => 'consommee']);
+        $this->stock()->enregistrer($this->urnes, 'sortie_expedition', -300, $reservation);
+        $reforme = MouvementStock::where('type', 'reforme')->sole();
+        $this->stock()->compenser($reforme, 'Réforme annulée');
+
+        $this->assertSame(300, $this->besoin()->expedie($this->cycle, $this->urnes));
+    }
+
+    public function test_sortie_d_une_reservation_consommee_compte(): void
+    {
+        $this->planUrnes();
+        $this->stock()->inventaireInitial($this->urnes, 500, 'Stock existant');
+        $reservation = $this->stock()->reserver($this->cycle, $this->urnes, 200);
+        $reservation->update(['statut' => 'consommee']);
+        $this->stock()->enregistrer($this->urnes, 'sortie_expedition', -200, $reservation);
+
+        $this->assertSame('consommee', $reservation->fresh()->statut);
+        $this->assertSame(200, $this->besoin()->expedie($this->cycle, $this->urnes));
+    }
+
     public function test_sans_plan_approuve_tout_est_nul(): void
     {
         $this->assertSame(0, $this->besoin()->besoinExpedition($this->cycle, $this->urnes));
