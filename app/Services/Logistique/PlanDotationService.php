@@ -128,6 +128,9 @@ class PlanDotationService
                         'correction_motif'   => $ancienne?->correction_motif,
                         'corrige_par'        => $ancienne?->corrige_par,
                         'corrige_le'         => $ancienne?->getRawOriginal('corrige_le'),
+                        // Calcul sur lequel la correction a été saisie, conservé de version en version.
+                        'correction_calcul_source' => $ancienne === null ? null
+                            : ($ancienne->correction_calcul_source ?? $ancienne->dotation_calculee),
                         'dotation_approuvee' => null,
                         'created_at'         => $horodatage,
                         'updated_at'         => $horodatage,
@@ -182,10 +185,58 @@ class PlanDotationService
             ];
             $actuelle->forceFill([
                 'correction' => $valeur, 'correction_motif' => $motif, 'corrige_par' => auth()->id(), 'corrige_le' => now(),
+                'correction_calcul_source' => null,
             ])->save();
 
             Journal::noter('plan_dotation_ligne', $actuelle->id, 'correction_dotation', $avant, [
                 'correction' => $valeur, 'plan_dotation_id' => $plan->id, 'version' => $plan->version,
+                'destinataire_id' => $actuelle->destinataire_id, 'materiel_id' => $actuelle->materiel_id,
+            ], $motif);
+        }, attempts: 3);
+
+        $ligne->refresh();
+    }
+
+    /** Retire la correction d'une ligne du brouillon : la dotation calculée s'applique de nouveau. */
+    public function annulerCorrection(PlanDotationLigne $ligne, string $motif): void
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit('logistique-administrer', 'Seul un responsable logistique peut annuler une correction.');
+
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif de l\'annulation est obligatoire (500 caractères au plus).');
+        }
+
+        DB::transaction(function () use ($ligne, $motif) {
+            $cycleId = PlanDotation::whereKey($ligne->plan_dotation_id)->value('cycle_id');
+            if ($cycleId === null) {
+                throw new RegleLogistique('Plan de dotation introuvable.');
+            }
+            $this->verrouillerCycleOuvert((int) $cycleId);
+
+            $plan = PlanDotation::whereKey($ligne->plan_dotation_id)->lockForUpdate()->firstOrFail();
+            if ($plan->statut !== 'brouillon') {
+                throw new RegleLogistique('Seul un plan brouillon peut être corrigé.');
+            }
+
+            $actuelle = PlanDotationLigne::whereKey($ligne->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->correction === null) {
+                throw new RegleLogistique('Cette ligne n\'a pas de correction à annuler.');
+            }
+            $avant = [
+                'correction' => $actuelle->correction, 'correction_motif' => $actuelle->correction_motif,
+                'corrige_par' => $actuelle->corrige_par, 'corrige_le' => $actuelle->getRawOriginal('corrige_le'),
+                'correction_calcul_source' => $actuelle->correction_calcul_source,
+            ];
+            $actuelle->forceFill([
+                'correction' => null, 'correction_motif' => null, 'corrige_par' => null, 'corrige_le' => null,
+                'correction_calcul_source' => null,
+            ])->save();
+
+            Journal::noter('plan_dotation_ligne', $actuelle->id, 'annulation_correction', $avant, [
+                'correction' => null, 'dotation_calculee' => $actuelle->dotation_calculee,
+                'plan_dotation_id' => $plan->id, 'version' => $plan->version,
                 'destinataire_id' => $actuelle->destinataire_id, 'materiel_id' => $actuelle->materiel_id,
             ], $motif);
         }, attempts: 3);

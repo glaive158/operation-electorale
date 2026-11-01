@@ -313,6 +313,37 @@ class EcransDotationTest extends TestCase
         $this->post(route('logistique.plans.store', $autreCycle), ['instantane_id' => $this->instantane->id])->assertSessionHasErrors('instantane_id');
     }
 
+    public function test_corrections_filtrees_signalees_et_annulables_depuis_l_ecran(): void
+    {
+        $enveloppes = Materiel::create(['libelle' => 'Enveloppes', 'categorie' => 'imprime', 'unite_stock' => 'pièce']);
+        app(CleService::class)->enregistrer($this->cycle, $enveloppes, ['base' => 'electeur', 'ratio' => '1', 'majoration_distribuee' => '0']);
+        $v1 = app(PlanDotationService::class)->calculer($this->cycle, $this->instantane);
+        $urnes = PlanDotationLigne::where('plan_dotation_id', $v1->id)->where('materiel_id', $this->urnes->id)->firstOrFail();
+        app(PlanDotationService::class)->corriger($urnes, 40, 'Ajustement');
+
+        // Nouvel instantané : 32 bureaux au lieu de 31.
+        $instantane = $this->instantaneFige(['electeurs_non_rapproches' => 0]);
+        InstantaneLigne::where('instantane_id', $instantane->id)->update(['bureaux_vote' => 32]);
+        $v2 = app(PlanDotationService::class)->calculer($this->cycle, $instantane);
+        $reprise = PlanDotationLigne::where('plan_dotation_id', $v2->id)->where('materiel_id', $this->urnes->id)->firstOrFail();
+
+        $this->get(route('logistique.plans.show', [$v2, 'corrigees' => 1]))
+            ->assertOk()
+            ->assertViewHas('lignes', fn ($lignes) => $lignes->total() === 1 && $lignes->first()->id === $reprise->id)
+            ->assertSee('calcul modifié depuis la correction (31 → 32)')
+            ->assertSee('Annuler la correction');
+
+        $this->actingAs($this->gestionnaire);
+        $this->get(route('logistique.plans.show', $v2))->assertOk()->assertDontSee('Annuler la correction');
+        $this->post(route('logistique.plan-lignes.annuler-correction', $reprise), ['motif' => 'Retour'])->assertForbidden();
+
+        $this->actingAs($this->responsable);
+        $this->post(route('logistique.plan-lignes.annuler-correction', $reprise), [])->assertSessionHasErrors('motif');
+        $this->post(route('logistique.plan-lignes.annuler-correction', $reprise), ['motif' => 'Retour au calcul'])
+            ->assertSessionHas('success');
+        $this->assertNull($reprise->fresh()->correction);
+    }
+
     public function test_toutes_les_ecritures_protegees(): void
     {
         $poste = PosteEtranger::create(['pays' => 'France', 'ville' => 'Paris', 'type' => 'consulat', 'nom' => 'Consulat de Paris']);
@@ -346,6 +377,7 @@ class EcransDotationTest extends TestCase
             'logistique.cles.update'           => [$this->cycle, $this->urnes],
             'logistique.cles.copier'           => [$this->cycle],
             'logistique.plan-lignes.corriger'  => [$ligne],
+            'logistique.plan-lignes.annuler-correction' => [$ligne],
             'logistique.plans.approuver'       => [$this->plan],
             'logistique.besoin.commander'      => [$this->cycle],
         ];

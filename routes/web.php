@@ -175,6 +175,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('cycles/{cycle}/cles/copie', [CleController::class, 'copier'])->name('cles.copier');
 
             Route::post('plan-lignes/{ligne}/correction', [PlanDotationController::class, 'corriger'])->name('plan-lignes.corriger');
+            Route::post('plan-lignes/{ligne}/annulation-correction', [PlanDotationController::class, 'annulerCorrection'])->name('plan-lignes.annuler-correction');
             Route::post('plans/{plan}/approbation', [PlanDotationController::class, 'approuver'])->name('plans.approuver');
 
             Route::post('cycles/{cycle}/besoin/commande', [BesoinController::class, 'commander'])->name('besoin.commander');

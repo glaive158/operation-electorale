@@ -54,7 +54,7 @@
     </div>
 
     <form method="GET" class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-center">
             <select name="destinataire" aria-label="Destinataire" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
                 <option value="">Tous les destinataires</option>
                 @foreach($destinataires as $d)
@@ -70,6 +70,10 @@
             <label class="flex items-center gap-2 text-sm text-slate-600">
                 <input type="checkbox" name="anomalies" value="1" {{ request()->boolean('anomalies') ? 'checked' : '' }} class="rounded border-slate-300" style="accent-color:#009A44;">
                 En anomalie seulement
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" name="corrigees" value="1" {{ request()->boolean('corrigees') ? 'checked' : '' }} class="rounded border-slate-300" style="accent-color:#009A44;">
+                Corrigées seulement
             </label>
             <div class="flex gap-2">
                 <button class="px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90 flex-1" style="background:#009A44;">Filtrer</button>
@@ -115,6 +119,9 @@
                             <td class="px-4 py-3 text-right text-slate-800">{{ $entier($l->dotation_calculee) }}</td>
                             <td class="px-4 py-3 text-slate-600">
                                 @if($l->correction !== null) <span class="font-medium">{{ $entier($l->correction) }}</span> — {{ $l->correction_motif }} @else — @endif
+                                @if($l->calculModifieDepuisCorrection())
+                                    <span class="block text-xs text-amber-700">calcul modifié depuis la correction ({{ $entier($l->correction_calcul_source) }} → {{ $entier($l->dotation_calculee) }})</span>
+                                @endif
                             </td>
                             <td class="px-4 py-3 text-right font-medium text-slate-800">{{ $entier($l->dotation_approuvee) }}</td>
                             <td class="px-4 py-3 text-amber-700">{{ $l->anomalie ?? '' }}</td>
@@ -137,6 +144,16 @@
                                         </div>
                                         <button type="submit" class="px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90" style="background:#009A44;">Enregistrer la correction</button>
                                     </form>
+                                    @if($l->correction !== null)
+                                        <form method="POST" action="{{ route('logistique.plan-lignes.annuler-correction', $l) }}" class="flex flex-wrap gap-2 items-end mt-3">
+                                            @csrf
+                                            <div class="flex-1 min-w-[16rem]">
+                                                <label class="block text-xs font-medium text-slate-600 mb-1">Motif de l'annulation</label>
+                                                <input type="text" name="motif" required maxlength="500" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                                            </div>
+                                            <button type="submit" class="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-sm font-medium hover:bg-slate-100">Annuler la correction</button>
+                                        </form>
+                                    @endif
                                 </td>
                             </tr>
                         @endif

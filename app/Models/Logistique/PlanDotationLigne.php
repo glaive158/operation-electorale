@@ -27,6 +27,7 @@ class PlanDotationLigne extends Model
             'correction'         => 'integer',
             'dotation_approuvee' => 'integer',
             'corrige_le'         => 'datetime',
+            'correction_calcul_source' => 'integer',
         ];
     }
 
@@ -48,6 +49,17 @@ class PlanDotationLigne extends Model
     public function correcteur(): BelongsTo
     {
         return $this->belongsTo(User::class, 'corrige_par');
+    }
+
+    /**
+     * Vrai quand une correction reprise d'une version précédente portait sur un autre calcul
+     * que celui de cette ligne : la correction reste, l'écart est signalé (non bloquant).
+     */
+    public function calculModifieDepuisCorrection(): bool
+    {
+        return $this->correction !== null
+            && $this->correction_calcul_source !== null
+            && $this->correction_calcul_source !== $this->dotation_calculee;
     }
 
     /** Quantité retenue à l'approbation du plan ; null tant que le plan n'est pas approuvé. */

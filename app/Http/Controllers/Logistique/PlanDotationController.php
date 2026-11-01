@@ -53,6 +53,7 @@ class PlanDotationController extends Controller
             ->when($request->filled('destinataire'), fn ($q) => $q->where('destinataire_id', (int) $request->query('destinataire')))
             ->when($request->filled('materiel'), fn ($q) => $q->where('materiel_id', (int) $request->query('materiel')))
             ->when($request->boolean('anomalies'), fn ($q) => $q->whereNotNull('anomalie'))
+            ->when($request->boolean('corrigees'), fn ($q) => $q->whereNotNull('correction'))
             ->orderBy('destinataire_id')->orderBy('materiel_id')
             ->paginate(100)->withQueryString();
 
@@ -80,6 +81,16 @@ class PlanDotationController extends Controller
         return $this->executer(
             fn () => $this->plans->corriger($ligne, (int) $donnees['valeur'], $donnees['motif']),
             'Correction enregistrée.',
+        );
+    }
+
+    public function annulerCorrection(Request $request, PlanDotationLigne $ligne)
+    {
+        $donnees = $request->validate(['motif' => 'required|string|max:500']);
+
+        return $this->executer(
+            fn () => $this->plans->annulerCorrection($ligne, $donnees['motif']),
+            'Correction annulée : la dotation calculée s\'applique.',
         );
     }
 

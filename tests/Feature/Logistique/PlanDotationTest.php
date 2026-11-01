@@ -323,6 +323,82 @@ class PlanDotationTest extends TestCase
         $this->assertNull($this->ligne($v2, $this->enveloppes, $this->sindia)->correction);
     }
 
+    public function test_correction_reprise_garde_le_calcul_d_origine(): void
+    {
+        $v1 = $this->service()->calculer($this->cycle, $this->instantane());
+        $this->service()->corriger($this->ligne($v1, $this->urnes, $this->sindia), 30, 'arbitrage');
+        $this->assertNull($this->ligne($v1, $this->urnes, $this->sindia)->correction_calcul_source);
+
+        // Même calcul : la reprise mémorise le calcul d'origine, sans écart.
+        $v2 = $this->service()->calculer($this->cycle, $this->instantane());
+        $reprise = $this->ligne($v2, $this->urnes, $this->sindia);
+        $this->assertSame(6, $reprise->correction_calcul_source);
+        $this->assertFalse($reprise->calculModifieDepuisCorrection());
+
+        // Un bureau de plus à Ndiass : le calcul change, la correction reste mais l'écart est signalé.
+        $lignes = $this->lignesCommunes();
+        $lignes[0]['bureaux_vote'] = 5;
+        $v3 = $this->service()->calculer($this->cycle, $this->instantane($lignes));
+        $reprise = $this->ligne($v3, $this->urnes, $this->sindia);
+        $this->assertSame(30, $reprise->correction);
+        $this->assertSame(7, $reprise->dotation_calculee);
+        $this->assertSame(6, $reprise->correction_calcul_source);
+        $this->assertTrue($reprise->calculModifieDepuisCorrection());
+
+        // Corriger à nouveau : la correction porte sur le calcul de cette version.
+        $this->service()->corriger($reprise, 32, 'nouvel arbitrage');
+        $this->assertNull($reprise->fresh()->correction_calcul_source);
+        $this->assertFalse($reprise->fresh()->calculModifieDepuisCorrection());
+    }
+
+    public function test_annuler_une_correction(): void
+    {
+        $v1 = $this->service()->calculer($this->cycle, $this->instantane());
+        $this->service()->corriger($this->ligne($v1, $this->urnes, $this->sindia), 30, 'arbitrage');
+        $v2 = $this->service()->calculer($this->cycle, $this->instantane());
+        $ligne = $this->ligne($v2, $this->urnes, $this->sindia);
+
+        $this->assertRefus(fn () => $this->service()->annulerCorrection($ligne, '  '), InvalidArgumentException::class);
+        $this->assertRefus(
+            fn () => $this->service()->annulerCorrection($this->ligne($v2, $this->enveloppes, $this->sindia), 'retour au calcul'),
+            RegleLogistique::class,
+        );
+
+        $this->service()->annulerCorrection($ligne, 'retour au calcul');
+
+        $ligne->refresh();
+        $this->assertNull($ligne->correction);
+        $this->assertNull($ligne->correction_motif);
+        $this->assertNull($ligne->corrige_par);
+        $this->assertNull($ligne->corrige_le);
+        $this->assertNull($ligne->correction_calcul_source);
+        $this->assertSame(6, $ligne->dotation_calculee);
+        $entree = JournalEntree::where('objet_type', 'plan_dotation_ligne')->where('action', 'annulation_correction')->sole();
+        $this->assertSame(30, $entree->avant['correction']);
+        $this->assertSame('arbitrage', $entree->avant['correction_motif']);
+        $this->assertNull($entree->apres['correction']);
+        $this->assertSame('retour au calcul', $entree->motif);
+
+        // La version suivante ne reprend plus rien.
+        $v3 = $this->service()->calculer($this->cycle, $this->instantane());
+        $this->assertNull($this->ligne($v3, $this->urnes, $this->sindia)->correction);
+    }
+
+    public function test_annuler_une_correction_reserve_au_responsable_sur_un_brouillon(): void
+    {
+        $plan = $this->service()->calculer($this->cycle, $this->instantane());
+        $ligne = $this->ligne($plan, $this->urnes, $this->sindia);
+        $this->service()->corriger($ligne, 30, 'arbitrage');
+
+        $this->actingAs(User::factory()->create(['role' => 'logistique_gestionnaire']));
+        $this->assertRefus(fn () => $this->service()->annulerCorrection($ligne, 'retour'), RegleLogistique::class);
+
+        $this->actingAs($this->responsable);
+        $this->service()->approuver($plan);
+        $this->assertRefus(fn () => $this->service()->annulerCorrection($ligne, 'retour'), RegleLogistique::class);
+        $this->assertSame(30, $ligne->fresh()->correction);
+    }
+
     public function test_besoin_suit_la_derniere_version_approuvee(): void
     {
         $instantane = $this->instantane();
