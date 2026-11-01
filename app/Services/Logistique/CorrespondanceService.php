@@ -150,6 +150,29 @@ class CorrespondanceService
         return $id === null ? null : (int) $id;
     }
 
+    /**
+     * Toutes les correspondances validées en une requête, indexées par cleTriplet() :
+     * évite une requête par triplet lors d'une capture.
+     *
+     * @return array<string,int> clé du triplet exact => commune_id
+     */
+    public function mapValidees(): array
+    {
+        $map = [];
+        foreach (CorrespondanceGeo::where('statut', 'validee')->whereNotNull('commune_id')
+            ->get(['contexte_region', 'contexte_departement', 'libelle_commune', 'commune_id']) as $c) {
+            $map[$this->cleTriplet($c->contexte_region, $c->contexte_departement, $c->libelle_commune)] = (int) $c->commune_id;
+        }
+
+        return $map;
+    }
+
+    /** Clé d'un triplet exactement tel qu'écrit dans le fichier (aucune normalisation). */
+    public function cleTriplet(string $region, string $departement, string $commune): string
+    {
+        return $this->cleBrute($region, $departement, $commune);
+    }
+
     private function cle(?string $region, ?string $departement, ?string $commune): string
     {
         return $this->cleBrute(NomGeo::normaliser($region ?? ''), NomGeo::normaliser($departement ?? ''), NomGeo::normaliser($commune ?? ''));

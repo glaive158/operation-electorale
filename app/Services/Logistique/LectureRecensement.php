@@ -75,8 +75,8 @@ class LectureRecensement
     {
         return $this->base()->table('fichier_electoral')
             ->where('origine', 'etranger')
-            ->whereNotNull('departement')->where('departement', '!=', '')
-            ->whereNotNull('commune')->where('commune', '!=', '')
+            ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
+            ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
             ->select('departement as pays', 'commune as ville')
             ->distinct()
             ->orderBy('pays')
@@ -95,9 +95,9 @@ class LectureRecensement
     {
         return $this->base()->table('fichier_electoral')
             ->where('origine', 'national')
-            ->whereNotNull('departement')->where('departement', '!=', '')
-            ->whereNotNull('arrondissement')->where('arrondissement', '!=', '')
-            ->whereNotNull('commune')->where('commune', '!=', '')
+            ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
+            ->whereNotNull('arrondissement')->whereRaw("TRIM(arrondissement) <> ''")
+            ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
             ->select('departement as region', 'arrondissement as departement', 'commune')
             ->distinct()
             ->orderBy('region')
@@ -105,6 +105,107 @@ class LectureRecensement
             ->orderBy('commune')
             ->get()
             ->map(fn ($s) => (object) ['region' => $s->region, 'departement' => $s->departement, 'commune' => $s->commune]);
+    }
+
+    /**
+     * Effectifs du fichier national par triplet tel qu'écrit (région, département, commune), mêmes
+     * filtres que sourcesCommunes(). Un électeur = une ligne ; bureau de vote = code_bureau ;
+     * lieu de vote = ses 8 premiers caractères.
+     *
+     * @return Collection<int, object{region:string, departement:string, commune:string, electeurs:int, bureaux_vote:int, lieux_vote:int}>
+     */
+    public function agregatsNational(): Collection
+    {
+        // Pas d'alias dans le SELECT : « departement » désignerait deux colonnes différentes dans GROUP BY.
+        $lignes = $this->base()->table('fichier_electoral')
+            ->where('origine', 'national')
+            ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
+            ->whereNotNull('arrondissement')->whereRaw("TRIM(arrondissement) <> ''")
+            ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
+            ->select('departement', 'arrondissement', 'commune')
+            ->selectRaw('COUNT(*) as electeurs')
+            ->selectRaw('COUNT(DISTINCT code_bureau) as bureaux_vote')
+            ->selectRaw('COUNT(DISTINCT SUBSTR(code_bureau, 1, 8)) as lieux_vote')
+            ->groupBy('departement', 'arrondissement', 'commune')
+            ->get();
+
+        return $lignes
+            ->map(fn ($l) => (object) [
+                'region'       => $l->departement,
+                'departement'  => $l->arrondissement,
+                'commune'      => $l->commune,
+                'electeurs'    => (int) $l->electeurs,
+                'bureaux_vote' => (int) $l->bureaux_vote,
+                'lieux_vote'   => (int) $l->lieux_vote,
+            ])
+            ->sortBy([['region', 'asc'], ['departement', 'asc'], ['commune', 'asc']])
+            ->values();
+    }
+
+    /**
+     * Effectifs des Sénégalais de l'étranger par (pays, ville) tels qu'écrits dans le fichier.
+     *
+     * @return Collection<int, object{pays:string, ville:string, electeurs:int, bureaux_vote:int, lieux_vote:int}>
+     */
+    public function agregatsEtranger(): Collection
+    {
+        $lignes = $this->base()->table('fichier_electoral')
+            ->where('origine', 'etranger')
+            ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
+            ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
+            ->select('departement', 'commune')
+            ->selectRaw('COUNT(*) as electeurs')
+            ->selectRaw('COUNT(DISTINCT code_bureau) as bureaux_vote')
+            ->selectRaw('COUNT(DISTINCT SUBSTR(code_bureau, 1, 8)) as lieux_vote')
+            ->groupBy('departement', 'commune')
+            ->get();
+
+        return $lignes
+            ->map(fn ($l) => (object) [
+                'pays'         => $l->departement,
+                'ville'        => $l->commune,
+                'electeurs'    => (int) $l->electeurs,
+                'bureaux_vote' => (int) $l->bureaux_vote,
+                'lieux_vote'   => (int) $l->lieux_vote,
+            ])
+            ->sortBy([['pays', 'asc'], ['ville', 'asc']])
+            ->values();
+    }
+
+    /**
+     * Contrôles de cohérence des codes bureau du fichier.
+     *
+     * @return array{codes_longueur_invalide:int, codes_multi_communes:int, prefixes_incoherents:int}
+     */
+    public function controles(): array
+    {
+        $table = fn () => $this->base()->table('fichier_electoral');
+
+        $longueurInvalide = $table()
+            ->where(fn ($q) => $q->whereNull('code_bureau')->orWhereRaw('LENGTH(code_bureau) <> 10'))
+            ->count();
+
+        $multiCommunes = $this->base()->query()->fromSub(
+            $table()->select('code_bureau')
+                ->whereNotNull('code_bureau')
+                ->groupBy('code_bureau')
+                ->havingRaw('COUNT(DISTINCT commune) > 1 OR COUNT(DISTINCT arrondissement) > 1'),
+            'codes',
+        )->count();
+
+        $prefixesIncoherents = $this->base()->query()->fromSub(
+            $table()->selectRaw('SUBSTR(code_bureau, 1, 8) as prefixe')
+                ->whereNotNull('code_bureau')
+                ->groupByRaw('SUBSTR(code_bureau, 1, 8)')
+                ->havingRaw('COUNT(DISTINCT lieu_vote) > 1'),
+            'prefixes',
+        )->count();
+
+        return [
+            'codes_longueur_invalide' => (int) $longueurInvalide,
+            'codes_multi_communes'    => (int) $multiCommunes,
+            'prefixes_incoherents'    => (int) $prefixesIncoherents,
+        ];
     }
 
     private function base(): \Illuminate\Database\Connection
