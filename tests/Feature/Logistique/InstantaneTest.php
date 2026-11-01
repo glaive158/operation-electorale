@@ -1,0 +1,512 @@
+<?php
+
+namespace Tests\Feature\Logistique;
+
+use App\Exceptions\Logistique\RegleLogistique;
+use App\Jobs\Logistique\CapturerInstantane;
+use App\Models\Logistique\CommissionAdministrative;
+use App\Models\Logistique\CorrespondanceGeo;
+use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\InstantaneEffectifs;
+use App\Models\Logistique\InstantaneLigne;
+use App\Models\Logistique\JournalEntree;
+use App\Models\Logistique\PosteEtranger;
+use App\Models\User;
+use App\Services\Logistique\CorrespondanceService;
+use App\Services\Logistique\DecoupageService;
+use App\Services\Logistique\InstantaneService;
+use App\Services\Logistique\LectureRecensement;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Queue;
+use LogicException;
+use RuntimeException;
+use Tests\Support\RecensementFictif;
+use Tests\TestCase;
+
+class InstantaneTest extends TestCase
+{
+    use RefreshDatabase;
+
+    /** @var array{regions: array<string,int>, departements: array<string,int>, arrondissements: array<string,int>, communes: array<string,int>} */
+    private array $geo;
+
+    private Cycle $cycle;
+
+    private User $utilisateur;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        RecensementFictif::creerSchema();
+        $this->utilisateur = User::factory()->create(['role' => 'logistique_responsable']);
+        $this->actingAs($this->utilisateur);
+
+        $this->geo = RecensementFictif::geo([
+            'Thiès' => [
+                'Mbour' => [
+                    'Sindia' => ['Ndiass', 'Popenguine'],
+                ],
+            ],
+        ]);
+
+        $decoupage = app(DecoupageService::class);
+        $decoupage->genererDestinataires();
+        $this->cycle = Cycle::create(['libelle' => 'Cycle A', 'type' => 'scrutin']);
+        $decoupage->genererPerimetre($this->cycle);
+    }
+
+    private function service(): InstantaneService
+    {
+        return app(InstantaneService::class);
+    }
+
+    /** Capture complète (file synchrone) : retourne l'instantané en brouillon. */
+    private function capturer(): InstantaneEffectifs
+    {
+        return $this->service()->demarrer($this->cycle);
+    }
+
+    private function valider(string $region, string $departement, string $commune, string $nomCommune): void
+    {
+        CorrespondanceGeo::create([
+            'contexte_region' => $region, 'contexte_departement' => $departement, 'libelle_commune' => $commune,
+            'commune_id' => $this->geo['communes'][$nomCommune], 'statut' => 'validee', 'methode' => 'auto',
+        ]);
+    }
+
+    private function ligneCommune(InstantaneEffectifs $i, string $commune): InstantaneLigne
+    {
+        return InstantaneLigne::where('instantane_id', $i->id)
+            ->where('commune_id', $this->geo['communes'][$commune])->firstOrFail();
+    }
+
+    public function test_capture_agrege_par_commune(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010102', '01010101', 20);
+        app(CorrespondanceService::class)->rapprocher();
+
+        $i = $this->capturer();
+
+        $this->assertSame('brouillon', $i->statut);
+        $this->assertSame(1, $i->version);
+        $ligne = $this->ligneCommune($i, 'Ndiass');
+        $this->assertSame(30, $ligne->electeurs);
+        $this->assertSame(2, $ligne->bureaux_vote);
+        $this->assertSame(1, $ligne->lieux_vote);
+        $this->assertTrue($ligne->rapprochee);
+        $this->assertSame($this->geo['departements']['Mbour'], $ligne->departement_id);
+        $this->assertNotNull($ligne->destinataire_id);
+        $this->assertSame(30, $i->bilan['electeurs_total']);
+        $this->assertSame(30, $i->bilan['electeurs_national']);
+        $this->assertSame(0, $i->bilan['electeurs_etranger']);
+        $this->assertSame(30, $i->bilan['electeurs_rapproches']);
+        $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+        $this->assertSame(30, $i->bilan['electeurs_fichier']);
+        $this->assertSame(0, $i->bilan['electeurs_ignores']);
+        $this->assertSame(['Thiès' => 30], $i->bilan['totaux_par_region']);
+    }
+
+    public function test_deux_graphies_meme_commune_additionnees(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'NDIASS', '0101010101', '01010101', 30);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', "N'DIASS", '0101010201', '01010102', 5);
+        $this->valider('Thiès', 'Mbour', 'NDIASS', 'Ndiass');
+        $this->valider('Thiès', 'Mbour', "N'DIASS", 'Ndiass');
+
+        $i = $this->capturer();
+
+        $this->assertSame(1, InstantaneLigne::where('instantane_id', $i->id)->count());
+        $ligne = $this->ligneCommune($i, 'Ndiass');
+        $this->assertSame(35, $ligne->electeurs);
+        $this->assertSame(2, $ligne->bureaux_vote);
+        $this->assertSame(2, $ligne->lieux_vote);
+    }
+
+    public function test_graphies_partageant_un_bureau_et_un_lieu_ne_les_comptent_qu_une_fois(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'NDIASS', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', "N'DIASS", '0101010101', '01010101', 5);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', "N'DIASS", '0101010102', '01010101', 2);
+        $this->valider('Thiès', 'Mbour', 'NDIASS', 'Ndiass');
+        $this->valider('Thiès', 'Mbour', "N'DIASS", 'Ndiass');
+
+        $ligne = $this->ligneCommune($this->capturer(), 'Ndiass');
+
+        $this->assertSame(17, $ligne->electeurs);
+        $this->assertSame(2, $ligne->bureaux_vote);
+        $this->assertSame(1, $ligne->lieux_vote);
+    }
+
+    public function test_graphie_sans_casse_ni_accents_rapprochee_par_repli_normalise(): void
+    {
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'NDIASS', '0101010101', '01010101', 8);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+
+        $i = $this->capturer();
+
+        $this->assertSame(8, $this->ligneCommune($i, 'Ndiass')->electeurs);
+        $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_repli_normalise_ignore_si_ambigu(): void
+    {
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'NDIASS', '0101010101', '01010101', 8);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+        $this->valider('Thiès', 'Mbour', 'ndiass', 'Popenguine');
+
+        $this->assertSame(8, $this->capturer()->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_une_region_n_apparait_que_sous_une_cle(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'Inconnue', '0202020201', '02020202', 4);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+
+        $this->assertSame(['Thiès' => 14], $this->capturer()->bilan['totaux_par_region']);
+    }
+
+    public function test_commune_non_rapprochee_isolee_dans_le_bilan(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Inconnue', '0202020201', '02020202', 7);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Sans decision', '0303030301', '03030303', 4);
+        app(CorrespondanceService::class)->rapprocher();
+        // Triplet proposé (candidat connu) mais non validé : reste non rapproché.
+        CorrespondanceGeo::where('libelle_commune', 'Inconnue')->update(['commune_id' => $this->geo['communes']['Popenguine']]);
+
+        $i = $this->capturer();
+
+        $nonRapprochees = InstantaneLigne::where('instantane_id', $i->id)->where('rapprochee', false)->orderBy('libelle_commune')->get();
+        $this->assertCount(2, $nonRapprochees);
+        $this->assertNull($nonRapprochees[0]->commune_id);
+        $this->assertNull($nonRapprochees[0]->destinataire_id);
+        $this->assertSame('Inconnue', $nonRapprochees[0]->libelle_commune);
+        $this->assertSame('Thiès', $nonRapprochees[0]->contexte_region);
+        $this->assertSame('Mbour', $nonRapprochees[0]->contexte_departement);
+        $this->assertSame(7, $nonRapprochees[0]->electeurs);
+
+        $this->assertSame(21, $i->bilan['electeurs_total']);
+        $this->assertSame(21, $i->bilan['electeurs_national']);
+        $this->assertSame(11, $i->bilan['electeurs_non_rapproches']);
+        $this->assertSame(10, $i->bilan['electeurs_rapproches']);
+        $this->assertCount(2, $i->bilan['lignes_non_rapprochees']);
+        $this->assertSame(21, array_sum($i->bilan['totaux_par_region']));
+    }
+
+    public function test_aucun_electeur_perdu_sans_correspondance(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+
+        $i = $this->capturer();
+
+        $this->assertSame(10, $i->bilan['electeurs_total']);
+        $this->assertSame(10, $i->bilan['electeurs_non_rapproches']);
+        $this->assertSame(10, InstantaneLigne::where('instantane_id', $i->id)->sum('electeurs'));
+    }
+
+    public function test_correspondance_vers_commune_disparue_reste_non_rapprochee(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        CorrespondanceGeo::create([
+            'contexte_region' => 'Thiès', 'contexte_departement' => 'Mbour', 'libelle_commune' => 'Ndiass',
+            'commune_id' => 99999, 'statut' => 'validee', 'methode' => 'manuelle',
+        ]);
+
+        $i = $this->capturer();
+
+        $this->assertSame(10, $i->bilan['electeurs_non_rapproches']);
+        $this->assertSame(1, InstantaneLigne::where('instantane_id', $i->id)->where('rapprochee', false)->count());
+    }
+
+    public function test_etranger_par_pays_et_ville(): void
+    {
+        RecensementFictif::electeurs('etranger', 'France', null, 'Lyon', '9001010101', '90010101', 12);
+
+        $i = $this->capturer();
+
+        $ligne = InstantaneLigne::where('instantane_id', $i->id)->where('pays', 'France')->firstOrFail();
+        $this->assertSame('Lyon', $ligne->ville);
+        $this->assertNull($ligne->commune_id);
+        $this->assertSame(12, $ligne->electeurs);
+        $this->assertTrue($ligne->rapprochee);
+        $this->assertSame(12, $i->bilan['totaux_par_region']['Étranger']);
+        $this->assertSame(12, $i->bilan['electeurs_total']);
+        $this->assertSame(12, $i->bilan['electeurs_etranger']);
+        $this->assertSame(0, $i->bilan['electeurs_national']);
+        $this->assertSame(0, $i->bilan['electeurs_rapproches']);
+        $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_graphies_d_une_ville_etrangere_fusionnees(): void
+    {
+        PosteEtranger::create(['pays' => 'France', 'ville' => 'Paris', 'type' => 'consulat', 'nom' => 'Consulat de Paris']);
+        RecensementFictif::electeurs('etranger', 'FRANCE', null, 'PARIS', '9001010101', '90010101', 3);
+        RecensementFictif::electeurs('etranger', 'France', null, 'Paris', '9001010102', '90010101', 2);
+        RecensementFictif::electeurs('etranger', ' france', null, 'paris', '9001010102', '90010101', 1);
+        $decoupage = app(DecoupageService::class);
+        $decoupage->genererDestinataires();
+        $decoupage->genererPerimetre($this->cycle);
+        CommissionAdministrative::create(['cycle_id' => $this->cycle->id, 'type' => 'etranger', 'pays' => 'france', 'ville' => 'PARIS']);
+
+        $i = $this->capturer();
+
+        $lignes = InstantaneLigne::where('instantane_id', $i->id)->whereNull('commune_id')->get();
+        $this->assertCount(1, $lignes);
+        $paris = $lignes->first();
+        $this->assertSame(6, $paris->electeurs);
+        $this->assertSame(2, $paris->bureaux_vote);
+        $this->assertSame(1, $paris->lieux_vote);
+        $this->assertSame(1, $paris->commissions);
+        $this->assertSame(Destinataire::where('libelle', 'Consulat de Paris')->value('id'), $paris->destinataire_id);
+        $this->assertSame([], $i->bilan['localites_sans_destinataire']);
+        $this->assertSame(6, $i->bilan['electeurs_etranger']);
+    }
+
+    public function test_localites_sans_destinataire_listees(): void
+    {
+        RecensementFictif::electeurs('etranger', 'France', null, 'Lyon', '9001010101', '90010101', 12);
+
+        $i = $this->capturer();
+
+        $this->assertSame(['France | Lyon'], $i->bilan['localites_sans_destinataire']);
+        $this->assertNull(InstantaneLigne::where('instantane_id', $i->id)->where('pays', 'France')->value('destinataire_id'));
+    }
+
+    public function test_commissions_copiees(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        app(CorrespondanceService::class)->rapprocher();
+        CommissionAdministrative::creerFixesParCommune($this->cycle);
+        CommissionAdministrative::create([
+            'cycle_id' => $this->cycle->id, 'type' => 'itinerante', 'commune_id' => $this->geo['communes']['Ndiass'],
+        ]);
+
+        $i = $this->capturer();
+
+        $this->assertSame(2, $this->ligneCommune($i, 'Ndiass')->commissions);
+    }
+
+    public function test_controles_rejoues(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '010101010', '01010101', 1);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101030101', 'A', 1);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101030102', 'B', 1);
+
+        $i = $this->capturer();
+
+        $this->assertSame(1, $i->bilan['controles']['codes_longueur_invalide']);
+        $this->assertSame(1, $i->bilan['controles']['prefixes_incoherents']);
+        $this->assertSame(0, $i->bilan['controles']['codes_multi_communes']);
+    }
+
+    public function test_controle_code_sur_plusieurs_communes(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 1);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Popenguine', '0101010101', '01010101', 1);
+
+        $this->assertSame(1, $this->capturer()->bilan['controles']['codes_multi_communes']);
+    }
+
+    public function test_valeurs_blanches_ignorees_par_les_agregats(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', '   ', '0101010101', '01010101', 3);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 2);
+
+        $agregats = app(LectureRecensement::class)->agregatsNational();
+
+        $this->assertCount(1, $agregats);
+        $this->assertSame('Ndiass', $agregats->first()->commune);
+        $this->assertSame(2, (int) $agregats->first()->electeurs);
+
+        // Les électeurs écartés laissent une trace au bilan.
+        RecensementFictif::electeurs('autre', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 4);
+        $bilan = $this->capturer()->bilan;
+        $this->assertSame(9, $bilan['electeurs_fichier']);
+        $this->assertSame(2, $bilan['electeurs_total']);
+        $this->assertSame(7, $bilan['electeurs_ignores']);
+    }
+
+    public function test_versions_successives_et_figer(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 3);
+
+        $v1 = $this->capturer();
+        $v2 = $this->capturer();
+
+        $this->assertSame([1, 2], [$v1->version, $v2->version]);
+        $this->assertFalse($v2->estUtilisable());
+
+        $this->service()->figer($v2);
+
+        $v2->refresh();
+        $this->assertSame('fige', $v2->statut);
+        $this->assertTrue($v2->estUtilisable());
+        $this->assertSame($this->utilisateur->id, $v2->fige_par);
+        $this->assertNotNull($v2->fige_le);
+        $this->assertSame(1, JournalEntree::where('action', 'figement_instantane')->count());
+
+        $this->expectException(RegleLogistique::class);
+        $this->expectExceptionMessage('Seul un instantané brouillon peut être figé.');
+        $this->service()->figer($v2);
+    }
+
+    public function test_echec_de_capture_n_ecrit_aucune_ligne(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 3);
+        $this->app->bind(LectureRecensement::class, fn () => new class extends LectureRecensement
+        {
+            public function agregatsNational(): Collection
+            {
+                throw new RuntimeException('Base du recensement indisponible');
+            }
+        });
+
+        $i = $this->capturer();
+
+        $this->assertSame('echec', $i->statut);
+        // Message générique : le détail (éventuellement une requête SQL) reste au journal du serveur.
+        $this->assertSame('Échec de la capture, voir le journal du serveur. (RuntimeException)', $i->erreur);
+        $this->assertSame(0, InstantaneLigne::count());
+
+        // Un échec ne bloque pas la capture suivante.
+        $this->app->forgetInstance(InstantaneService::class);
+        $this->app->bind(LectureRecensement::class, fn () => new LectureRecensement);
+        $this->assertSame(2, $this->capturer()->version);
+    }
+
+    public function test_cycle_clos_pendant_la_capture_annule_les_lignes(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 3);
+        Queue::fake();
+        $i = $this->service()->demarrer($this->cycle);
+        $this->cycle->forceFill(['statut' => 'clos'])->save();
+
+        $this->service()->capturer($i);
+
+        $i->refresh();
+        $this->assertSame('echec', $i->statut);
+        $this->assertNotEmpty($i->erreur);
+        $this->assertSame(0, InstantaneLigne::count());
+    }
+
+    public function test_capture_en_cours_unique(): void
+    {
+        Queue::fake();
+
+        $premier = $this->service()->demarrer($this->cycle);
+        $this->assertSame('en_cours', $premier->statut);
+        Queue::assertPushed(CapturerInstantane::class, 1);
+
+        $this->expectException(RegleLogistique::class);
+        $this->service()->demarrer($this->cycle);
+    }
+
+    public function test_le_job_cible_la_connexion_configuree(): void
+    {
+        config(['logistique.queue_capture' => 'database_long']);
+        Queue::fake();
+
+        $this->service()->demarrer($this->cycle);
+
+        Queue::assertPushed(CapturerInstantane::class, fn ($job) => $job->connection === 'database_long');
+        $this->assertSame(3600, (new CapturerInstantane(1))->timeout);
+        $this->assertSame(1, (new CapturerInstantane(1))->tries);
+        $this->assertGreaterThan(3600, config('queue.connections.database_long.retry_after'));
+    }
+
+    public function test_capture_dediee_a_la_file_longue_par_defaut(): void
+    {
+        $nom = 'LOGISTIQUE_QUEUE_CAPTURE';
+        $sauvegarde = [$_ENV[$nom] ?? null, $_SERVER[$nom] ?? null, getenv($nom)];
+        unset($_ENV[$nom], $_SERVER[$nom]);
+        putenv($nom);
+        try {
+            $config = require config_path('logistique.php');
+        } finally {
+            [$env, $server, $put] = $sauvegarde;
+            if ($env !== null) {
+                $_ENV[$nom] = $env;
+            }
+            if ($server !== null) {
+                $_SERVER[$nom] = $server;
+            }
+            if ($put !== false) {
+                putenv("{$nom}={$put}");
+            }
+        }
+
+        $this->assertSame('database_long', $config['queue_capture']);
+        // Les tests forcent une valeur vide : capture synchrone.
+        $this->assertNull(config('logistique.queue_capture'));
+    }
+
+    public function test_capture_en_cours_expiree_apres_70_minutes(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow('2026-11-02 08:00:00');
+        try {
+            $ancien = $this->service()->demarrer($this->cycle);
+
+            Carbon::setTestNow('2026-11-02 09:09:59');
+            try {
+                $this->service()->demarrer($this->cycle);
+                $this->fail('Une capture de moins de 70 minutes bloque la suivante.');
+            } catch (RegleLogistique $e) {
+                $this->assertSame('Une capture est déjà en cours pour ce cycle.', $e->getMessage());
+            }
+            $this->assertSame('en_cours', $ancien->fresh()->statut);
+
+            Carbon::setTestNow('2026-11-02 09:10:01');
+            $nouveau = $this->service()->demarrer($this->cycle);
+        } finally {
+            Carbon::setTestNow();
+        }
+
+        $this->assertSame(2, $nouveau->version);
+        $this->assertSame('en_cours', $nouveau->statut);
+        $ancien->refresh();
+        $this->assertSame('echec', $ancien->statut);
+        $this->assertSame('Capture expirée (aucun résultat après 70 minutes).', $ancien->erreur);
+        $entree = JournalEntree::where('objet_type', 'instantane_effectifs')->where('objet_id', $ancien->id)
+            ->where('action', 'expiration_instantane')->sole();
+        $this->assertSame($this->utilisateur->id, $entree->user_id);
+        $this->assertSame('echec', $entree->apres['statut']);
+    }
+
+    public function test_arret_du_job_ne_stocke_pas_le_texte_de_l_erreur(): void
+    {
+        Queue::fake();
+        $i = $this->service()->demarrer($this->cycle);
+
+        (new CapturerInstantane($i->id))->failed(new RuntimeException('SQLSTATE[HY000]: select * from fichier_electoral'));
+
+        $this->assertSame('echec', $i->fresh()->statut);
+        $this->assertSame('Échec de la capture, voir le journal du serveur. (RuntimeException)', $i->fresh()->erreur);
+    }
+
+    public function test_demarrer_refuse_un_cycle_clos(): void
+    {
+        $this->cycle->forceFill(['statut' => 'clos'])->save();
+
+        $this->expectException(RegleLogistique::class);
+        $this->service()->demarrer($this->cycle);
+    }
+
+    public function test_demarrer_exige_un_auteur(): void
+    {
+        auth()->logout();
+
+        $this->expectException(LogicException::class);
+        $this->service()->demarrer($this->cycle);
+    }
+
+    public function test_le_job_est_mis_en_file(): void
+    {
+        $this->assertInstanceOf(\Illuminate\Contracts\Queue\ShouldQueue::class, new CapturerInstantane(1));
+    }
+}
