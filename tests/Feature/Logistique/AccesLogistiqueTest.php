@@ -4,6 +4,7 @@ namespace Tests\Feature\Logistique;
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Tests\TestCase;
 
@@ -14,6 +15,9 @@ class AccesLogistiqueTest extends TestCase
     public function test_connexions_de_test_isolees(): void
     {
         $this->assertSame('sqlite', config('database.default'));
+        $this->assertSame('sqlite', config('database.connections.sqlite.driver'));
+        $this->assertSame(':memory:', config('database.connections.sqlite.database'));
+        $this->assertSame(':memory:', DB::connection()->getDatabaseName());
         $this->assertSame('sqlite', config('database.connections.recensement.driver'));
         $this->assertSame(':memory:', config('database.connections.recensement.database'));
     }
