@@ -4,6 +4,7 @@ namespace App\Models\Logistique;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Materiel extends Model
 {
@@ -35,5 +36,11 @@ class Materiel extends Model
     public function scopeActifs(Builder $query): Builder
     {
         return $query->where('actif', true);
+    }
+
+    /** Présente si cet article est le bulletin de vote d'une entité (candidat, liste ou option). */
+    public function entiteBulletin(): HasOne
+    {
+        return $this->hasOne(EntiteBulletin::class);
     }
 }
