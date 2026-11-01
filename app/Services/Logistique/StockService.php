@@ -5,6 +5,7 @@ namespace App\Services\Logistique;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Exceptions\Logistique\StockInsuffisant;
 use App\Models\Logistique\AttributionStock;
+use App\Models\Logistique\CommandeLigne;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
@@ -63,6 +64,19 @@ class StockService
         }
 
         return (int) $requete->sum('quantite');
+    }
+
+    /**
+     * Σ des restes à recevoir des commandes en cours (confirmées ou partiellement reçues),
+     * pour ce matériel, éventuellement limitées aux lignes visant un cycle. Lecture simple.
+     */
+    public function commandeARecevoir(Materiel $materiel, ?Cycle $cycle = null): int
+    {
+        return CommandeLigne::where('materiel_id', $materiel->id)
+            ->when($cycle, fn ($q) => $q->where('cycle_id', $cycle->id))
+            ->whereHas('commande', fn ($q) => $q->whereIn('statut', ['confirmee', 'partiellement_recue']))
+            ->get()
+            ->sum(fn (CommandeLigne $ligne) => $ligne->resteARecevoir());
     }
 
     public function libre(Materiel $materiel): int
