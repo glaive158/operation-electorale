@@ -73,6 +73,22 @@ class CorrespondancesTest extends TestCase
         $this->assertSame(['creees' => 1, 'auto' => 1, 'a_valider' => 0], $resultat);
     }
 
+    public function test_rapprochement_journalise_une_fois_par_appel(): void
+    {
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'NDIASS', 'B1', 'L1', 2);
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'XYZ', 'B2', 'L2', 1);
+
+        $this->service->rapprocher();
+        $this->service->rapprocher();
+
+        $entrees = JournalEntree::where('action', 'rapprochement_correspondances')->orderBy('id')->get();
+        $this->assertCount(2, $entrees);
+        $this->assertSame('correspondance_geo', $entrees[0]->objet_type);
+        $this->assertSame(['creees' => 2, 'auto' => 1, 'a_valider' => 1], $entrees[0]->apres);
+        $this->assertSame(['creees' => 0, 'auto' => 0, 'a_valider' => 0], $entrees[1]->apres);
+        $this->assertSame(auth()->id(), $entrees[0]->user_id);
+    }
+
     public function test_variante_d_accent_validee_automatiquement(): void
     {
         RecensementFictif::electeurs('national', 'SEDHIOU', 'SEDHIOU', 'SEDHIOU', 'B1', 'L1', 1);

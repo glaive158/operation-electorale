@@ -71,7 +71,11 @@ class CorrespondanceService
                 $unique ? $auto++ : $aValider++;
             }
 
-            return ['creees' => $creees, 'auto' => $auto, 'a_valider' => $aValider];
+            $resultat = ['creees' => $creees, 'auto' => $auto, 'a_valider' => $aValider];
+            // Un résumé par rapprochement : pas d'objet unique, l'entrée vise l'ensemble des correspondances.
+            Journal::noter('correspondance_geo', 0, 'rapprochement_correspondances', null, $resultat);
+
+            return $resultat;
         }, attempts: 3);
     }
 

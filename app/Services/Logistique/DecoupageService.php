@@ -64,6 +64,9 @@ class DecoupageService
                 $crees += $destinataire->wasRecentlyCreated ? 1 : 0;
             }
 
+            // Un résumé par génération : pas d'objet unique, l'entrée vise l'ensemble des destinataires.
+            Journal::noter('destinataire', 0, 'generation_destinataires', null, ['crees' => $crees]);
+
             return ['crees' => $crees];
         }, attempts: 3);
     }
@@ -133,6 +136,10 @@ class DecoupageService
                 ]);
                 $affectees++;
             }
+
+            Journal::noter('cycle', $cycle->id, 'generation_perimetre', null, [
+                'affectees' => $affectees, 'sans_destinataire' => $sans,
+            ]);
 
             return ['affectees' => $affectees, 'sans_destinataire' => $sans];
         }, attempts: 3);

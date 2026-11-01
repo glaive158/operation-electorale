@@ -88,6 +88,28 @@ class DecoupageTest extends TestCase
         $this->assertSame(3, PerimetreDestinataire::where('cycle_id', $cycle->id)->count());
     }
 
+    public function test_generations_journalisees_une_fois_par_appel(): void
+    {
+        $auteur = auth()->id();
+        $this->decoupage->genererDestinataires();
+        $this->decoupage->genererDestinataires();
+
+        $entrees = JournalEntree::where('action', 'generation_destinataires')->orderBy('id')->get();
+        $this->assertCount(2, $entrees);
+        $this->assertSame(['crees' => 5], $entrees[0]->apres);
+        $this->assertSame(['crees' => 0], $entrees[1]->apres);
+        $this->assertSame($auteur, $entrees[0]->user_id);
+
+        $cycle = $this->cycle();
+        $this->decoupage->genererPerimetre($cycle);
+
+        $entree = JournalEntree::where('action', 'generation_perimetre')->sole();
+        $this->assertSame('cycle', $entree->objet_type);
+        $this->assertSame($cycle->id, $entree->objet_id);
+        $this->assertSame(['affectees' => 3, 'sans_destinataire' => 0], $entree->apres);
+        $this->assertSame($auteur, $entree->user_id);
+    }
+
     public function test_reaffectation_manuelle_conservee_au_regenerer(): void
     {
         $this->decoupage->genererDestinataires();
