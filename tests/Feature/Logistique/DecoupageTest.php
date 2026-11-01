@@ -153,6 +153,22 @@ class DecoupageTest extends TestCase
         $this->assertSame(0, PerimetreDestinataire::whereNotNull('pays')->count());
     }
 
+    public function test_etranger_ligne_sans_ville_ou_sans_pays_ignoree(): void
+    {
+        DB::connection('recensement')->table('fichier_electoral')->insert([
+            ['origine' => 'etranger', 'departement' => 'France', 'arrondissement' => null, 'commune' => null, 'lieu_vote' => 'X', 'code_bureau' => 'B1'],
+            ['origine' => 'etranger', 'departement' => 'France', 'arrondissement' => null, 'commune' => '', 'lieu_vote' => 'X', 'code_bureau' => 'B2'],
+            ['origine' => 'etranger', 'departement' => null, 'arrondissement' => null, 'commune' => 'Paris', 'lieu_vote' => 'X', 'code_bureau' => 'B3'],
+        ]);
+        RecensementFictif::electeurs('etranger', 'Japon', null, 'Tokyo', 'B4', 'Salle A', 1);
+
+        $this->decoupage->genererDestinataires();
+        $resultat = $this->decoupage->genererPerimetre($this->cycle());
+
+        $this->assertSame(1, $resultat['sans_destinataire']);
+        $this->assertSame(0, PerimetreDestinataire::whereNotNull('pays')->count());
+    }
+
     public function test_cycle_clos_refuse(): void
     {
         $this->decoupage->genererDestinataires();

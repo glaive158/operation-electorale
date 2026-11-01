@@ -247,7 +247,7 @@ class DecoupageService
 
     private function verrouillerCycleOuvert(Cycle $cycle): void
     {
-        $actuel = Cycle::whereKey($cycle->id)->sharedLock()->first();
+        $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->first();
         if ($actuel === null || ! $actuel->estOuvert()) {
             throw new RegleLogistique('Cycle clôturé : découpage non modifiable.');
         }

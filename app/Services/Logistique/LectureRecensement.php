@@ -75,12 +75,36 @@ class LectureRecensement
     {
         return $this->base()->table('fichier_electoral')
             ->where('origine', 'etranger')
+            ->whereNotNull('departement')->where('departement', '!=', '')
+            ->whereNotNull('commune')->where('commune', '!=', '')
             ->select('departement as pays', 'commune as ville')
             ->distinct()
             ->orderBy('pays')
             ->orderBy('ville')
             ->get()
             ->map(fn ($v) => (object) ['pays' => $v->pays, 'ville' => $v->ville]);
+    }
+
+    /**
+     * Triplets distincts du fichier national, tels qu'écrits : région, département, commune.
+     * Les lignes dont l'un des trois est vide sont ignorées.
+     *
+     * @return Collection<int, object{region:string, departement:string, commune:string}>
+     */
+    public function sourcesCommunes(): Collection
+    {
+        return $this->base()->table('fichier_electoral')
+            ->where('origine', 'national')
+            ->whereNotNull('departement')->where('departement', '!=', '')
+            ->whereNotNull('arrondissement')->where('arrondissement', '!=', '')
+            ->whereNotNull('commune')->where('commune', '!=', '')
+            ->select('departement as region', 'arrondissement as departement', 'commune')
+            ->distinct()
+            ->orderBy('region')
+            ->orderBy('departement')
+            ->orderBy('commune')
+            ->get()
+            ->map(fn ($s) => (object) ['region' => $s->region, 'departement' => $s->departement, 'commune' => $s->commune]);
     }
 
     private function base(): \Illuminate\Database\Connection
