@@ -70,6 +70,14 @@ class PlanDotationService
             if ($cles->isEmpty()) {
                 throw new RegleLogistique('Aucune clé de répartition définie pour ce cycle : calcul impossible.');
             }
+            // Une clé portée par le bulletin d'un autre cycle (donnée ancienne) n'est jamais calculée
+            // comme un article ordinaire : elle est écartée et signalée.
+            $bulletinsAutres = EntiteBulletin::whereIn('materiel_id', $cles->pluck('materiel_id'))
+                ->where('cycle_id', '!=', $actuel->id)->pluck('materiel_id')->flip();
+            $clesIgnorees = $cles->filter(fn (CleRepartition $cle) => $bulletinsAutres->has($cle->materiel_id))
+                ->map(fn (CleRepartition $cle) => "Clé ignorée : bulletin d'un autre cycle ({$cle->materiel->libelle})")
+                ->values()->all();
+            $cles = $cles->reject(fn (CleRepartition $cle) => $bulletinsAutres->has($cle->materiel_id))->values();
             // Le cycle est lu une fois : les valeurs par défaut ne coûtent pas une requête par clé.
             $cles->each(fn (CleRepartition $cle) => $cle->setRelation('cycle', $actuel));
             $entites = EntiteBulletin::where('cycle_id', $actuel->id)
@@ -78,6 +86,7 @@ class PlanDotationService
 
             [$parametres, $objets] = $this->parametres($cles, $entites);
             [$localites, $anomaliesPlan] = $this->localites($actuel, $source, $entites);
+            $anomaliesPlan = array_merge($anomaliesPlan, $clesIgnorees);
 
             $precedent = PlanDotation::where('cycle_id', $actuel->id)->orderByDesc('version')->first();
             $corrections = $precedent === null ? collect() : PlanDotationLigne::where('plan_dotation_id', $precedent->id)

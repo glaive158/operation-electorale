@@ -247,6 +247,33 @@ class ClesEntitesTest extends TestCase
         $this->assertSame('1.2000', $cle->ratio);
     }
 
+    public function test_bulletin_d_un_autre_cycle_refuse_dans_les_cles(): void
+    {
+        $entite = $this->cles->ajouterEntite($this->cycle, ['type' => 'candidat', 'nom' => 'Candidat X', 'ordre' => 1]);
+        $tour2 = Cycle::create(['libelle' => 'Tour 2', 'type' => 'scrutin']);
+
+        try {
+            $this->cles->enregistrer($tour2, $entite->materiel, ['base' => 'electeur', 'ratio' => '1']);
+            $this->fail('La clé d\'un bulletin d\'un autre cycle doit être refusée.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Ce bulletin de vote appartient à un autre cycle.', $e->getMessage());
+        }
+        $this->assertFalse(CleRepartition::where('cycle_id', $tour2->id)->where('materiel_id', $entite->materiel_id)->exists());
+    }
+
+    public function test_ecran_des_cles_masque_les_bulletins_des_autres_cycles(): void
+    {
+        $this->cles->ajouterEntite($this->cycle, ['type' => 'candidat', 'nom' => 'Candidat X', 'ordre' => 1]);
+        $tour2 = Cycle::create(['libelle' => 'Tour 2', 'type' => 'scrutin']);
+        $this->cles->ajouterEntite($tour2, ['type' => 'candidat', 'nom' => 'Candidat Y', 'ordre' => 1]);
+
+        $this->get(route('logistique.cles.index', $tour2))
+            ->assertOk()
+            ->assertSee('Urne')
+            ->assertSee('Bulletin de vote — Candidat Y')
+            ->assertDontSee('Bulletin de vote — Candidat X');
+    }
+
     public function test_renommer_entite_met_a_jour_l_article(): void
     {
         $entite = $this->cles->ajouterEntite($this->cycle, ['type' => 'liste', 'nom' => 'Liste A', 'ordre' => 1]);

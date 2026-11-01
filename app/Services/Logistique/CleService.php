@@ -2,6 +2,7 @@
 
 namespace App\Services\Logistique;
 
+use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\CleRepartition;
 use App\Models\Logistique\CommissionAdministrative;
 use App\Models\Logistique\Cycle;
@@ -52,6 +53,10 @@ class CleService
             CommissionAdministrative::verrouillerCycleOuvert($cycle);
 
             $materiel = Materiel::whereKey($materiel->id)->lockForUpdate()->firstOrFail();
+            $cycleBulletin = EntiteBulletin::where('materiel_id', $materiel->id)->value('cycle_id');
+            if ($cycleBulletin !== null && (int) $cycleBulletin !== (int) $cycle->id) {
+                throw new RegleLogistique('Ce bulletin de vote appartient à un autre cycle.');
+            }
             $existante = CleRepartition::where('cycle_id', $cycle->id)
                 ->where('materiel_id', $materiel->id)->lockForUpdate()->first();
 

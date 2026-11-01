@@ -22,7 +22,11 @@ class CleController extends Controller
     {
         return view('logistique.cles.index', [
             'cycle' => $cycle,
-            'materiels' => Materiel::actifs()->orderBy('categorie')->orderBy('ordre')->orderBy('libelle')->get(),
+            // Les bulletins de vote d'un autre cycle n'ont pas de clé ici.
+            'materiels' => Materiel::actifs()
+                ->where(fn ($q) => $q->whereDoesntHave('entiteBulletin')
+                    ->orWhereHas('entiteBulletin', fn ($e) => $e->where('cycle_id', $cycle->id)))
+                ->orderBy('categorie')->orderBy('ordre')->orderBy('libelle')->get(),
             'cles' => CleRepartition::with('cycle')->where('cycle_id', $cycle->id)->get()->keyBy('materiel_id'),
             'autresCycles' => Cycle::where('id', '!=', $cycle->id)->orderByDesc('id')->get(),
         ]);

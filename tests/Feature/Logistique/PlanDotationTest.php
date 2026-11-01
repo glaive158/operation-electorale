@@ -3,6 +3,7 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\CleRepartition;
 use App\Models\Logistique\CorrespondanceGeo;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
@@ -333,6 +334,24 @@ class PlanDotationTest extends TestCase
         $this->assertSame($this->sindia->id, $bulletins->first()->destinataire_id);
         $this->assertSame(150, $bulletins->first()->effectif);
         $this->assertSame(2, PlanDotationLigne::where('plan_dotation_id', $plan->id)->where('materiel_id', $nationale->materiel_id)->count());
+    }
+
+    public function test_cle_sur_bulletin_d_un_autre_cycle_ignoree_et_signalee(): void
+    {
+        $autre = Cycle::create(['libelle' => 'Tour 1', 'type' => 'scrutin']);
+        $entite = app(CleService::class)->ajouterEntite($autre, ['type' => 'candidat', 'nom' => 'Candidat X']);
+        // Donnée ancienne : la clé a été enregistrée avant le contrôle du cycle du bulletin.
+        CleRepartition::create([
+            'cycle_id' => $this->cycle->id, 'materiel_id' => $entite->materiel_id, 'base' => 'electeur', 'ratio' => '1',
+            'majoration_distribuee' => '0', 'minimum' => 0, 'arrondi' => 'unite',
+        ]);
+
+        $plan = $this->service()->calculer($this->cycle, $this->instantane());
+
+        $this->assertSame(0, PlanDotationLigne::where('plan_dotation_id', $plan->id)->where('materiel_id', $entite->materiel_id)->count());
+        $this->assertArrayNotHasKey($entite->materiel_id, $plan->parametres);
+        $this->assertContains("Clé ignorée : bulletin d'un autre cycle (Bulletin de vote — Candidat X)", $plan->anomalies);
+        $this->assertSame(6, $this->ligne($plan, $this->urnes, $this->sindia)->dotation_calculee);
     }
 
     public function test_instantane_non_fige_refuse(): void
