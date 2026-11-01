@@ -7,6 +7,7 @@ use App\Models\Logistique\Cycle;
 use App\Services\Logistique\Journal;
 use App\Services\Logistique\StockService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class CycleController extends Controller
 {
@@ -28,8 +29,12 @@ class CycleController extends Controller
 
     public function store(Request $request)
     {
-        $cycle = Cycle::create($this->valider($request));
-        Journal::noter('cycle', $cycle->id, 'creation', null, $cycle->only($cycle->getFillable()));
+        $donnees = $this->valider($request);
+
+        DB::transaction(function () use ($donnees) {
+            $cycle = Cycle::create($donnees);
+            Journal::noter('cycle', $cycle->id, 'creation', null, $cycle->only($cycle->getFillable()));
+        });
 
         return redirect()->route('logistique.cycles.index')->with('success', 'Cycle créé.');
     }
@@ -49,9 +54,25 @@ class CycleController extends Controller
             return redirect()->route('logistique.cycles.index')->with('error', self::CYCLE_CLOS);
         }
 
-        $avant = $cycle->only($cycle->getFillable());
-        $cycle->update($this->valider($request));
-        Journal::noter('cycle', $cycle->id, 'modification', $avant, $cycle->only($cycle->getFillable()));
+        $donnees = $this->valider($request);
+
+        $modifie = DB::transaction(function () use ($cycle, $donnees) {
+            // Relu sous verrou : une clôture concurrente (verrou exclusif) a pu passer depuis le chargement.
+            $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->firstOrFail();
+            if (! $actuel->estOuvert()) {
+                return false;
+            }
+
+            $avant = $actuel->only($actuel->getFillable());
+            $actuel->update($donnees);
+            Journal::noter('cycle', $actuel->id, 'modification', $avant, $actuel->only($actuel->getFillable()));
+
+            return true;
+        });
+
+        if (! $modifie) {
+            return redirect()->route('logistique.cycles.index')->with('error', self::CYCLE_CLOS);
+        }
 
         return redirect()->route('logistique.cycles.index')->with('success', 'Cycle mis à jour.');
     }
