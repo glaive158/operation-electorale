@@ -59,8 +59,11 @@ class CleRepartition extends Model
     {
         $valeur = $this->{$champ};
         if ($valeur === null) {
-            // Le cycle peut avoir été créé sans ses colonnes à défaut : on relit la base.
-            $valeur = Cycle::whereKey($this->cycle_id)->value($champ);
+            // Cycle déjà chargé (calcul en masse) : pas de requête par clé. Sinon on relit la base,
+            // le cycle pouvant avoir été créé sans ses colonnes à défaut.
+            $valeur = $this->relationLoaded('cycle')
+                ? $this->cycle?->{$champ}
+                : Cycle::whereKey($this->cycle_id)->value($champ);
         }
 
         return bcadd((string) ($valeur ?? '0'), '0', 2);

@@ -8,6 +8,7 @@ use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PerimetreDestinataire;
 use App\Models\Logistique\PosteEtranger;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
 use LogicException;
 
@@ -202,6 +203,52 @@ class DecoupageService
             ], $motif);
 
             return $perimetre;
+        }, attempts: 3);
+    }
+
+    /**
+     * Retire une localité du périmètre du cycle (commune sans électeur, par exemple) : le plan de dotation
+     * ne la réclame plus. Réservé au responsable ; le motif et l'ancienne affectation sont journalisés.
+     */
+    public function retirer(Cycle $cycle, ?int $communeId, ?string $pays, ?string $ville, string $motif): void
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut retirer une localité du périmètre.');
+        }
+
+        $motif = trim($motif);
+        if ($motif === '') {
+            throw new InvalidArgumentException('Le motif est obligatoire.');
+        }
+        $pays = $pays === null ? null : trim($pays);
+        $ville = $ville === null ? null : trim($ville);
+        $etranger = ($pays !== null && $pays !== '') || ($ville !== null && $ville !== '');
+        if ($communeId !== null && $etranger) {
+            throw new InvalidArgumentException('Une localité est soit une commune, soit un pays et une ville.');
+        }
+        if ($communeId === null && ($pays === null || $pays === '' || $ville === null || $ville === '')) {
+            throw new InvalidArgumentException('Indiquer une commune, ou un pays et une ville.');
+        }
+
+        DB::transaction(function () use ($cycle, $communeId, $pays, $ville, $motif) {
+            $this->verrouillerCycleOuvert($cycle);
+
+            $requete = PerimetreDestinataire::where('cycle_id', $cycle->id);
+            if ($communeId !== null) {
+                $requete->where('commune_id', $communeId);
+            } else {
+                $requete->whereNull('commune_id')->where('pays', $pays)->where('ville', $ville);
+            }
+            $perimetre = $requete->lockForUpdate()->first();
+            if ($perimetre === null) {
+                throw new RegleLogistique('Cette localité ne figure pas au périmètre du cycle.');
+            }
+
+            $perimetre->delete();
+            Journal::noter('perimetre_destinataire', $perimetre->id, 'retrait_perimetre', [
+                'cycle_id' => $cycle->id, 'localite' => $perimetre->localite(), 'destinataire_id' => $perimetre->destinataire_id,
+            ], null, $motif);
         }, attempts: 3);
     }
 
