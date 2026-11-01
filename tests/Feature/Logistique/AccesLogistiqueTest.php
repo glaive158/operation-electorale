@@ -2,7 +2,12 @@
 
 namespace Tests\Feature\Logistique;
 
+use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Materiel;
 use App\Models\User;
+use App\Services\Logistique\CommandeService;
+use App\Services\Logistique\Journal;
+use App\Services\Logistique\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -69,5 +74,82 @@ class AccesLogistiqueTest extends TestCase
                 ->assertOk()
                 ->assertSee('Stock central');
         }
+    }
+
+    /**
+     * Chaque opération logistique laisse une trace imputable à son auteur.
+     *
+     * @return array<string, \Closure(User): void>
+     */
+    private function operationsLogistiques(): array
+    {
+        $stock = fn () => app(StockService::class);
+        $materiel = fn () => Materiel::create(['libelle' => 'Urne', 'categorie' => 'materiel_lourd']);
+
+        return [
+            'mouvements_stock' => fn () => $stock()->inventaireInitial($materiel(), 10, 'Inventaire'),
+            'reservations_stock' => function () use ($stock, $materiel) {
+                $m = $materiel();
+                $stock()->inventaireInitial($m, 10, 'Inventaire');
+                $stock()->reserver(Cycle::create(['libelle' => 'A', 'type' => 'scrutin']), $m, 5);
+            },
+            'journal_logistique' => fn () => Journal::noter('materiel', 1, 'modification'),
+            'commandes' => fn () => app(CommandeService::class)->creer(
+                ['reference' => 'CMD-U', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'],
+                [['materiel_id' => $materiel()->id, 'quantite_commandee' => 5]],
+            ),
+            'receptions_fournisseur' => function () use ($materiel) {
+                $commandes = app(CommandeService::class);
+                $commande = $commandes->creer(
+                    ['reference' => 'CMD-R', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'],
+                    [['materiel_id' => $materiel()->id, 'quantite_commandee' => 5]],
+                );
+                $commandes->confirmer($commande);
+                $commandes->recevoir($commande, ['date_reception' => '2026-11-10', 'bon_livraison' => 'BL'], [
+                    $commande->lignes()->first()->id => ['acceptee' => 0, 'rejetee' => 5],
+                ]);
+            },
+        ];
+    }
+
+    public function test_suppression_d_un_utilisateur_lie_a_des_operations_logistiques_refusee(): void
+    {
+        $admin = User::factory()->create(['role' => 'admin']);
+
+        foreach ($this->operationsLogistiques() as $table => $operation) {
+            $auteur = User::factory()->create(['role' => 'logistique_responsable']);
+            $this->actingAs($auteur);
+            $operation();
+
+            $reponse = $this->actingAs($admin)->delete(route('users.destroy', $auteur));
+
+            $reponse->assertRedirect()->assertSessionHas(
+                'error',
+                'Utilisateur lié à des opérations logistiques : désactivez le compte au lieu de le supprimer.',
+            );
+            $this->assertDatabaseHas('users', ['id' => $auteur->id]);
+            $this->assertTrue(
+                DB::table($table)->where('user_id', $auteur->id)->exists(),
+                "Aucune ligne de {$table} pour l'auteur : le scénario ne teste pas cette table.",
+            );
+        }
+    }
+
+    public function test_utilisateur_sans_operation_logistique_reste_supprimable(): void
+    {
+        $admin = User::factory()->create(['role' => 'admin']);
+        $libre = User::factory()->create(['role' => 'logistique_gestionnaire']);
+
+        $this->actingAs($admin)->delete(route('users.destroy', $libre))
+            ->assertRedirect(route('users.index'))->assertSessionHas('success');
+        $this->assertDatabaseMissing('users', ['id' => $libre->id]);
+    }
+
+    public function test_compte_logistique_n_affiche_pas_toutes_zones(): void
+    {
+        foreach (['logistique_gestionnaire', 'logistique_responsable'] as $role) {
+            $this->assertSame('Logistique centrale', User::factory()->make(['role' => $role])->zone_label);
+        }
+        $this->assertSame('Toutes zones', User::factory()->make(['role' => 'admin'])->zone_label);
     }
 }

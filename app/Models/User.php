@@ -67,6 +67,7 @@ class User extends Authenticatable
             'prefet'      => $this->departement_nom ?? '—',
             'sous_prefet' => $this->arrondissement_nom ?? '—',
             'commission'  => $this->commune_nom ?? '—',
+            'logistique_gestionnaire', 'logistique_responsable' => 'Logistique centrale',
             default       => 'Toutes zones',
         };
     }
