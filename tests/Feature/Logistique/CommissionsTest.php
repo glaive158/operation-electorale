@@ -9,6 +9,7 @@ use App\Models\Logistique\JournalEntree;
 use App\Models\User;
 use App\Services\Logistique\CommissionService;
 use App\Services\Logistique\DecoupageService;
+use App\Services\Logistique\NomGeo;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -77,8 +78,11 @@ class CommissionsTest extends TestCase
     public function test_commission_etranger_par_ville(): void
     {
         $this->commissions->creer($this->cycle, ['type' => 'etranger', 'pays' => 'France', 'ville' => 'Lyon']);
+        $this->commissions->creer($this->cycle, ['type' => 'etranger', 'pays' => '  france', 'ville' => 'LYON']);
 
-        $this->assertSame(1, CommissionAdministrative::compterParLocalite($this->cycle)['France|Lyon']);
+        // Les deux graphies désignent la même localité : clé normalisée, comptée deux fois.
+        $this->assertSame(2, CommissionAdministrative::compterParLocalite($this->cycle)['FRANCE|LYON']);
+        $this->assertSame(NomGeo::cleEtranger('France', 'Lyon'), 'FRANCE|LYON');
     }
 
     public function test_localite_incoherente_refusee(): void

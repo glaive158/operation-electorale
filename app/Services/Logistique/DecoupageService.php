@@ -110,10 +110,15 @@ class DecoupageService
             }
 
             foreach ($villes as $localite) {
-                if ($villesAffectees->has("{$localite->pays}|{$localite->ville}")) {
+                $pays = trim($localite->pays);
+                $ville = trim($localite->ville);
+                $cle = NomGeo::cleEtranger($pays, $ville);
+                if ($villesAffectees->has($cle)) {
                     continue;
                 }
-                $poste = PosteEtranger::posteParDefaut($localite->pays, $localite->ville);
+                // Une autre graphie de la même ville ne crée pas une seconde localité.
+                $villesAffectees->put($cle, true);
+                $poste = PosteEtranger::posteParDefaut($pays, $ville);
                 $destinataireId = $poste
                     ? Destinataire::where('poste_etranger_id', $poste->id)->value('id')
                     : null;
@@ -124,7 +129,7 @@ class DecoupageService
                 }
                 PerimetreDestinataire::create([
                     'cycle_id' => $cycle->id, 'destinataire_id' => $destinataireId,
-                    'pays' => $localite->pays, 'ville' => $localite->ville,
+                    'pays' => $pays, 'ville' => $ville,
                 ]);
                 $affectees++;
             }
@@ -175,13 +180,7 @@ class DecoupageService
                 throw new RegleLogistique('Destinataire inactif : affectation impossible.');
             }
 
-            $requete = PerimetreDestinataire::where('cycle_id', $cycle->id);
-            if ($communeId !== null) {
-                $requete->where('commune_id', $communeId);
-            } else {
-                $requete->whereNull('commune_id')->where('pays', $pays)->where('ville', $ville);
-            }
-            $perimetre = $requete->lockForUpdate()->first();
+            $perimetre = $this->perimetreDe($cycle, $communeId, $pays, $ville);
 
             if ($perimetre === null) {
                 $perimetre = PerimetreDestinataire::create([
@@ -235,13 +234,7 @@ class DecoupageService
         DB::transaction(function () use ($cycle, $communeId, $pays, $ville, $motif) {
             $this->verrouillerCycleOuvert($cycle);
 
-            $requete = PerimetreDestinataire::where('cycle_id', $cycle->id);
-            if ($communeId !== null) {
-                $requete->where('commune_id', $communeId);
-            } else {
-                $requete->whereNull('commune_id')->where('pays', $pays)->where('ville', $ville);
-            }
-            $perimetre = $requete->lockForUpdate()->first();
+            $perimetre = $this->perimetreDe($cycle, $communeId, $pays, $ville);
             if ($perimetre === null) {
                 throw new RegleLogistique('Cette localité ne figure pas au périmètre du cycle.');
             }
@@ -448,6 +441,23 @@ class DecoupageService
         if (! Gate::allows('logistique-administrer')) {
             throw new RegleLogistique($message);
         }
+    }
+
+    /**
+     * Ligne de périmètre d'une localité, verrouillée. À l'étranger, la localité est retrouvée sous
+     * sa forme normalisée, quelle que soit la graphie saisie.
+     */
+    private function perimetreDe(Cycle $cycle, ?int $communeId, ?string $pays, ?string $ville): ?PerimetreDestinataire
+    {
+        if ($communeId !== null) {
+            return PerimetreDestinataire::where('cycle_id', $cycle->id)->where('commune_id', $communeId)->lockForUpdate()->first();
+        }
+
+        $cle = NomGeo::cleEtranger((string) $pays, (string) $ville);
+
+        return PerimetreDestinataire::where('cycle_id', $cycle->id)->whereNull('commune_id')
+            ->orderBy('id')->lockForUpdate()->get()
+            ->first(fn (PerimetreDestinataire $p) => $p->localite() === $cle);
     }
 
     private function verrouillerCycleOuvert(Cycle $cycle): void

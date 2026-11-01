@@ -8,6 +8,7 @@ use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PerimetreDestinataire;
 use App\Services\Logistique\DecoupageService;
 use App\Services\Logistique\LectureRecensement;
+use App\Services\Logistique\NomGeo;
 use Illuminate\Http\Request;
 
 /** Destinataires et découpage du cycle (qui sert quelle localité). */
@@ -63,7 +64,7 @@ class GeographieController extends Controller
         $sansDestinataire = $communes->reject(fn ($c) => $affectees->has("commune:{$c->id}"))
             ->map(fn ($c) => ['commune_id' => $c->id, 'pays' => null, 'ville' => null, 'libelle' => "{$c->nom} ({$c->departement_nom})"])
             ->merge($this->recensement->villesEtranger()
-                ->reject(fn ($v) => $affectees->has("{$v->pays}|{$v->ville}"))
+                ->reject(fn ($v) => $affectees->has(NomGeo::cleEtranger($v->pays, $v->ville)))
                 ->map(fn ($v) => ['commune_id' => null, 'pays' => $v->pays, 'ville' => $v->ville, 'libelle' => "{$v->pays} | {$v->ville}"]))
             ->values();
 

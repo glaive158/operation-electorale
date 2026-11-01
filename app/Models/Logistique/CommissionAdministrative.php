@@ -34,7 +34,7 @@ class CommissionAdministrative extends Model
         return $this->belongsTo(Cycle::class);
     }
 
-    /** Clé de la localité, identique à celle de PerimetreDestinataire : « commune:{id} » ou « {pays}|{ville} ». */
+    /** Clé de la localité, identique à celle de PerimetreDestinataire (forme normalisée à l'étranger). */
     public function localite(): string
     {
         return (new PerimetreDestinataire([

@@ -16,4 +16,19 @@ class NomGeo
 
         return trim(preg_replace('/\s+/u', ' ', $espaces) ?? $espaces);
     }
+
+    /** Identité d'un pays du fichier ou d'un paramètre : insensible à la casse, aux accents et aux espaces. */
+    public static function clePays(string $pays): string
+    {
+        return self::normaliser($pays);
+    }
+
+    /**
+     * Identité d'une localité étrangère (pays, ville). Le texte reste stocké tel qu'écrit ; seules
+     * les comparaisons et les clés passent par cette forme.
+     */
+    public static function cleEtranger(string $pays, string $ville): string
+    {
+        return self::normaliser($pays).'|'.self::normaliser($ville);
+    }
 }

@@ -184,10 +184,13 @@ class InstantaneService
         }
         ksort($parCommune);
 
+        // Les graphies d'une même ville (casse, espaces, accents) forment une seule localité,
+        // affichée sous la première graphie rencontrée.
         $parVille = [];
         foreach ($etranger as $e) {
-            $parVille["{$e->pays}|{$e->ville}"] ??= $this->cumul() + ['pays' => $e->pays, 'ville' => $e->ville];
-            $this->ajouter($parVille["{$e->pays}|{$e->ville}"], $e);
+            $cle = NomGeo::cleEtranger($e->pays, $e->ville);
+            $parVille[$cle] ??= $this->cumul() + ['pays' => $e->pays, 'ville' => $e->ville];
+            $this->ajouter($parVille[$cle], $e);
         }
 
         // Une région n'apparaît que sous une clé : nom normalisé, affiché comme au recensement quand il est connu.

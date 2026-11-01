@@ -274,7 +274,9 @@ class PlanDotationService
 
                 continue;
             }
-            $parCle[$ligne->commune_id !== null ? "commune:{$ligne->commune_id}" : "{$ligne->pays}|{$ligne->ville}"] = $ligne;
+            $parCle[$ligne->commune_id !== null
+                ? "commune:{$ligne->commune_id}"
+                : NomGeo::cleEtranger((string) $ligne->pays, (string) $ligne->ville)] = $ligne;
         }
 
         $perimetres = PerimetreDestinataire::where('cycle_id', $cycle->id)->orderBy('id')->get();

@@ -2,6 +2,7 @@
 
 namespace App\Models\Logistique;
 
+use App\Services\Logistique\NomGeo;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
@@ -27,9 +28,13 @@ class PosteEtranger extends Model
      */
     public static function posteParDefaut(string $pays, string $ville): ?self
     {
-        $postes = static::actifs()->where('pays', $pays)->orderBy('id')->get();
+        // Pays et ville comparés sous forme normalisée : le fichier écrit « PARIS », le poste « Paris ».
+        $clePays = NomGeo::clePays($pays);
+        $cleVille = NomGeo::normaliser($ville);
+        $postes = static::actifs()->orderBy('id')->get()
+            ->filter(fn (self $poste) => NomGeo::clePays($poste->pays) === $clePays)->values();
 
-        return $postes->firstWhere('ville', $ville)
+        return $postes->first(fn (self $poste) => NomGeo::normaliser($poste->ville) === $cleVille)
             ?? $postes->firstWhere('type', 'consulat')
             ?? $postes->firstWhere('type', 'ambassade');
     }

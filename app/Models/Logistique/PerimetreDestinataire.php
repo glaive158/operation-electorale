@@ -2,6 +2,7 @@
 
 namespace App\Models\Logistique;
 
+use App\Services\Logistique\NomGeo;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -21,11 +22,11 @@ class PerimetreDestinataire extends Model
         return $this->belongsTo(Destinataire::class);
     }
 
-    /** Clé de la localité : « commune:{id} » ou « {pays}|{ville} ». */
+    /** Clé de la localité : « commune:{id} », ou NomGeo::cleEtranger(pays, ville) à l'étranger. */
     public function localite(): string
     {
         return $this->commune_id !== null
             ? "commune:{$this->commune_id}"
-            : "{$this->pays}|{$this->ville}";
+            : NomGeo::cleEtranger((string) $this->pays, (string) $this->ville);
     }
 }

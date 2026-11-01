@@ -14,6 +14,7 @@ use App\Models\Logistique\Materiel;
 use App\Models\Logistique\PerimetreDestinataire;
 use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\PlanDotationLigne;
+use App\Models\Logistique\PosteEtranger;
 use App\Models\User;
 use App\Services\Logistique\CleService;
 use App\Services\Logistique\DecoupageService;
@@ -236,6 +237,26 @@ class PlanDotationTest extends TestCase
         );
         // Popenguine n'est plus au périmètre de Sindia : ses électeurs n'entrent pas dans la dotation.
         $this->assertSame(4, $this->ligne($plan, $this->urnes, $this->sindia)->effectif);
+    }
+
+    public function test_ville_etrangere_rapprochee_du_perimetre_malgre_la_casse(): void
+    {
+        $poste = PosteEtranger::create(['pays' => 'France', 'ville' => 'Paris', 'type' => 'consulat', 'nom' => 'Consulat de Paris']);
+        app(DecoupageService::class)->genererDestinataires();
+        $consulat = Destinataire::where('poste_etranger_id', $poste->id)->firstOrFail();
+        PerimetreDestinataire::create(['cycle_id' => $this->cycle->id, 'destinataire_id' => $consulat->id, 'pays' => 'France', 'ville' => 'Paris']);
+        $instantane = $this->instantane();
+        InstantaneLigne::create([
+            'instantane_id' => $instantane->id, 'pays' => 'FRANCE', 'ville' => 'PARIS ',
+            'electeurs' => 12, 'bureaux_vote' => 1, 'lieux_vote' => 1, 'rapprochee' => true,
+        ]);
+
+        $plan = $this->service()->calculer($this->cycle, $instantane);
+
+        $this->assertSame([], $plan->anomalies);
+        $ligne = $this->ligne($plan, $this->urnes, $consulat);
+        $this->assertNull($ligne->anomalie);
+        $this->assertSame(1, $ligne->dotation_calculee);
     }
 
     public function test_correction_motivee_puis_approbation(): void

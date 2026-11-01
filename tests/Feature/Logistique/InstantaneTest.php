@@ -7,9 +7,11 @@ use App\Jobs\Logistique\CapturerInstantane;
 use App\Models\Logistique\CommissionAdministrative;
 use App\Models\Logistique\CorrespondanceGeo;
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\InstantaneEffectifs;
 use App\Models\Logistique\InstantaneLigne;
 use App\Models\Logistique\JournalEntree;
+use App\Models\Logistique\PosteEtranger;
 use App\Models\User;
 use App\Services\Logistique\CorrespondanceService;
 use App\Services\Logistique\DecoupageService;
@@ -237,6 +239,31 @@ class InstantaneTest extends TestCase
         $this->assertSame(0, $i->bilan['electeurs_national']);
         $this->assertSame(0, $i->bilan['electeurs_rapproches']);
         $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_graphies_d_une_ville_etrangere_fusionnees(): void
+    {
+        PosteEtranger::create(['pays' => 'France', 'ville' => 'Paris', 'type' => 'consulat', 'nom' => 'Consulat de Paris']);
+        RecensementFictif::electeurs('etranger', 'FRANCE', null, 'PARIS', '9001010101', '90010101', 3);
+        RecensementFictif::electeurs('etranger', 'France', null, 'Paris', '9001010102', '90010101', 2);
+        RecensementFictif::electeurs('etranger', ' france', null, 'paris', '9001010102', '90010101', 1);
+        $decoupage = app(DecoupageService::class);
+        $decoupage->genererDestinataires();
+        $decoupage->genererPerimetre($this->cycle);
+        CommissionAdministrative::create(['cycle_id' => $this->cycle->id, 'type' => 'etranger', 'pays' => 'france', 'ville' => 'PARIS']);
+
+        $i = $this->capturer();
+
+        $lignes = InstantaneLigne::where('instantane_id', $i->id)->whereNull('commune_id')->get();
+        $this->assertCount(1, $lignes);
+        $paris = $lignes->first();
+        $this->assertSame(6, $paris->electeurs);
+        $this->assertSame(2, $paris->bureaux_vote);
+        $this->assertSame(1, $paris->lieux_vote);
+        $this->assertSame(1, $paris->commissions);
+        $this->assertSame(Destinataire::where('libelle', 'Consulat de Paris')->value('id'), $paris->destinataire_id);
+        $this->assertSame([], $i->bilan['localites_sans_destinataire']);
+        $this->assertSame(6, $i->bilan['electeurs_etranger']);
     }
 
     public function test_localites_sans_destinataire_listees(): void

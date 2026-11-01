@@ -225,6 +225,17 @@ class ClesEntitesTest extends TestCase
         $this->assertTrue($nationale->couvre(null, null, 'Italie'));
     }
 
+    public function test_pays_du_perimetre_compare_sans_tenir_compte_de_la_casse(): void
+    {
+        $entite = $this->cles->ajouterEntite($this->cycle, [
+            'type' => 'liste', 'nom' => 'Liste Europe', 'national' => false, 'perimetre' => ['pays' => ['  france ']],
+        ])->load('perimetres');
+
+        $this->assertTrue($entite->couvre(null, null, 'France'));
+        $this->assertTrue($entite->couvre(null, null, 'FRANCE'));
+        $this->assertFalse($entite->couvre(null, null, 'Italie'));
+    }
+
     public function test_cle_bulletin_doit_rester_par_electeur(): void
     {
         $entite = $this->cles->ajouterEntite($this->cycle, ['type' => 'liste', 'nom' => 'Liste A', 'ordre' => 1]);

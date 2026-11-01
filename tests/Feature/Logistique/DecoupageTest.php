@@ -136,10 +136,38 @@ class DecoupageTest extends TestCase
 
         $marseille = PerimetreDestinataire::where('pays', 'France')->where('ville', 'Marseille')->firstOrFail();
         $this->assertSame($this->destinataire('Consulat de Lyon')->id, $marseille->destinataire_id);
-        $this->assertSame('France|Marseille', $marseille->localite());
+        $this->assertSame('FRANCE|MARSEILLE', $marseille->localite());
 
         $paris = PerimetreDestinataire::where('pays', 'France')->where('ville', 'Paris')->firstOrFail();
         $this->assertSame($this->destinataire('Ambassade de Paris')->id, $paris->destinataire_id);
+    }
+
+    public function test_ville_du_fichier_comparee_au_poste_sans_tenir_compte_de_la_casse(): void
+    {
+        PosteEtranger::create(['pays' => 'FRANCE', 'ville' => 'Lyon', 'type' => 'consulat', 'nom' => 'Consulat de Lyon']);
+        PosteEtranger::create(['pays' => 'FRANCE', 'ville' => 'Paris', 'type' => 'consulat', 'nom' => 'Consulat général de Paris']);
+        RecensementFictif::electeurs('etranger', 'FRANCE', null, 'PARIS', 'B2', 'Salle B', 2);
+        RecensementFictif::electeurs('etranger', ' france ', null, 'paris ', 'B3', 'Salle C', 1);
+
+        $this->decoupage->genererDestinataires();
+        $cycle = $this->cycle();
+        $resultat = $this->decoupage->genererPerimetre($cycle);
+
+        // Deux graphies de la même ville : une seule localité, confiée au consulat de la ville.
+        $this->assertSame(['affectees' => 3 + 1, 'sans_destinataire' => 0], $resultat);
+        $paris = PerimetreDestinataire::where('cycle_id', $cycle->id)->whereNull('commune_id')->sole();
+        $this->assertSame($this->destinataire('Consulat général de Paris')->id, $paris->destinataire_id);
+        $this->assertSame(trim($paris->pays), $paris->pays);
+        $this->assertSame(trim($paris->ville), $paris->ville);
+        $this->assertSame('FRANCE|PARIS', $paris->localite());
+
+        // Réaffectation et retrait retrouvent la localité quelle que soit la graphie saisie.
+        $this->decoupage->affecter($cycle, $this->destinataire('Consulat de Lyon'), null, 'France', 'Paris', 'renfort');
+        $this->assertSame(1, PerimetreDestinataire::where('cycle_id', $cycle->id)->whereNull('commune_id')->count());
+        $this->assertSame($this->destinataire('Consulat de Lyon')->id, $paris->fresh()->destinataire_id);
+
+        $this->decoupage->retirer($cycle, null, 'france', 'PARIS', 'ville fermée');
+        $this->assertSame(0, PerimetreDestinataire::where('cycle_id', $cycle->id)->whereNull('commune_id')->count());
     }
 
     public function test_etranger_sans_poste_reste_sans_destinataire(): void

@@ -2,6 +2,7 @@
 
 namespace App\Models\Logistique;
 
+use App\Services\Logistique\NomGeo;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -48,8 +49,10 @@ class EntiteBulletin extends Model
             return true;
         }
 
+        $clePays = $pays === null ? null : NomGeo::clePays($pays);
+
         return $this->perimetres->contains(fn (EntiteBulletinPerimetre $p) => ($departementId !== null && $p->departement_id === $departementId)
             || ($communeId !== null && $p->commune_id === $communeId)
-            || ($pays !== null && $p->pays !== null && $p->pays === $pays));
+            || ($clePays !== null && $p->pays !== null && NomGeo::clePays($p->pays) === $clePays));
     }
 }
