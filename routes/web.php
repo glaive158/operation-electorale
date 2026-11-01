@@ -9,6 +9,10 @@ use App\Http\Controllers\ChargeElectoraleController;
 use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
+use App\Http\Controllers\Logistique\CommandeController;
+use App\Http\Controllers\Logistique\CycleController;
+use App\Http\Controllers\Logistique\MaterielController;
+use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
 use App\Http\Controllers\ListeEmargementController;
@@ -27,73 +31,104 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/',          [DashboardController::class, 'index'])->name('dashboard');
     Route::get('/dashboard', [DashboardController::class, 'index']);
 
-    /* NIN lookup — accessible à tous (utilisé dans le formulaire create) */
-    Route::get('/fichier-electoral/nin/{nin}', [FichierElectoralController::class, 'byNin'])->name('fichier-electoral.nin');
+    /* Pages existantes — fermées aux comptes logistique */
+    Route::middleware('role:admin,gouverneur,prefet,sous_prefet,commission')->group(function () {
 
-    /* Fichier électoral — interdit aux commissions */
-    Route::middleware('role:admin,gouverneur,prefet,sous_prefet')->group(function () {
-        Route::get('/fichier-electoral',           [FichierElectoralController::class, 'index'])->name('fichier-electoral');
-        Route::get('/fichier-electoral/{id}',      [FichierElectoralController::class, 'show'])->name('fichier-electoral.show');
+        /* NIN lookup — accessible à tous (utilisé dans le formulaire create) */
+        Route::get('/fichier-electoral/nin/{nin}', [FichierElectoralController::class, 'byNin'])->name('fichier-electoral.nin');
 
-        /* Carte électorale */
-        Route::get('/carte-electorale',              [CarteElectoraleController::class, 'index'])->name('carte-electorale');
-        Route::get('/carte-electorale/api/pays',     [CarteElectoraleController::class, 'apiPays']);
-        Route::get('/carte-electorale/api/villes/{pays}', [CarteElectoraleController::class, 'apiVilles']);
+        /* Fichier électoral — interdit aux commissions */
+        Route::middleware('role:admin,gouverneur,prefet,sous_prefet')->group(function () {
+            Route::get('/fichier-electoral',           [FichierElectoralController::class, 'index'])->name('fichier-electoral');
+            Route::get('/fichier-electoral/{id}',      [FichierElectoralController::class, 'show'])->name('fichier-electoral.show');
 
-        /* Charge électorale */
-        Route::get('/charge-electorale',             [ChargeElectoraleController::class, 'index'])->name('charge-electorale');
-        Route::get('/charge-electorale/bureau/{codeBureau}', [ChargeElectoraleController::class, 'showBureau'])->name('charge-electorale.bureau');
+            /* Carte électorale */
+            Route::get('/carte-electorale',              [CarteElectoraleController::class, 'index'])->name('carte-electorale');
+            Route::get('/carte-electorale/api/pays',     [CarteElectoraleController::class, 'apiPays']);
+            Route::get('/carte-electorale/api/villes/{pays}', [CarteElectoraleController::class, 'apiVilles']);
 
-        /* Liste d'émargement */
-        Route::get('/liste-emargement',              [ListeEmargementController::class, 'index'])->name('liste-emargement');
-        Route::post('/liste-emargement/generate',    [ListeEmargementController::class, 'generate'])->name('liste-emargement.generate');
-        Route::post('/liste-emargement/generate-stream', [ListeEmargementController::class, 'generateStream'])->name('liste-emargement.generate-stream');
-        Route::post('/liste-emargement/generate-zip', [ListeEmargementController::class, 'generateZip'])->name('liste-emargement.generate-zip');
+            /* Charge électorale */
+            Route::get('/charge-electorale',             [ChargeElectoraleController::class, 'index'])->name('charge-electorale');
+            Route::get('/charge-electorale/bureau/{codeBureau}', [ChargeElectoraleController::class, 'showBureau'])->name('charge-electorale.bureau');
 
-        /* Comparaison lieux de vote (ancien vs nouveau) */
-        Route::get('/comparaison-lieux',         [ComparaisonLieuxController::class, 'index'])->name('comparaison-lieux');
-        Route::get('/comparaison-lieux/export',  [ComparaisonLieuxController::class, 'export'])->name('comparaison-lieux.export');
+            /* Liste d'émargement */
+            Route::get('/liste-emargement',              [ListeEmargementController::class, 'index'])->name('liste-emargement');
+            Route::post('/liste-emargement/generate',    [ListeEmargementController::class, 'generate'])->name('liste-emargement.generate');
+            Route::post('/liste-emargement/generate-stream', [ListeEmargementController::class, 'generateStream'])->name('liste-emargement.generate-stream');
+            Route::post('/liste-emargement/generate-zip', [ListeEmargementController::class, 'generateZip'])->name('liste-emargement.generate-zip');
 
-        /* Comparaison fichiers (3 tableaux côte à côte) */
-        Route::get('/comparaison-fichiers', [ComparaisonFichiersController::class, 'index'])->name('comparaison-fichiers');
+            /* Comparaison lieux de vote (ancien vs nouveau) */
+            Route::get('/comparaison-lieux',         [ComparaisonLieuxController::class, 'index'])->name('comparaison-lieux');
+            Route::get('/comparaison-lieux/export',  [ComparaisonLieuxController::class, 'export'])->name('comparaison-lieux.export');
 
-        /* Impact déplacement bureaux sur électeurs */
-        Route::get('/impact-deplacement', [ImpactDeplacementController::class, 'index'])->name('impact-deplacement');
+            /* Comparaison fichiers (3 tableaux côte à côte) */
+            Route::get('/comparaison-fichiers', [ComparaisonFichiersController::class, 'index'])->name('comparaison-fichiers');
 
-        /* Audit révisions 2025 */
-        Route::get('/audit-revisions', [AuditRevisionsController::class, 'index'])->name('audit-revisions');
+            /* Impact déplacement bureaux sur électeurs */
+            Route::get('/impact-deplacement', [ImpactDeplacementController::class, 'index'])->name('impact-deplacement');
 
-        /* Audit fichier électoral (disparus / nouveaux / changements bureau) */
-        Route::get('/audit-electoral', [AuditElectoralController::class, 'index'])->name('audit-electoral');
-        Route::get('/audit-electoral/export/{type}', [AuditElectoralController::class, 'export'])->name('audit-electoral.export');
+            /* Audit révisions 2025 */
+            Route::get('/audit-revisions', [AuditRevisionsController::class, 'index'])->name('audit-revisions');
 
-        /* Audit 76 incohérences commune (cartenats vs CSV) */
-        Route::get('/audit-communes', [AuditCommunesController::class, 'index'])->name('audit-communes');
-        Route::get('/audit-communes/export', [AuditCommunesController::class, 'export'])->name('audit-communes.export');
-        Route::get('/liste-emargement/api/lieux/{communeId}', [ListeEmargementController::class, 'apiLieuxVote']);
-        Route::get('/liste-emargement/api/bureaux/{lieuVote}', [ListeEmargementController::class, 'apiBureaux']);
-        Route::get('/liste-emargement/api/count',    [ListeEmargementController::class, 'apiCount']);
+            /* Audit fichier électoral (disparus / nouveaux / changements bureau) */
+            Route::get('/audit-electoral', [AuditElectoralController::class, 'index'])->name('audit-electoral');
+            Route::get('/audit-electoral/export/{type}', [AuditElectoralController::class, 'export'])->name('audit-electoral.export');
+
+            /* Audit 76 incohérences commune (cartenats vs CSV) */
+            Route::get('/audit-communes', [AuditCommunesController::class, 'index'])->name('audit-communes');
+            Route::get('/audit-communes/export', [AuditCommunesController::class, 'export'])->name('audit-communes.export');
+            Route::get('/liste-emargement/api/lieux/{communeId}', [ListeEmargementController::class, 'apiLieuxVote']);
+            Route::get('/liste-emargement/api/bureaux/{lieuVote}', [ListeEmargementController::class, 'apiBureaux']);
+            Route::get('/liste-emargement/api/count',    [ListeEmargementController::class, 'apiCount']);
+        });
+
+        /* Cascade géographique (JSON) — accessible à tous pour le formulaire create */
+        Route::get('/geo/region/{regionId}/departements',      [FichierElectoralController::class, 'geoRegionDepts']);
+        Route::get('/geo/departement/{deptId}/arrondissements',[FichierElectoralController::class, 'geoDeptArrs']);
+        Route::get('/geo/arrondissement/{arrId}/communes',     [FichierElectoralController::class, 'geoArrCommunes']);
+        Route::get('/geo/commune/adresses',                    [FichierElectoralController::class, 'geoAdressesByCommune']);
+
+        /* Opérations */
+        Route::resource('operations', OperationController::class);
+        Route::get('/operations/{operation}/imprimer',        [OperationController::class, 'imprimer'])->name('operations.imprimer');
+        Route::get('/operations/{operation}/scanner',         [OperationController::class, 'scanner'])->name('operations.scanner');
+        Route::post('/operations/{operation}/scanner',        [OperationController::class, 'scannerStore'])->name('operations.scanner.store');
+        Route::patch('/operations/{operation}/valider', [OperationController::class, 'valider'])
+             ->name('operations.valider')
+             ->middleware('role:admin,prefet,sous_prefet,gouverneur');
+        Route::patch('/operations/{operation}/rejeter', [OperationController::class, 'rejeter'])
+             ->name('operations.rejeter')
+             ->middleware('role:admin,prefet,sous_prefet,gouverneur');
+
+        /* Users — admin only */
+        Route::resource('users', UserController::class)->middleware('role:admin');
     });
 
-    /* Cascade géographique (JSON) — accessible à tous pour le formulaire create */
-    Route::get('/geo/region/{regionId}/departements',      [FichierElectoralController::class, 'geoRegionDepts']);
-    Route::get('/geo/departement/{deptId}/arrondissements',[FichierElectoralController::class, 'geoDeptArrs']);
-    Route::get('/geo/arrondissement/{arrId}/communes',     [FichierElectoralController::class, 'geoArrCommunes']);
-    Route::get('/geo/commune/adresses',                    [FichierElectoralController::class, 'geoAdressesByCommune']);
+    /* ── Logistique matériel électoral ── */
+    Route::middleware('can:logistique-gerer')->prefix('logistique')->name('logistique.')->group(function () {
+        Route::get('stock', [StockController::class, 'index'])->name('stock.index');
+        Route::get('stock/{materiel}/mouvements', [StockController::class, 'mouvements'])->name('stock.mouvements');
+        Route::post('stock/inventaire', [StockController::class, 'inventaire'])->name('stock.inventaire');
 
-    /* Opérations */
-    Route::resource('operations', OperationController::class);
-    Route::get('/operations/{operation}/imprimer',        [OperationController::class, 'imprimer'])->name('operations.imprimer');
-    Route::get('/operations/{operation}/scanner',         [OperationController::class, 'scanner'])->name('operations.scanner');
-    Route::post('/operations/{operation}/scanner',        [OperationController::class, 'scannerStore'])->name('operations.scanner.store');
-    Route::patch('/operations/{operation}/valider', [OperationController::class, 'valider'])
-         ->name('operations.valider')
-         ->middleware('role:admin,prefet,sous_prefet,gouverneur');
-    Route::patch('/operations/{operation}/rejeter', [OperationController::class, 'rejeter'])
-         ->name('operations.rejeter')
-         ->middleware('role:admin,prefet,sous_prefet,gouverneur');
+        Route::resource('materiels', MaterielController::class)->except(['show', 'destroy']);
 
-    /* Users — admin only */
-    Route::resource('users', UserController::class)->middleware('role:admin');
+        Route::get('commandes', [CommandeController::class, 'index'])->name('commandes.index');
+        Route::get('commandes/create', [CommandeController::class, 'create'])->name('commandes.create');
+        Route::post('commandes', [CommandeController::class, 'store'])->name('commandes.store');
+        Route::get('commandes/{commande}', [CommandeController::class, 'show'])->name('commandes.show');
+        Route::post('commandes/{commande}/confirmation', [CommandeController::class, 'confirmer'])->name('commandes.confirmer');
+        Route::post('commandes/{commande}/receptions', [CommandeController::class, 'recevoir'])->name('commandes.receptions.store');
+
+        Route::middleware('can:logistique-administrer')->group(function () {
+            Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
+            Route::put('cycles/{cycle}/attributions/{materiel}', [StockController::class, 'attribuer'])->name('attributions.update');
+            Route::post('cycles/{cycle}/cloture', [CycleController::class, 'cloturer'])->name('cycles.cloturer');
+            Route::post('commandes/{commande}/annulation', [CommandeController::class, 'annuler'])->name('commandes.annuler');
+            Route::post('commande-lignes/{ligne}/abandon', [CommandeController::class, 'abandonner'])->name('commande-lignes.abandonner');
+
+            Route::resource('cycles', CycleController::class)->only(['create', 'store', 'edit', 'update']);
+        });
+        Route::resource('cycles', CycleController::class)->only(['index']);
+    });
 
 });

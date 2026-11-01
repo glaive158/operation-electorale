@@ -12,6 +12,10 @@ class DashboardController extends Controller
     {
         $user = auth()->user();
 
+        if ($user->isLogistique()) {
+            return redirect()->route('logistique.stock.index');
+        }
+
         /* Stats opérations locales */
         $query = Operation::query();
         if ($user->isCommission())   $query->where('commune_commission_id', $user->commune_id);

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -10,6 +11,11 @@ use Illuminate\Validation\Rules\Password;
 
 class UserController extends Controller
 {
+    /** Tables logistiques portant un auteur (user_id) : attributions_stock n'en a pas, ses écritures passent par le journal. */
+    private const TABLES_LOGISTIQUES = [
+        'mouvements_stock', 'reservations_stock', 'journal_logistique', 'commandes', 'receptions_fournisseur',
+    ];
+
     public function index(Request $request)
     {
         $query = User::query();
@@ -40,7 +46,7 @@ class UserController extends Controller
             'prenom'            => 'nullable|string|max:100',
             'email'             => 'required|email|unique:users',
             'password'          => ['required', Password::min(8)],
-            'role'              => 'required|in:admin,gouverneur,prefet,sous_prefet,commission',
+            'role'              => 'required|in:admin,gouverneur,prefet,sous_prefet,commission,logistique_gestionnaire,logistique_responsable',
             'telephone'         => 'nullable|string|max:20',
             'region_id'         => 'nullable|integer',
             'region_nom'        => 'nullable|string|max:100',
@@ -89,7 +95,7 @@ class UserController extends Controller
             'prenom'            => 'nullable|string|max:100',
             'email'             => "required|email|unique:users,email,{$user->id}",
             'password'          => ['nullable', Password::min(8)],
-            'role'              => 'required|in:admin,gouverneur,prefet,sous_prefet,commission',
+            'role'              => 'required|in:admin,gouverneur,prefet,sous_prefet,commission,logistique_gestionnaire,logistique_responsable',
             'telephone'         => 'nullable|string|max:20',
             'region_id'         => 'nullable|integer',
             'region_nom'        => 'nullable|string|max:100',
@@ -118,7 +124,25 @@ class UserController extends Controller
         if ($user->id === auth()->id()) {
             return back()->with('error', 'Impossible de supprimer votre propre compte.');
         }
-        $user->delete();
+
+        // Les écritures logistiques sont imputables et immuables : un compte qui en porte ne se supprime pas.
+        $liaisonLogistique = 'Utilisateur lié à des opérations logistiques : désactivez le compte au lieu de le supprimer.';
+        foreach (self::TABLES_LOGISTIQUES as $table) {
+            if (DB::table($table)->where('user_id', $user->id)->exists()) {
+                return back()->with('error', $liaisonLogistique);
+            }
+        }
+
+        try {
+            $user->delete();
+        } catch (QueryException $e) {
+            // Contrainte d'intégrité (écriture logistique concurrente) : même refus, pas d'erreur 500.
+            if ($e->getCode() === '23000') {
+                return back()->with('error', $liaisonLogistique);
+            }
+            throw $e;
+        }
+
         return redirect()->route('users.index')->with('success', 'Utilisateur supprimé.');
     }
 }
