@@ -10,7 +10,9 @@ use App\Models\Logistique\Materiel;
 use App\Models\Logistique\ReceptionFournisseur;
 use DateTimeImmutable;
 use DateTimeInterface;
+use App\Models\Logistique\AttributionStock;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
 use LogicException;
 
@@ -71,7 +73,29 @@ class CommandeService
             throw new InvalidArgumentException("La référence de commande {$reference} existe déjà.");
         }
 
-        return DB::transaction(function () use ($dateCommande, $reference, $fournisseur, $normalisees) {
+        // Affecter une commande à un cycle engage le stock à venir : droit du responsable.
+        $cycleIds = collect($normalisees)->pluck('cycle_id')->filter()->unique()->sort()->values();
+        if ($cycleIds->isNotEmpty() && ! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut affecter une commande à un cycle.');
+        }
+        $materielIds = collect($normalisees)->pluck('materiel_id')->unique()->sort()->values();
+
+        return DB::transaction(function () use ($dateCommande, $reference, $fournisseur, $normalisees, $cycleIds, $materielIds) {
+            // Mêmes verrous partagés que la réception (cycles puis matériels, par id croissant) :
+            // une clôture ou une désactivation concurrente ne passe pas entre le contrôle et l'écriture.
+            if ($cycleIds->isNotEmpty()) {
+                foreach (Cycle::whereIn('id', $cycleIds)->orderBy('id')->sharedLock()->get() as $cycle) {
+                    if (! $cycle->estOuvert()) {
+                        throw new RegleLogistique('Cycle clôturé : commande impossible.');
+                    }
+                }
+            }
+            foreach (Materiel::whereIn('id', $materielIds)->orderBy('id')->sharedLock()->get() as $materiel) {
+                if (! $materiel->actif) {
+                    throw new InvalidArgumentException("L'article « {$materiel->libelle} » est inactif : commande impossible.");
+                }
+            }
+
             $commande = Commande::create([
                 'reference'     => $reference,
                 'fournisseur'   => $fournisseur,
@@ -85,7 +109,7 @@ class CommandeService
             }
 
             return $commande;
-        });
+        }, attempts: 3);
     }
 
     public function confirmer(Commande $commande): void
@@ -103,7 +127,7 @@ class CommandeService
             Journal::noter('commande', $actuelle->id, 'confirmation', ['statut' => 'brouillon'], ['statut' => 'confirmee']);
 
             $this->synchroniser($commande, $actuelle);
-        });
+        }, attempts: 3);
     }
 
     public function annuler(Commande $commande, string $motif): void
@@ -127,7 +151,7 @@ class CommandeService
             Journal::noter('commande', $actuelle->id, 'annulation', ['statut' => $avant], ['statut' => 'annulee'], $motif);
 
             $this->synchroniser($commande, $actuelle);
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -233,11 +257,7 @@ class CommandeService
                     // Un cycle clos n'attribue plus : la marchandise reste en stock commun.
                     $cycle = $ligne->cycle_id ? $cycles[$ligne->cycle_id] : null;
                     if ($cycle?->estOuvert()) {
-                        $this->stock->attribuer(
-                            $cycle, $materiel,
-                            $this->stock->attribue($materiel, $cycle) + $q['acceptee'],
-                            "Réception commande {$actuelle->reference}",
-                        );
+                        $this->ajouterALAttribution($cycle, $materiel, $q['acceptee'], "Réception commande {$actuelle->reference}");
                     }
                 }
 
@@ -259,7 +279,7 @@ class CommandeService
             $this->synchroniser($commande, $actuelle);
 
             return $reception;
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -302,24 +322,41 @@ class CommandeService
             );
 
             $ligne->setRawAttributes($courante->getAttributes(), true);
-        });
+        }, attempts: 3);
     }
 
     /**
-     * Soldée (recue) quand plus rien n'est dû ; sinon partiellement_recue si une réception
-     * a eu lieu, et statut inchangé dans le cas contraire.
+     * Quand plus rien n'est dû : recue si une réception a eu lieu, annulee si tout a été
+     * abandonné sans rien recevoir. Sinon partiellement_recue si une réception a eu lieu,
+     * et statut inchangé dans le cas contraire.
      */
     private function statutSelonReste(Commande $commande): string
     {
         $reste = CommandeLigne::where('commande_id', $commande->id)->get()
             ->sum(fn (CommandeLigne $l) => $l->resteARecevoir());
+        $recue = $commande->receptions()->exists();
 
         if ($reste === 0) {
-            return 'recue';
+            return $recue ? 'recue' : 'annulee';
         }
 
         // Rien n'a été reçu : un abandon partiel ne rend pas la commande « partiellement reçue ».
-        return $commande->receptions()->exists() ? 'partiellement_recue' : $commande->statut;
+        return $recue ? 'partiellement_recue' : $commande->statut;
+    }
+
+    /**
+     * Ajoute au cycle la quantité reçue : l'attribution courante est lue sous verrou (le matériel
+     * est déjà verrouillé par l'appelant), puis fixée par StockService::attribuer, avec ses
+     * contrôles et son journal.
+     */
+    private function ajouterALAttribution(Cycle $cycle, Materiel $materiel, int $delta, string $motif): void
+    {
+        $courante = (int) (AttributionStock::where('cycle_id', $cycle->id)
+            ->where('materiel_id', $materiel->id)
+            ->lockForUpdate()
+            ->value('quantite') ?? 0);
+
+        $this->stock->attribuer($cycle, $materiel, $courante + $delta, $motif);
     }
 
     private function commandeVerrouillee(Commande $commande): Commande

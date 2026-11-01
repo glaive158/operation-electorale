@@ -65,6 +65,20 @@ class CommandesTest extends TestCase
         return $commande;
     }
 
+    /**
+     * L'affectation à un cycle est un droit du responsable ; la suite (réception) reste ouverte au gestionnaire.
+     *
+     * @param  array<int, array{materiel_id:int, quantite_commandee:int, cycle_id?:?int}>  $lignes
+     */
+    private function commandeAttribuee(array $lignes, string $reference = 'CMD-001'): Commande
+    {
+        $this->actingAs(User::factory()->create(['role' => 'logistique_responsable']));
+        $commande = $this->commande($lignes, true, $reference);
+        $this->actingAs($this->auteur);
+
+        return $commande;
+    }
+
     private function recevoir(Commande $commande, array $lignes): ReceptionFournisseur
     {
         return $this->commandes->recevoir($commande, [
@@ -264,7 +278,7 @@ class CommandesTest extends TestCase
     {
         $m = $this->materiel();
         $a = $this->cycle();
-        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 300, 'cycle_id' => $a->id]]);
+        $commande = $this->commandeAttribuee([['materiel_id' => $m->id, 'quantite_commandee' => 300, 'cycle_id' => $a->id]]);
 
         $this->assertSame(300, $this->stock->commandeARecevoir($m, $a));
 
@@ -278,7 +292,7 @@ class CommandesTest extends TestCase
     {
         $m = $this->materiel();
         $a = $this->cycle();
-        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100, 'cycle_id' => $a->id]]);
+        $commande = $this->commandeAttribuee([['materiel_id' => $m->id, 'quantite_commandee' => 100, 'cycle_id' => $a->id]]);
         $this->stock->cloturerCycle($a, 'Fin de cycle');
 
         $this->recevoir($commande, [$commande->lignes[0]->id => ['acceptee' => 50, 'rejetee' => 0]]);
@@ -346,14 +360,83 @@ class CommandesTest extends TestCase
         $this->assertSame('annulee', $commande->fresh()->statut);
     }
 
-    public function test_abandon_total_sans_reception_solde_la_commande(): void
+    public function test_abandon_total_sans_reception_annule_la_commande(): void
     {
         $m = $this->materiel();
         $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]]);
 
         $this->commandes->abandonner($commande->lignes[0], 100, 'Commande abandonnée');
 
+        $this->assertSame('annulee', $commande->fresh()->statut);
+        $this->assertSame(0, $this->stock->commandeARecevoir($m));
+    }
+
+    public function test_abandon_total_apres_reception_solde_la_commande(): void
+    {
+        $m = $this->materiel();
+        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]]);
+        $this->recevoir($commande, [$commande->lignes[0]->id => ['acceptee' => 60, 'rejetee' => 0]]);
+
+        $this->commandes->abandonner($commande->lignes[0], 40, 'Reliquat abandonné');
+
         $this->assertSame('recue', $commande->fresh()->statut);
+    }
+
+    public function test_gestionnaire_ne_peut_pas_affecter_une_commande_a_un_cycle(): void
+    {
+        $m = $this->materiel();
+        $a = $this->cycle();
+
+        try {
+            $this->commandes->creer(
+                ['reference' => 'CMD-G', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'],
+                [['materiel_id' => $m->id, 'quantite_commandee' => 10, 'cycle_id' => $a->id]],
+            );
+            $this->fail('Une RegleLogistique était attendue.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Seul un responsable logistique peut affecter une commande à un cycle.', $e->getMessage());
+        }
+        $this->assertSame(0, Commande::count());
+    }
+
+    public function test_responsable_affecte_une_commande_a_un_cycle(): void
+    {
+        $this->actingAs(User::factory()->create(['role' => 'logistique_responsable']));
+        $m = $this->materiel();
+        $a = $this->cycle();
+
+        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 10, 'cycle_id' => $a->id]], false);
+
+        $this->assertSame($a->id, $commande->lignes()->first()->cycle_id);
+    }
+
+    public function test_commande_sur_cycle_clos_refusee(): void
+    {
+        $this->actingAs(User::factory()->create(['role' => 'logistique_responsable']));
+        $m = $this->materiel();
+        $a = $this->cycle();
+        $this->stock->cloturerCycle($a, 'Fin de cycle');
+
+        try {
+            $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 10, 'cycle_id' => $a->id]], false);
+            $this->fail('Une RegleLogistique était attendue.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Cycle clôturé : commande impossible.', $e->getMessage());
+        }
+        $this->assertSame(0, Commande::count());
+    }
+
+    public function test_commande_sur_materiel_inactif_refusee(): void
+    {
+        $m = $this->materiel();
+        $m->update(['actif' => false]);
+
+        try {
+            $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 10]], false);
+            $this->fail('Une InvalidArgumentException était attendue.');
+        } catch (InvalidArgumentException) {
+            $this->assertSame(0, Commande::count());
+        }
     }
 
     public function test_dates_et_longueurs_invalides_refusees(): void

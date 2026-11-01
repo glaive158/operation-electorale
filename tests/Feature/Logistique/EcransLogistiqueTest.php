@@ -239,12 +239,11 @@ class EcransLogistiqueTest extends TestCase
     {
         $this->actingAs($this->gestionnaire);
         $urne = $this->materiel();
-        $a = $this->cycle();
 
         $this->post(route('logistique.commandes.store'), [
             'reference' => 'CMD-100', 'fournisseur' => 'Imprimerie nationale', 'date_commande' => '2026-11-01',
             'lignes' => [
-                ['materiel_id' => $urne->id, 'quantite_commandee' => 100, 'cycle_id' => $a->id],
+                ['materiel_id' => $urne->id, 'quantite_commandee' => 100, 'cycle_id' => ''],
                 ['materiel_id' => '', 'quantite_commandee' => '', 'cycle_id' => ''],
             ],
         ])->assertSessionHasNoErrors();
@@ -252,13 +251,51 @@ class EcransLogistiqueTest extends TestCase
         $commande = Commande::where('reference', 'CMD-100')->firstOrFail();
         $this->assertSame('brouillon', $commande->statut);
         $this->assertCount(1, $commande->lignes);
-        $this->assertSame($a->id, $commande->lignes->first()->cycle_id);
+        $this->assertNull($commande->lignes->first()->cycle_id);
 
         $this->get(route('logistique.commandes.index'))->assertOk()->assertSee('CMD-100');
         $this->get(route('logistique.commandes.show', $commande))->assertOk()->assertSee('Imprimerie nationale');
 
         $this->post(route('logistique.commandes.confirmer', $commande))->assertRedirect();
         $this->assertSame('confirmee', $commande->fresh()->statut);
+    }
+
+    public function test_gestionnaire_ne_peut_pas_viser_un_cycle_depuis_le_formulaire(): void
+    {
+        $this->actingAs($this->gestionnaire);
+        $urne = $this->materiel();
+        $a = $this->cycle();
+
+        $this->post(route('logistique.commandes.store'), [
+            'reference' => 'CMD-110', 'fournisseur' => 'F', 'date_commande' => '2026-11-01',
+            'lignes' => [['materiel_id' => $urne->id, 'quantite_commandee' => 100, 'cycle_id' => $a->id]],
+        ])->assertSessionHas('error', 'Seul un responsable logistique peut affecter une commande à un cycle.');
+
+        $this->assertSame(0, Commande::count());
+    }
+
+    public function test_responsable_vise_un_cycle_depuis_le_formulaire(): void
+    {
+        $this->actingAs($this->responsable);
+        $urne = $this->materiel();
+        $a = $this->cycle();
+
+        $this->post(route('logistique.commandes.store'), [
+            'reference' => 'CMD-111', 'fournisseur' => 'F', 'date_commande' => '2026-11-01',
+            'lignes' => [['materiel_id' => $urne->id, 'quantite_commandee' => 100, 'cycle_id' => $a->id]],
+        ])->assertSessionHasNoErrors();
+
+        $this->assertSame($a->id, Commande::where('reference', 'CMD-111')->firstOrFail()->lignes->first()->cycle_id);
+    }
+
+    public function test_selecteur_de_cycle_reserve_au_responsable(): void
+    {
+        $this->cycle('Cycle visible');
+
+        $this->actingAs($this->gestionnaire)->get(route('logistique.commandes.create'))
+            ->assertOk()->assertDontSee('Cycle visé')->assertDontSee('Cycle visible');
+        $this->actingAs($this->responsable)->get(route('logistique.commandes.create'))
+            ->assertOk()->assertSee('Cycle visé')->assertSee('Cycle visible');
     }
 
     public function test_commande_sans_ligne_est_refusee(): void

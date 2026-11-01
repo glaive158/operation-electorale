@@ -10,6 +10,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Materiel;
 use App\Services\Logistique\CommandeService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
 
 class CommandeController extends Controller
@@ -34,7 +35,8 @@ class CommandeController extends Controller
     {
         return view('logistique.commandes.create', [
             'materiels' => Materiel::actifs()->orderBy('categorie')->orderBy('ordre')->orderBy('libelle')->get(),
-            'cycles'    => Cycle::ouverts()->orderByDesc('id')->get(),
+            // L'affectation à un cycle est réservée aux responsables : le sélecteur n'est pas proposé aux autres.
+            'cycles'    => Gate::allows('logistique-administrer') ? Cycle::ouverts()->orderByDesc('id')->get() : collect(),
         ]);
     }
 

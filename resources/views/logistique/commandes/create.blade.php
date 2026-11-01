@@ -4,6 +4,7 @@
 
 @section('content')
 @php
+    $peutViserUnCycle = \Illuminate\Support\Facades\Gate::allows('logistique-administrer');
     $anciennes = old('lignes', [['materiel_id' => '', 'quantite_commandee' => '', 'cycle_id' => '']]);
     $lignesInitiales = array_values(array_map(fn ($l) => [
         'materiel_id' => (string) ($l['materiel_id'] ?? ''),
@@ -43,7 +44,7 @@
                 <div class="space-y-2">
                     <template x-for="(l, i) in lignes" :key="i">
                         <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                            <div class="md:col-span-5">
+                            <div class="{{ $peutViserUnCycle ? 'md:col-span-5' : 'md:col-span-9' }}">
                                 <label class="block text-xs font-medium text-slate-600 mb-1">Article</label>
                                 <select :name="`lignes[${i}][materiel_id]`" x-model="l.materiel_id"
                                         class="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
@@ -58,6 +59,7 @@
                                 <input type="number" min="1" step="1" :name="`lignes[${i}][quantite_commandee]`" x-model="l.quantite_commandee"
                                        class="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
                             </div>
+                            @if($peutViserUnCycle)
                             <div class="md:col-span-4">
                                 <label class="block text-xs font-medium text-slate-600 mb-1">Cycle visé (facultatif)</label>
                                 <select :name="`lignes[${i}][cycle_id]`" x-model="l.cycle_id"
@@ -68,6 +70,7 @@
                                     @endforeach
                                 </select>
                             </div>
+                            @endif
                             <div class="md:col-span-1">
                                 <button type="button" @click="lignes.length > 1 && lignes.splice(i, 1)" aria-label="Retirer la ligne"
                                         class="w-full px-2 py-2.5 rounded-lg border border-slate-300 text-slate-500 text-sm hover:bg-slate-50">✕</button>
