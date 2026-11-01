@@ -108,68 +108,65 @@ class LectureRecensement
     }
 
     /**
-     * Effectifs du fichier national par triplet tel qu'écrit (région, département, commune), mêmes
-     * filtres que sourcesCommunes(). Un électeur = une ligne ; bureau de vote = code_bureau ;
-     * lieu de vote = ses 8 premiers caractères.
+     * Effectifs du fichier national par triplet tel qu'écrit et par bureau de vote (code_bureau),
+     * mêmes filtres que sourcesCommunes(). Un électeur = une ligne. Le regroupement par bureau
+     * permet à l'appelant de compter bureaux et lieux de vote distincts même lorsque plusieurs
+     * graphies d'une commune se rejoignent.
      *
-     * @return Collection<int, object{region:string, departement:string, commune:string, electeurs:int, bureaux_vote:int, lieux_vote:int}>
+     * @return Collection<int, object{region:string, departement:string, commune:string, code_bureau:?string, electeurs:int}>
      */
     public function agregatsNational(): Collection
     {
         // Pas d'alias dans le SELECT : « departement » désignerait deux colonnes différentes dans GROUP BY.
-        $lignes = $this->base()->table('fichier_electoral')
+        return $this->base()->table('fichier_electoral')
             ->where('origine', 'national')
             ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
             ->whereNotNull('arrondissement')->whereRaw("TRIM(arrondissement) <> ''")
             ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
-            ->select('departement', 'arrondissement', 'commune')
+            ->select('departement', 'arrondissement', 'commune', 'code_bureau')
             ->selectRaw('COUNT(*) as electeurs')
-            ->selectRaw('COUNT(DISTINCT code_bureau) as bureaux_vote')
-            ->selectRaw('COUNT(DISTINCT SUBSTR(code_bureau, 1, 8)) as lieux_vote')
-            ->groupBy('departement', 'arrondissement', 'commune')
-            ->get();
-
-        return $lignes
+            ->groupBy('departement', 'arrondissement', 'commune', 'code_bureau')
+            ->get()
             ->map(fn ($l) => (object) [
-                'region'       => $l->departement,
-                'departement'  => $l->arrondissement,
-                'commune'      => $l->commune,
-                'electeurs'    => (int) $l->electeurs,
-                'bureaux_vote' => (int) $l->bureaux_vote,
-                'lieux_vote'   => (int) $l->lieux_vote,
+                'region'      => $l->departement,
+                'departement' => $l->arrondissement,
+                'commune'     => $l->commune,
+                'code_bureau' => $l->code_bureau,
+                'electeurs'   => (int) $l->electeurs,
             ])
-            ->sortBy([['region', 'asc'], ['departement', 'asc'], ['commune', 'asc']])
+            ->sortBy([['region', 'asc'], ['departement', 'asc'], ['commune', 'asc'], ['code_bureau', 'asc']])
             ->values();
     }
 
     /**
-     * Effectifs des Sénégalais de l'étranger par (pays, ville) tels qu'écrits dans le fichier.
+     * Effectifs des Sénégalais de l'étranger par (pays, ville) tels qu'écrits et par bureau de vote.
      *
-     * @return Collection<int, object{pays:string, ville:string, electeurs:int, bureaux_vote:int, lieux_vote:int}>
+     * @return Collection<int, object{pays:string, ville:string, code_bureau:?string, electeurs:int}>
      */
     public function agregatsEtranger(): Collection
     {
-        $lignes = $this->base()->table('fichier_electoral')
+        return $this->base()->table('fichier_electoral')
             ->where('origine', 'etranger')
             ->whereNotNull('departement')->whereRaw("TRIM(departement) <> ''")
             ->whereNotNull('commune')->whereRaw("TRIM(commune) <> ''")
-            ->select('departement', 'commune')
+            ->select('departement', 'commune', 'code_bureau')
             ->selectRaw('COUNT(*) as electeurs')
-            ->selectRaw('COUNT(DISTINCT code_bureau) as bureaux_vote')
-            ->selectRaw('COUNT(DISTINCT SUBSTR(code_bureau, 1, 8)) as lieux_vote')
-            ->groupBy('departement', 'commune')
-            ->get();
-
-        return $lignes
+            ->groupBy('departement', 'commune', 'code_bureau')
+            ->get()
             ->map(fn ($l) => (object) [
-                'pays'         => $l->departement,
-                'ville'        => $l->commune,
-                'electeurs'    => (int) $l->electeurs,
-                'bureaux_vote' => (int) $l->bureaux_vote,
-                'lieux_vote'   => (int) $l->lieux_vote,
+                'pays'        => $l->departement,
+                'ville'       => $l->commune,
+                'code_bureau' => $l->code_bureau,
+                'electeurs'   => (int) $l->electeurs,
             ])
-            ->sortBy([['pays', 'asc'], ['ville', 'asc']])
+            ->sortBy([['pays', 'asc'], ['ville', 'asc'], ['code_bureau', 'asc']])
             ->values();
+    }
+
+    /** Nombre total de lignes (électeurs) du fichier, toutes origines et géographies confondues. */
+    public function totalFichier(): int
+    {
+        return (int) $this->base()->table('fichier_electoral')->count();
     }
 
     /**

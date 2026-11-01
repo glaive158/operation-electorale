@@ -98,8 +98,12 @@ class InstantaneTest extends TestCase
         $this->assertSame($this->geo['departements']['Mbour'], $ligne->departement_id);
         $this->assertNotNull($ligne->destinataire_id);
         $this->assertSame(30, $i->bilan['electeurs_total']);
+        $this->assertSame(30, $i->bilan['electeurs_national']);
+        $this->assertSame(0, $i->bilan['electeurs_etranger']);
         $this->assertSame(30, $i->bilan['electeurs_rapproches']);
         $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+        $this->assertSame(30, $i->bilan['electeurs_fichier']);
+        $this->assertSame(0, $i->bilan['electeurs_ignores']);
         $this->assertSame(['Thiès' => 30], $i->bilan['totaux_par_region']);
     }
 
@@ -117,6 +121,50 @@ class InstantaneTest extends TestCase
         $this->assertSame(35, $ligne->electeurs);
         $this->assertSame(2, $ligne->bureaux_vote);
         $this->assertSame(2, $ligne->lieux_vote);
+    }
+
+    public function test_graphies_partageant_un_bureau_et_un_lieu_ne_les_comptent_qu_une_fois(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'NDIASS', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', "N'DIASS", '0101010101', '01010101', 5);
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', "N'DIASS", '0101010102', '01010101', 2);
+        $this->valider('Thiès', 'Mbour', 'NDIASS', 'Ndiass');
+        $this->valider('Thiès', 'Mbour', "N'DIASS", 'Ndiass');
+
+        $ligne = $this->ligneCommune($this->capturer(), 'Ndiass');
+
+        $this->assertSame(17, $ligne->electeurs);
+        $this->assertSame(2, $ligne->bureaux_vote);
+        $this->assertSame(1, $ligne->lieux_vote);
+    }
+
+    public function test_graphie_sans_casse_ni_accents_rapprochee_par_repli_normalise(): void
+    {
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'NDIASS', '0101010101', '01010101', 8);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+
+        $i = $this->capturer();
+
+        $this->assertSame(8, $this->ligneCommune($i, 'Ndiass')->electeurs);
+        $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_repli_normalise_ignore_si_ambigu(): void
+    {
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'NDIASS', '0101010101', '01010101', 8);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+        $this->valider('Thiès', 'Mbour', 'ndiass', 'Popenguine');
+
+        $this->assertSame(8, $this->capturer()->bilan['electeurs_non_rapproches']);
+    }
+
+    public function test_une_region_n_apparait_que_sous_une_cle(): void
+    {
+        RecensementFictif::electeurs('national', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 10);
+        RecensementFictif::electeurs('national', 'THIES', 'MBOUR', 'Inconnue', '0202020201', '02020202', 4);
+        $this->valider('Thiès', 'Mbour', 'Ndiass', 'Ndiass');
+
+        $this->assertSame(['Thiès' => 14], $this->capturer()->bilan['totaux_par_region']);
     }
 
     public function test_commune_non_rapprochee_isolee_dans_le_bilan(): void
@@ -140,6 +188,7 @@ class InstantaneTest extends TestCase
         $this->assertSame(7, $nonRapprochees[0]->electeurs);
 
         $this->assertSame(21, $i->bilan['electeurs_total']);
+        $this->assertSame(21, $i->bilan['electeurs_national']);
         $this->assertSame(11, $i->bilan['electeurs_non_rapproches']);
         $this->assertSame(10, $i->bilan['electeurs_rapproches']);
         $this->assertCount(2, $i->bilan['lignes_non_rapprochees']);
@@ -184,7 +233,10 @@ class InstantaneTest extends TestCase
         $this->assertTrue($ligne->rapprochee);
         $this->assertSame(12, $i->bilan['totaux_par_region']['Étranger']);
         $this->assertSame(12, $i->bilan['electeurs_total']);
-        $this->assertSame(12, $i->bilan['electeurs_rapproches']);
+        $this->assertSame(12, $i->bilan['electeurs_etranger']);
+        $this->assertSame(0, $i->bilan['electeurs_national']);
+        $this->assertSame(0, $i->bilan['electeurs_rapproches']);
+        $this->assertSame(0, $i->bilan['electeurs_non_rapproches']);
     }
 
     public function test_localites_sans_destinataire_listees(): void
@@ -242,6 +294,13 @@ class InstantaneTest extends TestCase
         $this->assertCount(1, $agregats);
         $this->assertSame('Ndiass', $agregats->first()->commune);
         $this->assertSame(2, (int) $agregats->first()->electeurs);
+
+        // Les électeurs écartés laissent une trace au bilan.
+        RecensementFictif::electeurs('autre', 'Thiès', 'Mbour', 'Ndiass', '0101010101', '01010101', 4);
+        $bilan = $this->capturer()->bilan;
+        $this->assertSame(9, $bilan['electeurs_fichier']);
+        $this->assertSame(2, $bilan['electeurs_total']);
+        $this->assertSame(7, $bilan['electeurs_ignores']);
     }
 
     public function test_versions_successives_et_figer(): void
@@ -316,6 +375,19 @@ class InstantaneTest extends TestCase
 
         $this->expectException(RegleLogistique::class);
         $this->service()->demarrer($this->cycle);
+    }
+
+    public function test_le_job_cible_la_connexion_configuree(): void
+    {
+        config(['logistique.queue_capture' => 'database_long']);
+        Queue::fake();
+
+        $this->service()->demarrer($this->cycle);
+
+        Queue::assertPushed(CapturerInstantane::class, fn ($job) => $job->connection === 'database_long');
+        $this->assertSame(3600, (new CapturerInstantane(1))->timeout);
+        $this->assertSame(1, (new CapturerInstantane(1))->tries);
+        $this->assertGreaterThan(3600, config('queue.connections.database_long.retry_after'));
     }
 
     public function test_demarrer_refuse_un_cycle_clos(): void

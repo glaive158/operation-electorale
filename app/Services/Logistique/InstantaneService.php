@@ -154,45 +154,61 @@ class InstantaneService
         $national = $this->recensement->agregatsNational();
         $etranger = $this->recensement->agregatsEtranger();
         $controles = $this->recensement->controles();
+        $totalFichier = $this->recensement->totalFichier();
 
         $communes = $this->recensement->communes()->keyBy('id');
-        $validees = $this->correspondances->mapValidees();
+        $resoudre = $this->correspondances->resolveurValidees();
         $commissions = CommissionAdministrative::compterParLocalite($cycle);
         $destinataires = PerimetreDestinataire::where('cycle_id', $cycle->id)->get()
             ->mapWithKeys(fn ($p) => [$p->localite() => (int) $p->destinataire_id])->all();
 
-        // Plusieurs graphies d'une même commune s'additionnent : les codes bureau sont uniques au niveau national.
+        // Bureaux et lieux sont comptés distincts après fusion des graphies : le même code peut
+        // apparaître sous deux graphies d'une commune. Les codes sont uniques au niveau national.
         $parCommune = [];
-        $nonRapprochees = [];
+        $parTriplet = [];
         foreach ($national as $a) {
-            $communeId = $validees[$this->correspondances->cleTriplet($a->region, $a->departement, $a->commune)] ?? null;
+            $communeId = $resoudre($a->region, $a->departement, $a->commune);
             $commune = $communeId !== null ? $communes->get($communeId) : null;
 
             if ($commune === null) {
                 // Jamais d'électeur écarté : sans correspondance validée, le triplet reste visible au bilan.
-                $nonRapprochees[] = [
-                    'commune_id' => null, 'pays' => null, 'ville' => null, 'departement_id' => null,
-                    'contexte_region' => $a->region, 'contexte_departement' => $a->departement, 'libelle_commune' => $a->commune,
-                    'electeurs' => $a->electeurs, 'bureaux_vote' => $a->bureaux_vote, 'lieux_vote' => $a->lieux_vote,
-                    'commissions' => 0, 'rapprochee' => false, 'destinataire_id' => null,
-                ];
+                $cle = $this->correspondances->cleTriplet($a->region, $a->departement, $a->commune);
+                $parTriplet[$cle] ??= $this->cumul() + ['region' => $a->region, 'departement' => $a->departement, 'commune' => $a->commune];
+                $this->ajouter($parTriplet[$cle], $a);
 
                 continue;
             }
 
-            $parCommune[$commune->id] ??= ['electeurs' => 0, 'bureaux_vote' => 0, 'lieux_vote' => 0];
-            $parCommune[$commune->id]['electeurs'] += $a->electeurs;
-            $parCommune[$commune->id]['bureaux_vote'] += $a->bureaux_vote;
-            $parCommune[$commune->id]['lieux_vote'] += $a->lieux_vote;
+            $parCommune[$commune->id] ??= $this->cumul();
+            $this->ajouter($parCommune[$commune->id], $a);
         }
         ksort($parCommune);
 
+        $parVille = [];
+        foreach ($etranger as $e) {
+            $parVille["{$e->pays}|{$e->ville}"] ??= $this->cumul() + ['pays' => $e->pays, 'ville' => $e->ville];
+            $this->ajouter($parVille["{$e->pays}|{$e->ville}"], $e);
+        }
+
+        // Une région n'apparaît que sous une clé : nom normalisé, affiché comme au recensement quand il est connu.
+        $affichageRegion = [];
+        foreach ($communes as $commune) {
+            if ($commune->region_nom !== null) {
+                $affichageRegion[NomGeo::normaliser($commune->region_nom)] ??= $commune->region_nom;
+            }
+        }
+        $totauxNormalises = [];
+        $ajouterRegion = function (string $libelle, int $electeurs) use (&$totauxNormalises, &$affichageRegion): void {
+            $cle = NomGeo::normaliser($libelle);
+            $affichageRegion[$cle] ??= $libelle;
+            $totauxNormalises[$cle] = ($totauxNormalises[$cle] ?? 0) + $electeurs;
+        };
+
         $lignes = [];
-        $totauxParRegion = [];
         $sansDestinataire = [];
         $electeursRapproches = 0;
 
-        foreach ($parCommune as $communeId => $effectifs) {
+        foreach ($parCommune as $communeId => $c) {
             $commune = $communes->get($communeId);
             $localite = "commune:{$communeId}";
             $destinataireId = $destinataires[$localite] ?? null;
@@ -203,52 +219,89 @@ class InstantaneService
             $lignes[] = [
                 'commune_id' => $communeId, 'pays' => null, 'ville' => null, 'departement_id' => $commune->departement_id,
                 'contexte_region' => $commune->region_nom, 'contexte_departement' => $commune->departement_nom, 'libelle_commune' => $commune->nom,
-                'electeurs' => $effectifs['electeurs'], 'bureaux_vote' => $effectifs['bureaux_vote'], 'lieux_vote' => $effectifs['lieux_vote'],
+                'electeurs' => $c['electeurs'], 'bureaux_vote' => count($c['codes']), 'lieux_vote' => count($c['prefixes']),
                 'commissions' => $commissions[$localite] ?? 0, 'rapprochee' => true, 'destinataire_id' => $destinataireId,
             ];
-            $electeursRapproches += $effectifs['electeurs'];
-            $region = $commune->region_nom ?? '(région inconnue)';
-            $totauxParRegion[$region] = ($totauxParRegion[$region] ?? 0) + $effectifs['electeurs'];
+            $electeursRapproches += $c['electeurs'];
+            $ajouterRegion($commune->region_nom ?? '(région inconnue)', $c['electeurs']);
         }
 
-        foreach ($etranger as $e) {
-            $localite = "{$e->pays}|{$e->ville}";
+        $electeursEtranger = 0;
+        foreach ($parVille as $localite => $v) {
             $destinataireId = $destinataires[$localite] ?? null;
             if ($destinataireId === null) {
-                $sansDestinataire[] = "{$e->pays} | {$e->ville}";
+                $sansDestinataire[] = "{$v['pays']} | {$v['ville']}";
             }
 
             $lignes[] = [
-                'commune_id' => null, 'pays' => $e->pays, 'ville' => $e->ville, 'departement_id' => null,
+                'commune_id' => null, 'pays' => $v['pays'], 'ville' => $v['ville'], 'departement_id' => null,
                 'contexte_region' => null, 'contexte_departement' => null, 'libelle_commune' => null,
-                'electeurs' => $e->electeurs, 'bureaux_vote' => $e->bureaux_vote, 'lieux_vote' => $e->lieux_vote,
+                'electeurs' => $v['electeurs'], 'bureaux_vote' => count($v['codes']), 'lieux_vote' => count($v['prefixes']),
                 'commissions' => $commissions[$localite] ?? 0, 'rapprochee' => true, 'destinataire_id' => $destinataireId,
             ];
-            $electeursRapproches += $e->electeurs;
-            $totauxParRegion[self::ETRANGER] = ($totauxParRegion[self::ETRANGER] ?? 0) + $e->electeurs;
+            $electeursEtranger += $v['electeurs'];
         }
 
         $electeursNonRapproches = 0;
         $libellesNonRapproches = [];
-        foreach ($nonRapprochees as $l) {
-            $electeursNonRapproches += $l['electeurs'];
-            $libellesNonRapproches[] = "{$l['contexte_region']} / {$l['contexte_departement']} / {$l['libelle_commune']}";
-            $totauxParRegion[$l['contexte_region']] = ($totauxParRegion[$l['contexte_region']] ?? 0) + $l['electeurs'];
+        $nonRapprochees = [];
+        foreach ($parTriplet as $t) {
+            $nonRapprochees[] = [
+                'commune_id' => null, 'pays' => null, 'ville' => null, 'departement_id' => null,
+                'contexte_region' => $t['region'], 'contexte_departement' => $t['departement'], 'libelle_commune' => $t['commune'],
+                'electeurs' => $t['electeurs'], 'bureaux_vote' => count($t['codes']), 'lieux_vote' => count($t['prefixes']),
+                'commissions' => 0, 'rapprochee' => false, 'destinataire_id' => null,
+            ];
+            $electeursNonRapproches += $t['electeurs'];
+            $libellesNonRapproches[] = "{$t['region']} / {$t['departement']} / {$t['commune']}";
+            $ajouterRegion($t['region'], $t['electeurs']);
+        }
+
+        $totauxParRegion = [];
+        foreach ($totauxNormalises as $cle => $electeurs) {
+            $totauxParRegion[$affichageRegion[$cle]] = $electeurs;
+        }
+        if ($electeursEtranger > 0) {
+            $totauxParRegion[self::ETRANGER] = ($totauxParRegion[self::ETRANGER] ?? 0) + $electeursEtranger;
         }
         ksort($totauxParRegion);
+
+        $electeursNational = $electeursRapproches + $electeursNonRapproches;
 
         return [
             array_merge($lignes, $nonRapprochees),
             [
-                'electeurs_total'             => $electeursRapproches + $electeursNonRapproches,
+                'electeurs_total'             => $electeursNational + $electeursEtranger,
+                'electeurs_national'          => $electeursNational,
+                'electeurs_etranger'          => $electeursEtranger,
                 'electeurs_rapproches'        => $electeursRapproches,
                 'electeurs_non_rapproches'    => $electeursNonRapproches,
+                // Lignes du fichier sans géographie exploitable ou d'une autre origine : montrées, jamais comptées.
+                'electeurs_fichier'           => $totalFichier,
+                'electeurs_ignores'           => $totalFichier - $electeursNational - $electeursEtranger,
                 'lignes_non_rapprochees'      => $libellesNonRapproches,
                 'localites_sans_destinataire' => $sansDestinataire,
                 'totaux_par_region'           => $totauxParRegion,
                 'controles'                   => $controles,
             ],
         ];
+    }
+
+    /** @return array{electeurs:int, codes:array<string,true>, prefixes:array<string,true>} */
+    private function cumul(): array
+    {
+        return ['electeurs' => 0, 'codes' => [], 'prefixes' => []];
+    }
+
+    /** @param array{electeurs:int, codes:array<string,true>, prefixes:array<string,true>} $cumul */
+    private function ajouter(array &$cumul, object $agregat): void
+    {
+        $cumul['electeurs'] += $agregat->electeurs;
+        // Un code absent n'est pas un bureau (comme COUNT(DISTINCT) en SQL).
+        if ($agregat->code_bureau !== null) {
+            $cumul['codes'][(string) $agregat->code_bureau] = true;
+            $cumul['prefixes'][mb_substr((string) $agregat->code_bureau, 0, 8)] = true;
+        }
     }
 
     /** Hors de toute transaction applicative : le statut « echec » doit survivre à l'annulation. */

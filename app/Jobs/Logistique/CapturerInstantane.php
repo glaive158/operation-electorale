@@ -18,10 +18,15 @@ class CapturerInstantane implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 900;
+    // Inférieur au retry_after de la connexion « database_long » : le job n'est jamais réservé deux fois.
+    public int $timeout = 3600;
 
     public function __construct(public readonly int $instantaneId)
     {
+        $connexion = config('logistique.queue_capture');
+        if ($connexion !== null) {
+            $this->onConnection($connexion);
+        }
     }
 
     public function handle(InstantaneService $service): void

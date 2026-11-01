@@ -167,6 +167,37 @@ class CorrespondanceService
         return $map;
     }
 
+    /**
+     * Résolveur de triplets du fichier vers une commune validée, chargé en une requête :
+     * correspondance exacte d'abord ; à défaut, repli sur la forme normalisée (casse, accents,
+     * apostrophes) à condition qu'elle ne désigne qu'une seule commune. Protège d'un écart de
+     * collation entre les deux bases.
+     *
+     * @return \Closure(string, string, string): ?int
+     */
+    public function resolveurValidees(): \Closure
+    {
+        $exactes = $this->mapValidees();
+        $normalisees = [];
+
+        foreach (CorrespondanceGeo::where('statut', 'validee')->whereNotNull('commune_id')
+            ->get(['contexte_region', 'contexte_departement', 'libelle_commune', 'commune_id']) as $c) {
+            $cle = $this->cle($c->contexte_region, $c->contexte_departement, $c->libelle_commune);
+            $normalisees[$cle][(int) $c->commune_id] = true;
+        }
+
+        return function (string $region, string $departement, string $commune) use ($exactes, $normalisees): ?int {
+            $exacte = $exactes[$this->cleTriplet($region, $departement, $commune)] ?? null;
+            if ($exacte !== null) {
+                return $exacte;
+            }
+
+            $candidats = $normalisees[$this->cle($region, $departement, $commune)] ?? [];
+
+            return count($candidats) === 1 ? array_key_first($candidats) : null;
+        };
+    }
+
     /** Clé d'un triplet exactement tel qu'écrit dans le fichier (aucune normalisation). */
     public function cleTriplet(string $region, string $departement, string $commune): string
     {
