@@ -99,6 +99,9 @@ class StockService
             throw new InvalidArgumentException('La quantité attribuée à un cycle ne peut pas être négative.');
         }
 
+        // attempts: 3 — sous REPEATABLE READ (MySQL), les verrous d'intervalle des lectures
+        // verrouillantes peuvent provoquer un interblocage (1213) ; Laravel rejoue alors la
+        // transaction, uniquement lorsqu'elle est la plus externe.
         return DB::transaction(function () use ($cycle, $materiel, $quantite, $motif) {
             if (! $this->cycleVerrouille($cycle->id)->estOuvert()) {
                 throw new RegleLogistique('Cycle clos : attribution impossible.');
@@ -133,7 +136,7 @@ class StockService
             Journal::noter('attribution_stock', $attribution->id, 'attribution', ['quantite' => $actuelle], ['quantite' => $quantite], $motif);
 
             return $attribution;
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -185,7 +188,7 @@ class StockService
                 'reference_id'             => $reference?->getKey(),
                 'user_id'                  => $auteur,
             ]);
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -224,7 +227,7 @@ class StockService
             );
 
             $reservation->setRawAttributes($actuelle->getAttributes(), true);
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -265,7 +268,7 @@ class StockService
             );
 
             $cycle->setRawAttributes($actuel->getAttributes(), true);
-        });
+        }, attempts: 3);
     }
 
     /**
@@ -288,6 +291,9 @@ class StockService
 
     public function inventaireInitial(Materiel $materiel, int $quantite, string $motif): MouvementStock
     {
+        if (trim($motif) === '') {
+            throw new InvalidArgumentException("Un motif est obligatoire pour un inventaire initial.");
+        }
         if ($quantite <= 0) {
             throw new InvalidArgumentException("La quantité d'un inventaire initial doit être strictement positive.");
         }
@@ -299,6 +305,9 @@ class StockService
     {
         if ($mouvement->type === 'compensation') {
             throw new RegleLogistique('Une compensation ne peut pas être elle-même compensée.');
+        }
+        if ($mouvement->reference_type === 'receptions_fournisseur') {
+            throw new RegleLogistique('Mouvement issu d\'une réception fournisseur : corriger la réception, pas le stock.');
         }
 
         return DB::transaction(function () use ($mouvement, $motif) {
@@ -316,7 +325,7 @@ class StockService
             Journal::noter('mouvement_stock', $mouvement->id, 'compensation', null, null, $motif);
 
             return $compensation;
-        });
+        }, attempts: 3);
     }
 
     private function ecrire(
@@ -377,7 +386,7 @@ class StockService
                 'motif'                 => $motif,
                 'user_id'               => $auteur,
             ]);
-        });
+        }, attempts: 3);
     }
 
     /**

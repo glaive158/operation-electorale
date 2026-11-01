@@ -8,6 +8,7 @@ use App\Models\Logistique\JournalEntree;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
 use App\Models\User;
+use App\Services\Logistique\CommandeService;
 use App\Services\Logistique\StockService;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -240,5 +241,47 @@ class StockLedgerTest extends TestCase
             $this->expectException(StockInsuffisant::class);
             $this->stock->enregistrer($urne, 'sortie_expedition', -6);
         });
+    }
+
+    public function test_compensation_d_une_entree_fournisseur_refusee(): void
+    {
+        $urne = $this->urne();
+        $commandes = app(CommandeService::class);
+        $commande = $commandes->creer(
+            ['reference' => 'CMD-X', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'],
+            [['materiel_id' => $urne->id, 'quantite_commandee' => 50]],
+        );
+        $commandes->confirmer($commande);
+        $commandes->recevoir($commande, ['date_reception' => '2026-11-10', 'bon_livraison' => 'BL-1'], [
+            $commande->lignes()->first()->id => ['acceptee' => 50, 'rejetee' => 0],
+        ]);
+        $entree = MouvementStock::where('type', 'entree_fournisseur')->firstOrFail();
+
+        try {
+            $this->stock->compenser($entree, 'Erreur');
+            $this->fail('Une RegleLogistique était attendue.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame(
+                'Mouvement issu d\'une réception fournisseur : corriger la réception, pas le stock.',
+                $e->getMessage(),
+            );
+            $this->assertSame(50, $this->stock->physique($urne));
+            $this->assertSame(1, MouvementStock::count());
+        }
+    }
+
+    public function test_inventaire_initial_sans_motif_refuse(): void
+    {
+        $urne = $this->urne();
+
+        foreach (['', '   '] as $motif) {
+            try {
+                $this->stock->inventaireInitial($urne, 10, $motif);
+                $this->fail('Une InvalidArgumentException était attendue.');
+            } catch (InvalidArgumentException) {
+                $this->assertTrue(true);
+            }
+        }
+        $this->assertSame(0, MouvementStock::count());
     }
 }
