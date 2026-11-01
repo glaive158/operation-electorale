@@ -9,9 +9,18 @@ use App\Http\Controllers\ChargeElectoraleController;
 use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
+use App\Http\Controllers\Logistique\BesoinController;
+use App\Http\Controllers\Logistique\CleController;
 use App\Http\Controllers\Logistique\CommandeController;
+use App\Http\Controllers\Logistique\CommissionController;
+use App\Http\Controllers\Logistique\CorrespondanceController;
 use App\Http\Controllers\Logistique\CycleController;
+use App\Http\Controllers\Logistique\EntiteController;
+use App\Http\Controllers\Logistique\GeographieController;
+use App\Http\Controllers\Logistique\InstantaneController;
 use App\Http\Controllers\Logistique\MaterielController;
+use App\Http\Controllers\Logistique\PlanDotationController;
+use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
@@ -119,6 +128,21 @@ Route::middleware(['auth'])->group(function () {
         Route::post('commandes/{commande}/confirmation', [CommandeController::class, 'confirmer'])->name('commandes.confirmer');
         Route::post('commandes/{commande}/receptions', [CommandeController::class, 'recevoir'])->name('commandes.receptions.store');
 
+        Route::get('destinataires', [GeographieController::class, 'destinataires'])->name('destinataires.index');
+        Route::get('cycles/{cycle}/decoupage', [GeographieController::class, 'decoupage'])->name('decoupage.show');
+        Route::get('correspondances', [CorrespondanceController::class, 'index'])->name('correspondances.index');
+        Route::get('cycles/{cycle}/commissions', [CommissionController::class, 'index'])->name('commissions.index');
+        Route::get('cycles/{cycle}/instantanes', [InstantaneController::class, 'index'])->name('instantanes.index');
+        Route::post('cycles/{cycle}/instantanes', [InstantaneController::class, 'store'])->name('instantanes.store');
+        Route::get('instantanes/{instantane}', [InstantaneController::class, 'show'])->name('instantanes.show');
+        Route::post('instantanes/{instantane}/fige', [InstantaneController::class, 'figer'])->name('instantanes.figer');
+        Route::get('cycles/{cycle}/entites', [EntiteController::class, 'index'])->name('entites.index');
+        Route::get('cycles/{cycle}/cles', [CleController::class, 'index'])->name('cles.index');
+        Route::get('cycles/{cycle}/plans', [PlanDotationController::class, 'index'])->name('plans.index');
+        Route::post('cycles/{cycle}/plans', [PlanDotationController::class, 'store'])->name('plans.store');
+        Route::get('plans/{plan}', [PlanDotationController::class, 'show'])->name('plans.show');
+        Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
+
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
             Route::put('cycles/{cycle}/attributions/{materiel}', [StockController::class, 'attribuer'])->name('attributions.update');
@@ -127,6 +151,33 @@ Route::middleware(['auth'])->group(function () {
             Route::post('commande-lignes/{ligne}/abandon', [CommandeController::class, 'abandonner'])->name('commande-lignes.abandonner');
 
             Route::resource('cycles', CycleController::class)->only(['create', 'store', 'edit', 'update']);
+
+            Route::resource('postes', PosteController::class)->only(['index', 'create', 'store', 'edit', 'update']);
+            Route::post('destinataires/generation', [GeographieController::class, 'genererDestinataires'])->name('destinataires.generer');
+            Route::put('destinataires/{destinataire}', [GeographieController::class, 'modifierDestinataire'])->name('destinataires.update');
+            Route::post('cycles/{cycle}/decoupage/generation', [GeographieController::class, 'genererPerimetre'])->name('decoupage.generer');
+            Route::post('cycles/{cycle}/decoupage/affectation', [GeographieController::class, 'affecter'])->name('decoupage.affecter');
+            Route::post('cycles/{cycle}/decoupage/copie', [GeographieController::class, 'copier'])->name('decoupage.copier');
+            Route::delete('cycles/{cycle}/decoupage/localite', [GeographieController::class, 'retirer'])->name('decoupage.retirer');
+
+            Route::post('correspondances/rapprochement', [CorrespondanceController::class, 'rapprocher'])->name('correspondances.rapprocher');
+            Route::post('correspondances/{correspondance}/validation', [CorrespondanceController::class, 'valider'])->name('correspondances.valider');
+            Route::post('correspondances/{correspondance}/rejet', [CorrespondanceController::class, 'rejeter'])->name('correspondances.rejeter');
+
+            Route::post('cycles/{cycle}/commissions', [CommissionController::class, 'store'])->name('commissions.store');
+            Route::post('cycles/{cycle}/commissions/fixes', [CommissionController::class, 'fixes'])->name('commissions.fixes');
+            Route::delete('cycles/{cycle}/commissions/{commission}', [CommissionController::class, 'destroy'])->name('commissions.destroy');
+
+            Route::post('cycles/{cycle}/entites', [EntiteController::class, 'store'])->name('entites.store');
+            Route::put('cycles/{cycle}/entites/{entite}', [EntiteController::class, 'update'])->name('entites.update');
+
+            Route::put('cycles/{cycle}/cles/{materiel}', [CleController::class, 'update'])->name('cles.update');
+            Route::post('cycles/{cycle}/cles/copie', [CleController::class, 'copier'])->name('cles.copier');
+
+            Route::post('plan-lignes/{ligne}/correction', [PlanDotationController::class, 'corriger'])->name('plan-lignes.corriger');
+            Route::post('plans/{plan}/approbation', [PlanDotationController::class, 'approuver'])->name('plans.approuver');
+
+            Route::post('cycles/{cycle}/besoin/commande', [BesoinController::class, 'commander'])->name('besoin.commander');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

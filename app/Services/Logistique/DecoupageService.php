@@ -292,6 +292,131 @@ class DecoupageService
         }, attempts: 3);
     }
 
+    /**
+     * Crée un poste à l'étranger (consulat ou ambassade). Son destinataire est créé par
+     * genererDestinataires.
+     *
+     * @param  array{pays?:mixed, ville?:mixed, type?:mixed, nom?:mixed, actif?:mixed}  $donnees
+     */
+    public function creerPoste(array $donnees): PosteEtranger
+    {
+        $this->exigerAuteur();
+        $this->exigerResponsable('Seul un responsable logistique peut gérer les postes à l\'étranger.');
+        $retenues = $this->validerPoste($donnees + ['actif' => true]);
+
+        return DB::transaction(function () use ($retenues) {
+            $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], null);
+
+            $poste = PosteEtranger::create($retenues);
+            Journal::noter('poste_etranger', $poste->id, 'creation_poste', null, $poste->only($poste->getFillable()));
+
+            return $poste;
+        }, attempts: 3);
+    }
+
+    /** @param  array{pays?:mixed, ville?:mixed, type?:mixed, nom?:mixed, actif?:mixed}  $donnees */
+    public function modifierPoste(PosteEtranger $poste, array $donnees): void
+    {
+        $this->exigerAuteur();
+        $this->exigerResponsable('Seul un responsable logistique peut gérer les postes à l\'étranger.');
+        $retenues = $this->validerPoste($donnees + ['actif' => $poste->actif]);
+
+        DB::transaction(function () use ($poste, $retenues) {
+            $actuel = PosteEtranger::whereKey($poste->id)->lockForUpdate()->firstOrFail();
+            $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], $actuel->id);
+
+            $avant = $actuel->only($actuel->getFillable());
+            $actuel->update($retenues);
+            Journal::noter('poste_etranger', $actuel->id, 'modification_poste', $avant, $actuel->only($actuel->getFillable()));
+        }, attempts: 3);
+
+        $poste->refresh();
+    }
+
+    /**
+     * Met à jour le signataire (nom, qualité) et l'état d'un destinataire ; les champs absents restent inchangés.
+     *
+     * @param  array{signataire_nom?:mixed, signataire_qualite?:mixed, actif?:mixed}  $donnees
+     */
+    public function modifierDestinataire(Destinataire $destinataire, array $donnees): void
+    {
+        $this->exigerAuteur();
+        $this->exigerResponsable('Seul un responsable logistique peut modifier un destinataire.');
+
+        $retenues = [];
+        foreach (['signataire_nom', 'signataire_qualite'] as $champ) {
+            if (! array_key_exists($champ, $donnees)) {
+                continue;
+            }
+            $valeur = $donnees[$champ] === null ? null : trim((string) $donnees[$champ]);
+            if ($valeur !== null && mb_strlen($valeur) > 150) {
+                throw new InvalidArgumentException('Le signataire ne dépasse pas 150 caractères.');
+            }
+            $retenues[$champ] = $valeur === '' ? null : $valeur;
+        }
+        if (array_key_exists('actif', $donnees)) {
+            if (! is_bool($donnees['actif'])) {
+                throw new InvalidArgumentException('L\'état actif est un booléen.');
+            }
+            $retenues['actif'] = $donnees['actif'];
+        }
+
+        DB::transaction(function () use ($destinataire, $retenues) {
+            $actuel = Destinataire::whereKey($destinataire->id)->lockForUpdate()->firstOrFail();
+            $avant = $actuel->only(array_keys($retenues));
+            $actuel->update($retenues);
+
+            if ($avant !== $actuel->only(array_keys($retenues))) {
+                Journal::noter('destinataire', $actuel->id, 'modification_destinataire', $avant, $actuel->only(array_keys($retenues)));
+            }
+        }, attempts: 3);
+
+        $destinataire->refresh();
+    }
+
+    /**
+     * @param  array<string,mixed>  $d
+     * @return array{pays:string, ville:string, type:string, nom:string, actif:bool}
+     */
+    private function validerPoste(array $d): array
+    {
+        $pays = trim((string) ($d['pays'] ?? ''));
+        $ville = trim((string) ($d['ville'] ?? ''));
+        $nom = trim((string) ($d['nom'] ?? ''));
+        if ($pays === '' || $ville === '' || mb_strlen($pays) > 100 || mb_strlen($ville) > 100) {
+            throw new InvalidArgumentException('Le pays et la ville comptent de 1 à 100 caractères.');
+        }
+        if ($nom === '' || mb_strlen($nom) > 200) {
+            throw new InvalidArgumentException('Le nom du poste compte de 1 à 200 caractères.');
+        }
+        if (! in_array($d['type'] ?? null, ['consulat', 'ambassade'], true)) {
+            throw new InvalidArgumentException('Type de poste inconnu (consulat ou ambassade).');
+        }
+        if (! is_bool($d['actif'])) {
+            throw new InvalidArgumentException('L\'état actif est un booléen.');
+        }
+
+        return ['pays' => $pays, 'ville' => $ville, 'type' => $d['type'], 'nom' => $nom, 'actif' => $d['actif']];
+    }
+
+    private function exigerPosteLibre(string $pays, string $nom, ?int $sauf): void
+    {
+        $requete = PosteEtranger::where('pays', $pays)->where('nom', $nom);
+        if ($sauf !== null) {
+            $requete->where('id', '!=', $sauf);
+        }
+        if ($requete->exists()) {
+            throw new InvalidArgumentException("Un poste « {$nom} » existe déjà pour ce pays.");
+        }
+    }
+
+    private function exigerResponsable(string $message): void
+    {
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique($message);
+        }
+    }
+
     private function verrouillerCycleOuvert(Cycle $cycle): void
     {
         $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->first();

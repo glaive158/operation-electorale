@@ -12,6 +12,22 @@ class CleRepartition extends Model
 
     public const ARRONDIS = ['unite', 'dizaine', 'cinquantaine', 'centaine'];
 
+    public const LIBELLES_BASE = [
+        'electeur'        => 'Par électeur',
+        'bureau_vote'     => 'Par bureau de vote',
+        'lieu_vote'       => 'Par lieu de vote',
+        'ca'              => 'Par commission administrative',
+        'circonscription' => 'Par circonscription',
+        'forfait'         => 'Forfait',
+    ];
+
+    public const LIBELLES_ARRONDI = [
+        'unite'        => 'À l\'unité',
+        'dizaine'      => 'À la dizaine',
+        'cinquantaine' => 'À la cinquantaine',
+        'centaine'     => 'À la centaine',
+    ];
+
     protected $table = 'cles_repartition';
 
     protected $fillable = [

@@ -23,6 +23,7 @@
                         <th class="px-5 py-3 text-right font-semibold">Réserve centrale</th>
                         <th class="px-5 py-3 text-left font-semibold">Circuit</th>
                         <th class="px-5 py-3 text-left font-semibold">Statut</th>
+                        <th class="px-5 py-3 text-left font-semibold">Dotation</th>
                         @can('logistique-administrer')
                             <th class="px-5 py-3 text-left font-semibold">Actions</th>
                         @endcan
@@ -41,6 +42,15 @@
                                 <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ $c->estOuvert() ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600' }}">
                                     {{ $c->estOuvert() ? 'Ouvert' : 'Clos' }}
                                 </span>
+                            </td>
+                            <td class="px-5 py-3">
+                                <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                                    <a href="{{ route('logistique.decoupage.show', $c) }}" class="underline text-slate-600">Découpage</a>
+                                    <a href="{{ route('logistique.instantanes.index', $c) }}" class="underline text-slate-600">Effectifs</a>
+                                    <a href="{{ route('logistique.cles.index', $c) }}" class="underline text-slate-600">Clés</a>
+                                    <a href="{{ route('logistique.plans.index', $c) }}" class="underline text-slate-600">Plans</a>
+                                    <a href="{{ route('logistique.besoin.show', $c) }}" class="underline text-slate-600">Besoin</a>
+                                </div>
                             </td>
                             @can('logistique-administrer')
                                 <td class="px-5 py-3">
@@ -62,7 +72,7 @@
                             @endcan
                         </tr>
                     @empty
-                        <tr><td colspan="8" class="px-6 py-10 text-center text-slate-400">Aucun cycle</td></tr>
+                        <tr><td colspan="9" class="px-6 py-10 text-center text-slate-400">Aucun cycle</td></tr>
                     @endforelse
                 </tbody>
             </table>
