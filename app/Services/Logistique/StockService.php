@@ -9,6 +9,7 @@ use App\Models\Logistique\MouvementStock;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
+use LogicException;
 
 /**
  * Grand livre de stock : le stock n'est jamais une colonne, c'est la somme
@@ -60,7 +61,8 @@ class StockService
         return DB::transaction(function () use ($mouvement, $motif) {
             $materiel = Materiel::whereKey($mouvement->materiel_id)->lockForUpdate()->firstOrFail();
 
-            if (MouvementStock::where('mouvement_compense_id', $mouvement->id)->exists()) {
+            // Lecture verrouillante : voit les dernières lignes validées, même dans une transaction englobante.
+            if (MouvementStock::where('mouvement_compense_id', $mouvement->id)->lockForUpdate()->exists()) {
                 throw new RegleLogistique('Ce mouvement a déjà été compensé.');
             }
 
@@ -93,10 +95,15 @@ class StockService
             throw new InvalidArgumentException("État de stock inconnu : {$etat}.");
         }
 
-        return DB::transaction(function () use ($materiel, $type, $quantite, $reference, $motif, $etat, $compenseId) {
+        $auteur = auth()->id();
+        if ($auteur === null) {
+            throw new LogicException('Mouvement de stock sans auteur.');
+        }
+
+        return DB::transaction(function () use ($materiel, $type, $quantite, $reference, $motif, $etat, $compenseId, $auteur) {
             Materiel::whereKey($materiel->id)->lockForUpdate()->firstOrFail();
 
-            $solde = $this->physique($materiel, $etat) + $quantite;
+            $solde = $this->soldeVerrouille($materiel, $etat) + $quantite;
             if ($solde < 0) {
                 throw new StockInsuffisant(sprintf(
                     'Stock insuffisant pour « %s » (état %s) : %d en stock, mouvement de %d.',
@@ -113,8 +120,20 @@ class StockService
                 'reference_id'          => $reference?->getKey(),
                 'mouvement_compense_id' => $compenseId,
                 'motif'                 => $motif,
-                'user_id'               => auth()->id(),
+                'user_id'               => $auteur,
             ]);
         });
+    }
+
+    /**
+     * Solde lu avec verrou : voit les dernières lignes validées, même si une
+     * transaction englobante a déjà ouvert son instantané. Réservé au chemin d'écriture.
+     */
+    private function soldeVerrouille(Materiel $materiel, string $etat): int
+    {
+        return (int) MouvementStock::where('materiel_id', $materiel->id)
+            ->where('etat', $etat)
+            ->lockForUpdate()
+            ->sum('quantite');
     }
 }

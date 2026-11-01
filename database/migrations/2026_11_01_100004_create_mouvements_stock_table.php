@@ -21,7 +21,7 @@ return new class extends Migration
             $table->unsignedBigInteger('reference_id')->nullable();
             $table->foreignId('mouvement_compense_id')->nullable()->unique()->constrained('mouvements_stock');
             $table->text('motif')->nullable();
-            $table->foreignId('user_id')->nullable()->constrained('users')->nullOnDelete();
+            $table->foreignId('user_id')->constrained('users');
             $table->timestamps();
 
             $table->index(['materiel_id', 'etat']);

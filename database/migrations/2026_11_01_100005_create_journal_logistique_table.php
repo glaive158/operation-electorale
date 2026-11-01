@@ -10,7 +10,7 @@ return new class extends Migration
     {
         Schema::create('journal_logistique', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('user_id')->nullable()->constrained('users')->nullOnDelete();
+            $table->foreignId('user_id')->nullable()->constrained('users');
             $table->string('objet_type', 60);
             $table->unsignedBigInteger('objet_id');
             $table->string('action', 60);

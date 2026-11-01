@@ -9,7 +9,9 @@ use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
 use App\Models\User;
 use App\Services\Logistique\StockService;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use LogicException;
 use Tests\TestCase;
@@ -24,6 +26,7 @@ class StockLedgerTest extends TestCase
     {
         parent::setUp();
         $this->stock = app(StockService::class);
+        $this->actingAs(User::factory()->create(['role' => 'logistique_gestionnaire']));
     }
 
     private function urne(): Materiel
@@ -194,5 +197,48 @@ class StockLedgerTest extends TestCase
             'majoration_distribuee' => 0, 'reserve_centrale' => 0, 'circuit_defaut' => 'direct',
         ])->assertRedirect();
         $this->assertDatabaseHas('journal_logistique', ['objet_type' => 'cycle', 'action' => 'creation']);
+    }
+
+    public function test_mouvement_sans_auteur_refuse(): void
+    {
+        $urne = $this->urne();
+        auth()->forgetGuards();
+        $this->app['auth']->shouldUse('web');
+        $this->assertNull(auth()->id());
+
+        try {
+            $this->stock->inventaireInitial($urne, 5, 'Inventaire');
+            $this->fail('Une LogicException était attendue.');
+        } catch (LogicException $e) {
+            $this->assertSame('Mouvement de stock sans auteur.', $e->getMessage());
+        }
+        $this->assertSame(0, MouvementStock::count());
+    }
+
+    public function test_suppression_d_un_utilisateur_auteur_de_mouvement_refusee(): void
+    {
+        $auteur = User::factory()->create(['role' => 'logistique_responsable']);
+        $this->actingAs($auteur);
+        $m = $this->stock->inventaireInitial($this->urne(), 5, 'Inventaire');
+
+        try {
+            DB::table('users')->where('id', $auteur->id)->delete();
+            $this->fail('Une QueryException était attendue.');
+        } catch (QueryException) {
+            $this->assertSame($auteur->id, $m->fresh()->user_id);
+            $this->assertDatabaseHas('users', ['id' => $auteur->id]);
+        }
+    }
+
+    public function test_solde_lu_dans_une_transaction_englobante(): void
+    {
+        $urne = $this->urne();
+        $this->stock->inventaireInitial($urne, 10, 'Inventaire');
+
+        DB::transaction(function () use ($urne) {
+            $this->stock->enregistrer($urne, 'sortie_expedition', -6);
+            $this->expectException(StockInsuffisant::class);
+            $this->stock->enregistrer($urne, 'sortie_expedition', -6);
+        });
     }
 }
