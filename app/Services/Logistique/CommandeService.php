@@ -8,6 +8,8 @@ use App\Models\Logistique\CommandeLigne;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\ReceptionFournisseur;
+use DateTimeImmutable;
+use DateTimeInterface;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use LogicException;
@@ -39,6 +41,9 @@ class CommandeService
         if ($reference === '' || $fournisseur === '' || empty($entete['date_commande'])) {
             throw new InvalidArgumentException('La référence, le fournisseur et la date de commande sont obligatoires.');
         }
+        $this->exigerLongueurMax($reference, 50, 'référence');
+        $this->exigerLongueurMax($fournisseur, 200, 'fournisseur');
+        $dateCommande = $this->date($entete['date_commande'], 'date de commande');
         if ($lignes === []) {
             throw new InvalidArgumentException('Une commande comporte au moins une ligne.');
         }
@@ -66,11 +71,11 @@ class CommandeService
             throw new InvalidArgumentException("La référence de commande {$reference} existe déjà.");
         }
 
-        return DB::transaction(function () use ($entete, $reference, $fournisseur, $normalisees) {
+        return DB::transaction(function () use ($dateCommande, $reference, $fournisseur, $normalisees) {
             $commande = Commande::create([
                 'reference'     => $reference,
                 'fournisseur'   => $fournisseur,
-                'date_commande' => $entete['date_commande'],
+                'date_commande' => $dateCommande,
                 'statut'        => 'brouillon',
                 'user_id'       => auth()->id(),
             ]);
@@ -137,6 +142,8 @@ class CommandeService
         if ($bonLivraison === '' || empty($entete['date_reception'])) {
             throw new InvalidArgumentException('La date de réception et le bon de livraison sont obligatoires.');
         }
+        $this->exigerLongueurMax($bonLivraison, 100, 'bon de livraison');
+        $dateReception = $this->date($entete['date_reception'], 'date de réception');
         if ($lignes === []) {
             throw new InvalidArgumentException('Une réception comporte au moins une ligne.');
         }
@@ -149,7 +156,7 @@ class CommandeService
             ];
         }
 
-        return DB::transaction(function () use ($commande, $entete, $bonLivraison, $saisies) {
+        return DB::transaction(function () use ($commande, $dateReception, $bonLivraison, $saisies) {
             $actuelle = $this->commandeVerrouillee($commande);
             if (! in_array($actuelle->statut, ['confirmee', 'partiellement_recue'], true)) {
                 throw new RegleLogistique('Seule une commande confirmée ou partiellement reçue peut être réceptionnée.');
@@ -193,7 +200,7 @@ class CommandeService
 
             $reception = ReceptionFournisseur::create([
                 'commande_id'    => $actuelle->id,
-                'date_reception' => $entete['date_reception'],
+                'date_reception' => $dateReception,
                 'bon_livraison'  => $bonLivraison,
                 'user_id'        => auth()->id(),
             ]);
@@ -299,14 +306,20 @@ class CommandeService
     }
 
     /**
-     * Soldée (recue) quand plus rien n'est dû, sinon partiellement_recue.
+     * Soldée (recue) quand plus rien n'est dû ; sinon partiellement_recue si une réception
+     * a eu lieu, et statut inchangé dans le cas contraire.
      */
     private function statutSelonReste(Commande $commande): string
     {
         $reste = CommandeLigne::where('commande_id', $commande->id)->get()
             ->sum(fn (CommandeLigne $l) => $l->resteARecevoir());
 
-        return $reste === 0 ? 'recue' : 'partiellement_recue';
+        if ($reste === 0) {
+            return 'recue';
+        }
+
+        // Rien n'a été reçu : un abandon partiel ne rend pas la commande « partiellement reçue ».
+        return $commande->receptions()->exists() ? 'partiellement_recue' : $commande->statut;
     }
 
     private function commandeVerrouillee(Commande $commande): Commande
@@ -330,6 +343,28 @@ class CommandeService
         }
 
         throw new InvalidArgumentException("La valeur « {$nom} » doit être un entier.");
+    }
+
+    private function date(mixed $valeur, string $nom): string
+    {
+        if ($valeur instanceof DateTimeInterface) {
+            return $valeur->format('Y-m-d');
+        }
+        if (is_string($valeur)) {
+            $date = DateTimeImmutable::createFromFormat('!Y-m-d', $valeur);
+            if ($date !== false && $date->format('Y-m-d') === $valeur) {
+                return $valeur;
+            }
+        }
+
+        throw new InvalidArgumentException("La {$nom} doit être une date au format AAAA-MM-JJ.");
+    }
+
+    private function exigerLongueurMax(string $valeur, int $max, string $nom): void
+    {
+        if (mb_strlen($valeur) > $max) {
+            throw new InvalidArgumentException("Le champ « {$nom} » ne peut pas dépasser {$max} caractères.");
+        }
     }
 
     private function exigerMotif(string $motif): void

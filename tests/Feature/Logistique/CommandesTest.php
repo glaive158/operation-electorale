@@ -301,12 +301,96 @@ class CommandesTest extends TestCase
     public function test_operations_sans_auteur_refusees(): void
     {
         $m = $this->materiel();
-        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]], false);
+        $brouillon = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]], false);
+        $confirmee = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]], true, 'CMD-002');
+        $ligne = $confirmee->lignes[0];
 
         auth()->logout();
 
-        $this->expectException(LogicException::class);
-        $this->commandes->confirmer($commande);
+        $operations = [
+            'confirmer'  => fn () => $this->commandes->confirmer($brouillon),
+            'annuler'    => fn () => $this->commandes->annuler($brouillon, 'Motif'),
+            'creer'      => fn () => $this->commandes->creer(
+                ['reference' => 'CMD-X', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'],
+                [['materiel_id' => $m->id, 'quantite_commandee' => 1]],
+            ),
+            'recevoir'   => fn () => $this->recevoir($confirmee, [$ligne->id => ['acceptee' => 10, 'rejetee' => 0]]),
+            'abandonner' => fn () => $this->commandes->abandonner($ligne, 10, 'Motif'),
+        ];
+
+        foreach ($operations as $nom => $operation) {
+            try {
+                $operation();
+                $this->fail("{$nom} sans auteur devrait être refusé.");
+            } catch (LogicException) {
+            }
+        }
+
+        $this->assertSame(0, MouvementStock::count());
+        $this->assertSame('brouillon', $brouillon->fresh()->statut);
+        $this->assertSame(0, $ligne->fresh()->quantite_abandonnee);
+    }
+
+    public function test_abandon_partiel_sans_reception_garde_confirmee_puis_annulation_possible(): void
+    {
+        $m = $this->materiel();
+        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]]);
+        $ligne = $commande->lignes[0];
+
+        $this->commandes->abandonner($ligne, 40, 'Besoin réduit');
+
+        $this->assertSame('confirmee', $commande->fresh()->statut);
+        $this->assertSame(60, $ligne->fresh()->resteARecevoir());
+
+        $this->commandes->annuler($commande, 'Fournisseur défaillant');
+        $this->assertSame('annulee', $commande->fresh()->statut);
+    }
+
+    public function test_abandon_total_sans_reception_solde_la_commande(): void
+    {
+        $m = $this->materiel();
+        $commande = $this->commande([['materiel_id' => $m->id, 'quantite_commandee' => 100]]);
+
+        $this->commandes->abandonner($commande->lignes[0], 100, 'Commande abandonnée');
+
+        $this->assertSame('recue', $commande->fresh()->statut);
+    }
+
+    public function test_dates_et_longueurs_invalides_refusees(): void
+    {
+        $m = $this->materiel();
+        $lignes = [['materiel_id' => $m->id, 'quantite_commandee' => 10]];
+        $entete = ['reference' => 'CMD-V', 'fournisseur' => 'F', 'date_commande' => '2026-11-01'];
+
+        $invalides = [
+            ['date_commande' => '01/11/2026'],
+            ['date_commande' => '2026-02-30'],
+            ['reference' => str_repeat('R', 51)],
+            ['fournisseur' => str_repeat('F', 201)],
+        ];
+        foreach ($invalides as $modif) {
+            try {
+                $this->commandes->creer(array_merge($entete, $modif), $lignes);
+                $this->fail('Une en-tête invalide devrait être refusée : ' . json_encode($modif));
+            } catch (InvalidArgumentException) {
+            }
+        }
+        $this->assertSame(0, Commande::count());
+
+        $commande = $this->commande($lignes);
+        $ligneId = $commande->lignes[0]->id;
+        foreach ([
+            ['date_reception' => 'demain', 'bon_livraison' => 'BL'],
+            ['date_reception' => '2026-11-10', 'bon_livraison' => str_repeat('B', 101)],
+        ] as $enteteReception) {
+            try {
+                $this->commandes->recevoir($commande, $enteteReception, [$ligneId => ['acceptee' => 5, 'rejetee' => 0]]);
+                $this->fail('Une en-tête de réception invalide devrait être refusée.');
+            } catch (InvalidArgumentException) {
+            }
+        }
+        $this->assertSame(0, ReceptionFournisseur::count());
+        $this->assertSame(0, MouvementStock::count());
     }
 
     public function test_reste_a_recevoir_est_commande_moins_accepte_moins_abandonne(): void
