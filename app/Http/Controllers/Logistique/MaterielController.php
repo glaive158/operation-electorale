@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Logistique;
 
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Materiel;
+use App\Services\Logistique\Journal;
 use Illuminate\Http\Request;
 
 class MaterielController extends Controller
@@ -31,7 +32,8 @@ class MaterielController extends Controller
     {
         $donnees = $this->valider($request);
         $donnees['actif'] = true;
-        Materiel::create($donnees);
+        $materiel = Materiel::create($donnees);
+        Journal::noter('materiel', $materiel->id, 'creation', null, $materiel->only($materiel->getFillable()));
 
         return redirect()->route('logistique.materiels.index')->with('success', 'Article créé.');
     }
@@ -45,7 +47,9 @@ class MaterielController extends Controller
     {
         $donnees = $this->valider($request);
         $donnees['actif'] = $request->boolean('actif', $materiel->actif);
+        $avant = $materiel->only($materiel->getFillable());
         $materiel->update($donnees);
+        Journal::noter('materiel', $materiel->id, 'modification', $avant, $materiel->only($materiel->getFillable()));
 
         return redirect()->route('logistique.materiels.index')->with('success', 'Article mis à jour.');
     }

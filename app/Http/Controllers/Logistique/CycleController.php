@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Logistique;
 
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Cycle;
+use App\Services\Logistique\Journal;
 use Illuminate\Http\Request;
 
 class CycleController extends Controller
@@ -22,7 +23,8 @@ class CycleController extends Controller
 
     public function store(Request $request)
     {
-        Cycle::create($this->valider($request));
+        $cycle = Cycle::create($this->valider($request));
+        Journal::noter('cycle', $cycle->id, 'creation', null, $cycle->only($cycle->getFillable()));
 
         return redirect()->route('logistique.cycles.index')->with('success', 'Cycle créé.');
     }
@@ -34,7 +36,9 @@ class CycleController extends Controller
 
     public function update(Request $request, Cycle $cycle)
     {
+        $avant = $cycle->only($cycle->getFillable());
         $cycle->update($this->valider($request));
+        Journal::noter('cycle', $cycle->id, 'modification', $avant, $cycle->only($cycle->getFillable()));
 
         return redirect()->route('logistique.cycles.index')->with('success', 'Cycle mis à jour.');
     }
