@@ -40,7 +40,7 @@
 
         @if($nbAnomalies > 0)
             <div class="mt-4 p-4 rounded-xl border border-amber-200 bg-amber-50 text-sm text-amber-800">
-                <p class="font-semibold">{{ $nbAnomalies }} anomalie(s) : le plan ne peut pas être approuvé.</p>
+                <p class="font-semibold">{{ $nbAnomalies }} anomalie(s){{ $brouillon ? ' : le plan ne peut pas être approuvé.' : '.' }}</p>
                 @if(! empty($plan->anomalies))
                     <ul class="list-disc ml-5 mt-1">
                         @foreach($plan->anomalies as $a) <li>{{ $a }}</li> @endforeach

@@ -7,6 +7,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PerimetreDestinataire;
 use App\Models\Logistique\PosteEtranger;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
@@ -304,14 +305,18 @@ class DecoupageService
         $this->exigerResponsable('Seul un responsable logistique peut gérer les postes à l\'étranger.');
         $retenues = $this->validerPoste($donnees + ['actif' => true]);
 
-        return DB::transaction(function () use ($retenues) {
-            $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], null);
+        try {
+            return DB::transaction(function () use ($retenues) {
+                $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], null);
 
-            $poste = PosteEtranger::create($retenues);
-            Journal::noter('poste_etranger', $poste->id, 'creation_poste', null, $poste->only($poste->getFillable()));
+                $poste = PosteEtranger::create($retenues);
+                Journal::noter('poste_etranger', $poste->id, 'creation_poste', null, $poste->only($poste->getFillable()));
 
-            return $poste;
-        }, attempts: 3);
+                return $poste;
+            }, attempts: 3);
+        } catch (UniqueConstraintViolationException) {
+            throw new InvalidArgumentException(self::messagePosteExistant($retenues['nom']));
+        }
     }
 
     /** @param  array{pays?:mixed, ville?:mixed, type?:mixed, nom?:mixed, actif?:mixed}  $donnees */
@@ -321,14 +326,37 @@ class DecoupageService
         $this->exigerResponsable('Seul un responsable logistique peut gérer les postes à l\'étranger.');
         $retenues = $this->validerPoste($donnees + ['actif' => $poste->actif]);
 
-        DB::transaction(function () use ($poste, $retenues) {
-            $actuel = PosteEtranger::whereKey($poste->id)->lockForUpdate()->firstOrFail();
-            $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], $actuel->id);
+        try {
+            DB::transaction(function () use ($poste, $retenues) {
+                $actuel = PosteEtranger::whereKey($poste->id)->lockForUpdate()->firstOrFail();
+                $this->exigerPosteLibre($retenues['pays'], $retenues['nom'], $actuel->id);
 
-            $avant = $actuel->only($actuel->getFillable());
-            $actuel->update($retenues);
-            Journal::noter('poste_etranger', $actuel->id, 'modification_poste', $avant, $actuel->only($actuel->getFillable()));
-        }, attempts: 3);
+                $avant = $actuel->only($actuel->getFillable());
+                $actuel->update($retenues);
+                $apres = $actuel->only($actuel->getFillable());
+
+                // Le destinataire créé pour ce poste suit son nom et son état.
+                $destinataire = Destinataire::where('poste_etranger_id', $actuel->id)->lockForUpdate()->first();
+                if ($destinataire !== null) {
+                    $avantDestinataire = $destinataire->only(['libelle', 'actif']);
+                    $destinataire->update([
+                        'libelle' => $avant['nom'] !== $retenues['nom'] ? $retenues['nom'] : $destinataire->libelle,
+                        'actif'   => $avant['actif'] !== $retenues['actif'] ? $retenues['actif'] : $destinataire->actif,
+                    ]);
+                    $apresDestinataire = $destinataire->only(['libelle', 'actif']);
+                    if ($avantDestinataire !== $apresDestinataire) {
+                        $avant['destinataire'] = $avantDestinataire;
+                        $apres['destinataire'] = $apresDestinataire;
+                    }
+                }
+
+                if ($avant !== $apres) {
+                    Journal::noter('poste_etranger', $actuel->id, 'modification_poste', $avant, $apres);
+                }
+            }, attempts: 3);
+        } catch (UniqueConstraintViolationException) {
+            throw new InvalidArgumentException(self::messagePosteExistant($retenues['nom']));
+        }
 
         $poste->refresh();
     }
@@ -406,8 +434,13 @@ class DecoupageService
             $requete->where('id', '!=', $sauf);
         }
         if ($requete->exists()) {
-            throw new InvalidArgumentException("Un poste « {$nom} » existe déjà pour ce pays.");
+            throw new InvalidArgumentException(self::messagePosteExistant($nom));
         }
+    }
+
+    private static function messagePosteExistant(string $nom): string
+    {
+        return "Un poste « {$nom} » existe déjà pour ce pays.";
     }
 
     private function exigerResponsable(string $message): void

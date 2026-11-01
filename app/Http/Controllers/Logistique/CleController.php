@@ -45,8 +45,8 @@ class CleController extends Controller
         return $this->executer(fn () => $this->cles->enregistrer($cycle, $materiel, [
             'base' => $donnees['base'],
             'ratio' => (string) $request->input('ratio'),
-            'majoration_distribuee' => $donnees['majoration_distribuee'] === null ? null : (string) $request->input('majoration_distribuee'),
-            'reserve_centrale' => $donnees['reserve_centrale'] === null ? null : (string) $request->input('reserve_centrale'),
+            'majoration_distribuee' => ($donnees['majoration_distribuee'] ?? null) === null ? null : (string) $request->input('majoration_distribuee'),
+            'reserve_centrale' => ($donnees['reserve_centrale'] ?? null) === null ? null : (string) $request->input('reserve_centrale'),
             'minimum' => (int) ($donnees['minimum'] ?? 0),
             'arrondi' => $donnees['arrondi'],
             'cle_affichee' => $donnees['cle_affichee'] ?? null,
