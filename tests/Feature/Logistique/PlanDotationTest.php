@@ -451,6 +451,20 @@ class PlanDotationTest extends TestCase
         $this->assertSame(6, $this->ligne($plan, $this->urnes, $this->sindia)->dotation_calculee);
     }
 
+    public function test_dotation_hors_limite_en_anomalie(): void
+    {
+        app(CleService::class)->enregistrer($this->cycle, $this->enveloppes, ['ratio' => '100000', 'majoration_distribuee' => '0']);
+        $lignes = $this->lignesCommunes();
+        $lignes[2]['electeurs'] = 50000;
+
+        $plan = $this->service()->calculer($this->cycle, $this->instantane($lignes));
+
+        $ligne = $this->ligne($plan, $this->enveloppes, $this->thienaba);
+        $this->assertNull($ligne->dotation_calculee);
+        $this->assertSame('Dotation hors limite', $ligne->anomalie);
+        $this->assertSame(15000000, $this->ligne($plan, $this->enveloppes, $this->sindia)->dotation_calculee);
+    }
+
     public function test_instantane_non_fige_refuse(): void
     {
         $this->expectException(RegleLogistique::class);

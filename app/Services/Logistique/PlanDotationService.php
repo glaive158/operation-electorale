@@ -400,6 +400,9 @@ class PlanDotationService
         }
 
         $resultat = $this->moteur->doter($p, $calculs, $entitesD);
+        if ($resultat->dotation > self::MAX_ENTIER) {
+            $anomalies[] = 'Dotation hors limite';
+        }
 
         return [
             'effectif'          => $resultat->unites,
