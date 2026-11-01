@@ -43,7 +43,7 @@
         <label class="block text-xs font-medium text-slate-600 mb-1.5">Rôle <span class="text-red-500">*</span></label>
         <select name="role" id="role_select" required
                 class="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
-            @foreach(['admin'=>'Admin','gouverneur'=>'Gouverneur','prefet'=>'Préfet','sous_prefet'=>'Sous-Préfet','commission'=>'Commission'] as $v => $l)
+            @foreach(['admin'=>'Admin','gouverneur'=>'Gouverneur','prefet'=>'Préfet','sous_prefet'=>'Sous-Préfet','commission'=>'Commission','logistique_gestionnaire'=>'Logistique — gestionnaire','logistique_responsable'=>'Logistique — responsable'] as $v => $l)
                 <option value="{{ $v }}" {{ old('role', $u->role ?? '') === $v ? 'selected' : '' }}>{{ $l }}</option>
             @endforeach
         </select>
@@ -128,6 +128,8 @@
         prefet:      ['region','departement'],
         sous_prefet: ['region','departement','arrondissement'],
         commission:  ['region','departement','arrondissement','commune'],
+        logistique_gestionnaire: [],
+        logistique_responsable:  [],
     };
 
     function el(id) { return document.getElementById(id); }
