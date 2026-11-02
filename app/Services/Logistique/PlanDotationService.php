@@ -6,6 +6,7 @@ use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\CleRepartition;
 use App\Models\Logistique\CorrespondanceGeo;
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\EntiteBulletin;
 use App\Models\Logistique\InstantaneEffectifs;
 use App\Models\Logistique\InstantaneLigne;
@@ -309,13 +310,39 @@ class PlanDotationService
     }
 
     /**
-     * Localités de chaque destinataire (périmètre relu au calcul) rapprochées de l'instantané,
-     * et anomalies du plan. Aucune requête par ligne : tout est chargé une fois.
+     * Effectifs d'un destinataire d'après l'instantané du plan : somme des lignes rapprochées dont la
+     * localité appartient à son périmètre actuel, avec les mêmes clés de localité que le calcul.
      *
-     * @param  Collection<int, EntiteBulletin>  $entites
-     * @return array{0: array{parDestinataire: array<int, list<array<string, mixed>>>}, 1: list<string>}
+     * @return array{electeurs:int, bureaux_vote:int, lieux_vote:int, commissions:int}
      */
-    private function localites(Cycle $cycle, InstantaneEffectifs $source, Collection $entites): array
+    public function effectifsDestinataire(PlanDotation $plan, Destinataire $destinataire): array
+    {
+        [$parCle] = $this->lignesParLocalite(InstantaneEffectifs::findOrFail($plan->instantane_id));
+
+        $total = ['electeurs' => 0, 'bureaux_vote' => 0, 'lieux_vote' => 0, 'commissions' => 0];
+        $vues = [];
+        $perimetres = PerimetreDestinataire::where('cycle_id', $plan->cycle_id)
+            ->where('destinataire_id', $destinataire->id)->orderBy('id')->get();
+        foreach ($perimetres as $perimetre) {
+            $cle = $perimetre->localite();
+            if (isset($vues[$cle]) || ! isset($parCle[$cle])) {
+                continue;
+            }
+            $vues[$cle] = true;
+            foreach (array_keys($total) as $colonne) {
+                $total[$colonne] += (int) $parCle[$cle]->{$colonne};
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Lignes rapprochées de l'instantané indexées par clé de localité, et total des électeurs non rapprochés.
+     *
+     * @return array{0: array<string, InstantaneLigne>, 1: int}
+     */
+    private function lignesParLocalite(InstantaneEffectifs $source): array
     {
         $parCle = [];
         $nonRapproches = 0;
@@ -329,6 +356,20 @@ class PlanDotationService
                 ? "commune:{$ligne->commune_id}"
                 : NomGeo::cleEtranger((string) $ligne->pays, (string) $ligne->ville)] = $ligne;
         }
+
+        return [$parCle, $nonRapproches];
+    }
+
+    /**
+     * Localités de chaque destinataire (périmètre relu au calcul) rapprochées de l'instantané,
+     * et anomalies du plan. Aucune requête par ligne : tout est chargé une fois.
+     *
+     * @param  Collection<int, EntiteBulletin>  $entites
+     * @return array{0: array{parDestinataire: array<int, list<array<string, mixed>>>}, 1: list<string>}
+     */
+    private function localites(Cycle $cycle, InstantaneEffectifs $source, Collection $entites): array
+    {
+        [$parCle, $nonRapproches] = $this->lignesParLocalite($source);
 
         $perimetres = PerimetreDestinataire::where('cycle_id', $cycle->id)->orderBy('id')->get();
         $absentes = $perimetres->filter(fn ($p) => $p->commune_id !== null && ! isset($parCle[$p->localite()]))

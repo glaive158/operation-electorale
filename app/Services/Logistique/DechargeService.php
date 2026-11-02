@@ -32,7 +32,11 @@ class DechargeService
 
     private const RIEN_A_EXPEDIER = 'Rien à expédier pour cette catégorie.';
 
-    public function __construct(private readonly EngagementService $engagements) {}
+    public function __construct(
+        private readonly EngagementService $engagements,
+        private readonly CircuitService $circuits,
+        private readonly StockService $stock,
+    ) {}
 
     /** Prépare le brouillon d'un destinataire : une ligne par article de la catégorie dont il reste à expédier. */
     public function preparer(Cycle $cycle, Destinataire $destinataire, string $categorie): Decharge
@@ -125,6 +129,81 @@ class DechargeService
 
             Journal::noter('decharge', $actuelle->id, 'suppression_decharge_brouillon', $avant, null, $motif);
         }, attempts: 3);
+    }
+
+    /**
+     * Valide un brouillon : chaque ligne est contrôlée sous le plafond du besoin puis réservée en stock ;
+     * le circuit, le destinataire de la remise, le numéro et les données du document sont figés.
+     * Toute exception annule tout : aucune réservation, la décharge reste en brouillon.
+     */
+    public function valider(Decharge $decharge): void
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit();
+
+        DB::transaction(function () use ($decharge) {
+            $cycle = $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : validation de décharge impossible.');
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+            $this->exigerBrouillon($actuelle, 'Seul un brouillon peut être validé.');
+
+            $plan = PlanDotation::courantApprouve($cycle);
+            if ($plan === null) {
+                throw new RegleLogistique(self::AUCUN_PLAN);
+            }
+            if ((int) $actuelle->plan_dotation_id !== (int) $plan->id) {
+                throw new RegleLogistique('Le plan de dotation a changé : actualisez la décharge.');
+            }
+
+            $retirees = DechargeLigne::where('decharge_id', $actuelle->id)->where('quantite', 0)
+                ->orderBy('materiel_id')->get(['materiel_id', 'dotation_approuvee'])
+                ->map(fn (DechargeLigne $l) => ['materiel_id' => $l->materiel_id, 'dotation_approuvee' => $l->dotation_approuvee])->all();
+            DechargeLigne::where('decharge_id', $actuelle->id)->where('quantite', 0)->delete();
+
+            $lignes = DechargeLigne::where('decharge_id', $actuelle->id)->with('materiel')->orderBy('materiel_id')->get();
+            if ($lignes->isEmpty()) {
+                throw new RegleLogistique('Décharge sans quantité à expédier.');
+            }
+
+            $destinataire = Destinataire::findOrFail($actuelle->destinataire_id);
+            $besoins = $this->engagements->etat($cycle, $destinataire, $actuelle->categorie);
+
+            $validees = [];
+            foreach ($lignes as $ligne) {
+                $engage = $this->engagements->engage($cycle, $destinataire, $ligne->materiel);
+                $besoin = $besoins->get($ligne->materiel_id)['dotation'] ?? 0;
+                if ($engage + $ligne->quantite > $besoin) {
+                    throw new RegleLogistique(
+                        "Plafond du besoin dépassé pour {$ligne->materiel->libelle} : besoin {$besoin}, déjà engagé {$engage}, demandé {$ligne->quantite}."
+                    );
+                }
+
+                $reservation = $this->stock->reserver($cycle, $ligne->materiel, $ligne->quantite, $ligne);
+                $ligne->forceFill(['reservation_id' => $reservation->id, 'deja_engage' => $engage])->save();
+                $validees[] = [
+                    'materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite,
+                    'deja_engage' => $engage, 'dotation_approuvee' => $besoin, 'reservation_id' => $reservation->id,
+                ];
+            }
+
+            $actuelle->forceFill([
+                'circuit' => $this->circuits->circuitPour($cycle, $destinataire),
+                'remis_a_id' => $this->circuits->remisA($cycle, $destinataire)->id,
+                'numero' => $this->prochainNumero($cycle),
+                'statut_document' => 'validee',
+                'valide_par' => auth()->id(),
+                'valide_le' => now(),
+            ]);
+            $actuelle->setRelation('plan', $plan);
+            $actuelle->forceFill(['donnees_gelees' => DonneesDecharge::construire($actuelle)])->save();
+
+            Journal::noter('decharge', $actuelle->id, 'validation_decharge', ['statut_document' => 'brouillon'], [
+                'statut_document' => 'validee', 'numero' => $actuelle->numero, 'circuit' => $actuelle->circuit,
+                'remis_a_id' => $actuelle->remis_a_id, 'plan_dotation_id' => $plan->id,
+                'lignes' => $validees, 'lignes_retirees' => $retirees,
+            ]);
+        }, attempts: 3);
+
+        $decharge->refresh();
     }
 
     /**
@@ -318,6 +397,15 @@ class DechargeService
         }
 
         return $requete->get();
+    }
+
+    /** À appeler sous le verrou du cycle : 1 + le plus grand rang déjà attribué (les annulées gardent le leur). */
+    private function prochainNumero(Cycle $cycle): string
+    {
+        $dernier = Decharge::where('cycle_id', $cycle->id)->whereNotNull('numero')->pluck('numero')
+            ->map(fn (string $numero) => (int) substr($numero, strrpos($numero, '-') + 1))->max() ?? 0;
+
+        return sprintf('%d-%05d', $cycle->id, $dernier + 1);
     }
 
     private function cleAffichee(PlanDotation $plan, int $materielId): ?string
