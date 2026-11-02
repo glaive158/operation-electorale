@@ -418,7 +418,7 @@ class EcransDotationTest extends TestCase
                 && ! in_array('GET', $r->methods(), true)
                 && in_array('can:logistique-administrer', $r->gatherMiddleware(), true))
             ->map(fn ($r) => $r->getName())
-            ->reject(fn ($nom) => preg_match('/^logistique\.(cycles|mouvements|attributions|commandes|commande-lignes|circuit|decharges|declarations|clotures-ecart)\./', $nom) === 1)
+            ->reject(fn ($nom) => preg_match('/^logistique\.(cycles|mouvements|attributions|commandes|commande-lignes|circuit|decharges|declarations|clotures-ecart|appareils|remises)\./', $nom) === 1)
             ->values()->all();
         $this->assertSame([], array_values(array_diff($administrer, array_keys($ecritures))));
     }

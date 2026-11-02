@@ -8,6 +8,7 @@
         $onglets[] = ['Postes à l\'étranger', 'logistique.postes.index', null, 'logistique.postes.*'];
         $onglets[] = ['Codes de réception', 'logistique.utilisateurs.codes', null, 'logistique.utilisateurs.*'];
     }
+    $onglets[] = ['Appareils', 'logistique.appareils.index', null, 'logistique.appareils.*'];
     if ($cycleOnglet) {
         $onglets = array_merge($onglets, [
             ['Découpage', 'logistique.decoupage.show', $cycleOnglet, 'logistique.decoupage.*'],

@@ -9,6 +9,7 @@ use App\Http\Controllers\ChargeElectoraleController;
 use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
+use App\Http\Controllers\Logistique\AppareilController;
 use App\Http\Controllers\Logistique\BesoinController;
 use App\Http\Controllers\Logistique\ArbitrageController;
 use App\Http\Controllers\Logistique\CircuitController;
@@ -211,6 +212,7 @@ Route::middleware(['auth'])->group(function () {
 
         Route::put('decharges/{decharge}/agent', [RemiseController::class, 'affecter'])->name('decharges.agent');
         Route::post('decharges/{decharge}/chargement', [RemiseController::class, 'charger'])->name('decharges.charger');
+        Route::get('appareils', [AppareilController::class, 'index'])->name('appareils.index');
         Route::get('cycles/{cycle}/a-verifier', [DeclarationController::class, 'aVerifier'])->name('declarations.a-verifier');
         Route::get('pieces/{empreinte}', [PieceController::class, 'show'])->where('empreinte', '[0-9a-f]{64}')->name('pieces.show');
         Route::get('cycles/{cycle}/reclamations', [ReclamationController::class, 'index'])->name('reclamations.index');
@@ -264,6 +266,9 @@ Route::middleware(['auth'])->group(function () {
             Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
             Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');
             Route::post('cycles/{cycle}/clotures-ecart', [ArbitrageController::class, 'cloturer'])->name('clotures-ecart.store');
+            Route::post('prefectures/{destinataire}/appareil', [AppareilController::class, 'designer'])->whereNumber('destinataire')->name('appareils.designer');
+            Route::post('appareils/{appareil}/revocation', [AppareilController::class, 'revoquer'])->whereNumber('appareil')->name('appareils.revoquer');
+            Route::post('remises/{remise}/arbitrage', [RemiseController::class, 'arbitrer'])->whereNumber('remise')->name('remises.arbitrage');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

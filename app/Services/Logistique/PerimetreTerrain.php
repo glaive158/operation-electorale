@@ -16,8 +16,9 @@ use Illuminate\Support\Collection;
  * n'est jamais visible sur le terrain ; un compte inactif n'a aucun périmètre.
  *
  * Un adjoint à qui une autorité a délégué un destinataire (délégation en vigueur maintenant) voit ce
- * destinataire et ses décharges et en reçoit les remises, sans en devenir le titulaire : préparer une
- * redistribution ou déclarer au départ d'une remise restent le fait de l'autorité elle-même.
+ * destinataire et ses décharges et en reçoit les remises, sans en devenir le titulaire. Pour une préfecture,
+ * l'adjoint habilité prépare aussi les redistributions et en signe le départ (estAutoriteDe) ; seules la
+ * désignation de l'appareil (le central) et la délégation elle-même restent à l'autorité ou au central.
  */
 class PerimetreTerrain
 {

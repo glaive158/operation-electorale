@@ -131,7 +131,7 @@ class DeclarationService
                 $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
 
                 $this->controlerEtape($actuelle);
-                ['anomalies' => $anomalies, 'delegation' => $delegation] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
+                ['anomalies' => $anomalies, 'delegation' => $delegation, 'delegation_depart' => $delegationDepart] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
                 $this->controlerStatut($actuelle, $mode);
 
                 $anomalies = array_merge($anomalies, $this->controlerLignes($actuelle, $lignes));
@@ -178,6 +178,7 @@ class DeclarationService
                     'remise_id' => $actuelle->id, 'decharge_id' => $decharge->id, 'mode' => $mode,
                     'statut' => $declaration->statut, 'anomalies' => $declaration->anomalies ?? [],
                     'signataire_user_id' => $declaration->signataire_user_id, 'delegation_id' => $declaration->delegation_id,
+                    'delegation_depart_id' => $delegationDepart?->id,
                     'verification_identite' => $declaration->verification_identite, 'bloc_empreinte' => $declaration->bloc_empreinte,
                     'cle' => $cle, 'empreinte' => $empreinte, 'signataire' => $signataire, 'lignes' => $lignes,
                     'pieces' => $pieces, 'gps' => $gps,
@@ -553,6 +554,11 @@ class DeclarationService
 
     private function controlerStatut(Remise $remise, string $mode): void
     {
+        // Une redistribution à arbitrer (envoyée par un appareil hors de sa réserve) n'existe pas encore pour le
+        // sous-préfet : rien ne se déclare avant la décision du responsable.
+        if ($remise->statut === 'a_arbitrer') {
+            throw new RegleLogistique("Cette remise attend l'arbitrage du responsable : aucune déclaration n'est possible.");
+        }
         if (! in_array($remise->statut, ['en_attente', 'a_verifier'], true) && ! $this->attendUneConfirmation($remise)) {
             throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
         }
@@ -566,10 +572,12 @@ class DeclarationService
     /**
      * Qui a le droit de déclarer, et avec quelles anomalies : le compte de l'autorité destinataire ; la tablette
      * de l'agent de la décharge (un ancien agent est accepté mais à vérifier) ou, sur une redistribution,
-     * celle de l'autorité qui redistribue. Au compte, le délégué en vigueur de l'autorité destinataire déclare
-     * aussi, et la délégation est rapportée ; le départ d'une redistribution reste celui de l'autorité elle-même.
+     * celle de l'autorité qui redistribue, ou de son adjoint habilité. Au compte, le délégué en vigueur de l'autorité
+     * destinataire déclare aussi, et la délégation est rapportée (`delegation`) ; de même pour le départ d'une
+     * redistribution, où la délégation de l'adjoint qui signe côté préfecture est rapportée à part
+     * (`delegation_depart`) : la délégation de la déclaration est celle du signataire à l'arrivée.
      *
-     * @return array{anomalies: list<string>, delegation: ?Delegation}
+     * @return array{anomalies: list<string>, delegation: ?Delegation, delegation_depart: ?Delegation}
      */
     private function controlerDroit(User $auteur, Remise $remise, Decharge $decharge, string $mode): array
     {
@@ -590,7 +598,7 @@ class DeclarationService
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
 
-            return ['anomalies' => [], 'delegation' => $delegation];
+            return ['anomalies' => [], 'delegation' => $delegation, 'delegation_depart' => null];
         }
 
         if ($remise->etape === 'livraison') {
@@ -598,20 +606,25 @@ class DeclarationService
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
             if ($decharge->agent_id !== null && (int) $decharge->agent_id === (int) $auteur->id) {
-                return ['anomalies' => [], 'delegation' => null];
+                return ['anomalies' => [], 'delegation' => null, 'delegation_depart' => null];
             }
             if ((int) $remise->de_id === (int) $auteur->id) {
-                return ['anomalies' => ['affectation_retiree'], 'delegation' => null];
+                return ['anomalies' => ['affectation_retiree'], 'delegation' => null, 'delegation_depart' => null];
             }
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
+        // Départ d'une redistribution : l'autorité de la préfecture, ou son adjoint habilité.
         $destinataire = $remise->de_type === 'destinataire' && $remise->de_id !== null ? Destinataire::find($remise->de_id) : null;
-        if ($destinataire === null || ! $this->perimetre->estTitulaireDe($auteur, $destinataire)) {
+        $maintenant = now();
+        if ($destinataire === null || ! $this->perimetre->estAutoriteDe($auteur, $destinataire, $maintenant)) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
-        return ['anomalies' => [], 'delegation' => null];
+        return [
+            'anomalies' => [], 'delegation' => null,
+            'delegation_depart' => $this->perimetre->estTitulaireDe($auteur, $destinataire) ? null : $this->delegations->activeA($destinataire, $auteur, $maintenant),
+        ];
     }
 
     /**

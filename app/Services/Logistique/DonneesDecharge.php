@@ -112,7 +112,7 @@ class DonneesDecharge
      */
     public static function reception(Decharge $decharge): array
     {
-        $remises = Remise::where('decharge_id', $decharge->id)->where('statut', '!=', 'annulee')->orderBy('id')->get();
+        $remises = Remise::where('decharge_id', $decharge->id)->whereNotIn('statut', ['annulee', 'a_arbitrer'])->orderBy('id')->get();
         $declarations = Declaration::whereIn('remise_id', $remises->pluck('id'))
             ->whereIn('statut', ['retenue', 'concordante'])->with('lignes.materiel')->orderBy('id')->get();
         $retenues = $declarations->where('statut', 'retenue')->keyBy('remise_id');

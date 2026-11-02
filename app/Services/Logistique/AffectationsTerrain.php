@@ -16,7 +16,8 @@ use Illuminate\Support\Collection;
 /**
  * Ce qu'un utilisateur de terrain doit faire constater ou constater, sous la forme que la tablette
  * télécharge : un élément par remise en attente (ou à vérifier) et, pour le préfet, un élément sans
- * remise par décharge dont il peut encore préparer une redistribution. Lecture seule, bornée au
+ * remise par décharge dont il peut encore préparer une redistribution (le préfet et son adjoint habilité ; ce qui est
+ * réservé à l'appareil désigné n'y figure plus). Lecture seule, bornée au
  * périmètre de l'utilisateur.
  */
 class AffectationsTerrain
@@ -45,7 +46,7 @@ class AffectationsTerrain
 
         $remises = $this->remisesAFaire($utilisateur, $decharges->clone()->select('decharges.id'))
             ->with('lignes')->orderBy('id')->get();
-        $preparations = $utilisateur->role === 'prefet' ? $this->preparations($utilisateur, $decharges) : collect();
+        $preparations = in_array($utilisateur->role, CodeReceptionService::ROLES_AUTORITE, true) ? $this->preparations($utilisateur, $decharges) : collect();
 
         return $this->elements($remises, $preparations);
     }
@@ -68,22 +69,32 @@ class AffectationsTerrain
                     $q->orWhere(fn ($d) => $d->where('etape', '!=', 'chargement')->where('a_type', 'destinataire')->whereIn('a_id', $delegues->all()));
                 }
             }),
-            'sous_prefet', 'chef_poste' => $requete->where('etape', '!=', 'chargement')
-                ->where('a_type', 'destinataire')->whereIn('a_id', $destinataires->all()),
+            // Un adjoint d'une préfecture (de tout rôle d'autorité) en signe aussi le départ des redistributions.
+            'sous_prefet', 'chef_poste' => $requete->where(function ($q) use ($destinataires, $utilisateur) {
+                $q->where(fn ($r) => $r->where('etape', '!=', 'chargement')->where('a_type', 'destinataire')->whereIn('a_id', $destinataires->all()));
+                $prefectures = $this->prefectures($utilisateur);
+                if ($prefectures !== []) {
+                    $q->orWhere(fn ($d) => $d->where('etape', 'redistribution')->where('de_type', 'destinataire')->whereIn('de_id', $prefectures));
+                }
+            }),
             default => $requete->whereRaw('1 = 0'),
         };
     }
 
-    /** @return list<int> les préfectures dont l'utilisateur est l'autorité (titulaire, jamais délégué) */
+    /** @return list<int> les préfectures dont l'utilisateur est l'autorité : titulaire, ou adjoint habilité par une délégation en vigueur */
     private function prefectures(User $utilisateur): array
     {
-        return Destinataire::where('type', 'prefecture')->where('autorite_user_id', $utilisateur->id)
-            ->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $propres = Destinataire::where('type', 'prefecture')->where('autorite_user_id', $utilisateur->id)->pluck('id');
+        $deleguees = $this->perimetre->portee($utilisateur)['delegues'];
+        $deleguees = $deleguees->isEmpty() ? $deleguees : Destinataire::where('type', 'prefecture')->whereIn('id', $deleguees->all())->pluck('id');
+
+        return $propres->merge($deleguees)->map(fn ($id) => (int) $id)->unique()->values()->all();
     }
 
     /**
-     * Décharges reçues par la préfecture du préfet, en circuit via le préfet, dont il reste du matériel
-     * en bon état à redistribuer : décharge => reliquat par article (identifiant d'article => quantité).
+     * Décharges reçues par la préfecture du préfet (ou de l'adjoint habilité), en circuit via le préfet, dont il reste
+     * du matériel en bon état à redistribuer : décharge => mobilisable par article (identifiant d'article =>
+     * quantité), hors ce qui est réservé à l'appareil désigné.
      *
      * @return Collection<int, array{decharge: Decharge, reliquats: array<int, int>}>
      */
@@ -112,7 +123,7 @@ class AffectationsTerrain
         return $candidates->filter(fn (Decharge $d) => in_array($d->cycle_id, $ouverts, true))
             ->map(function (Decharge $d) {
                 $reliquats = $this->remises->soldePrefet($d)
-                    ->map(fn (array $solde) => $solde['reliquat'])->filter(fn (int $reliquat) => $reliquat > 0)->all();
+                    ->map(fn (array $solde) => $solde['mobilisable'])->filter(fn (int $mobilisable) => $mobilisable > 0)->all();
 
                 return ['decharge' => $d, 'reliquats' => $reliquats];
             })->filter(fn (array $p) => $p['reliquats'] !== [])->values();

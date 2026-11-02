@@ -733,14 +733,14 @@ class AvisContestationTest extends TestCase
     public function test_une_retenue_contestee_utilisee_en_aval_reste_figee_au_rapprochement(): void
     {
         [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60, 'reserve_appareil' => 0, 'mobilisable' => 60], $this->solde($decharge));
 
         $b = $this->compte($livraison->load('lignes'), 100);
 
         $this->assertSame(['retenue', 'contestee'], [$a->refresh()->statut, $a->contestation]);
         $this->assertSame('a_verifier', $b->refresh()->statut);
         $this->assertSame('a_verifier', $livraison->refresh()->statut);
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60, 'reserve_appareil' => 0, 'mobilisable' => 60], $this->solde($decharge));
     }
 
     public function test_apres_la_levee_le_rapprochement_reprend_son_cours(): void
@@ -812,7 +812,7 @@ class AvisContestationTest extends TestCase
 
         $this->assertSame(['retenue', 'levee', 'ecartee'], [$a->refresh()->statut, $a->contestation, $b->refresh()->statut]);
         $this->assertSame('recue', $livraison->refresh()->statut);
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60, 'reserve_appareil' => 0, 'mobilisable' => 60], $this->solde($decharge));
         $this->assertSame(1, JournalEntree::where('objet_id', $a->id)->where('action', 'levee_contestation')->count());
         $this->assertSame(1, Arbitrage::where('declaration_id', $a->id)->where('decision', 'retenue')->count());
     }

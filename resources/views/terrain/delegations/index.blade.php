@@ -32,7 +32,7 @@
                 <h3 class="font-semibold text-slate-800">Déléguer ma signature</h3>
                 <p class="text-sm text-slate-600 mt-1">
                     Votre adjoint voit les décharges du destinataire et signe les réceptions avec son propre compte et son propre code.
-                    Il ne prépare pas de redistribution. La délégation ne peut pas commencer dans le passé et se révoque à tout moment.
+                    Pour une préfecture, il prépare aussi les redistributions au sous-préfet, en signe le départ et réserve pour l'appareil désigné. La délégation ne peut pas commencer dans le passé et se révoque à tout moment.
                 </p>
             </div>
             <form method="POST" action="{{ route('terrain.delegations.store') }}" class="grid grid-cols-1 sm:grid-cols-2 gap-4">

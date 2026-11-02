@@ -137,7 +137,7 @@ class AvisReceptionService
 
     /**
      * Une réception est utilisée en aval quand :
-     * - une redistribution non annulée est partie de la décharge (réception d'une livraison au préfet) ;
+     * - une redistribution (ni annulée ni à arbitrer) est partie de la décharge (réception d'une livraison au préfet) ;
      * - l'exemplaire de réception de la décharge a été émis ;
      * - la décharge est un remplacement dont la réception a déjà résolu la réclamation d'origine.
      * Ce qui a été remis plus loin ou clos ne se défait pas d'un geste : le responsable tranche. Seule
@@ -147,7 +147,7 @@ class AvisReceptionService
     {
         // Une redistribution ne se prépare que sur une livraison retenue : toute redistribution non annulée en dépend.
         if ($remise->etape === 'livraison' && Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
-            ->where('statut', '!=', 'annulee')->exists()) {
+            ->whereNotIn('statut', ['annulee', 'a_arbitrer'])->exists()) {
             return true;
         }
 

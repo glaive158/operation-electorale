@@ -81,10 +81,12 @@
     </div>
 
     @if($solde->isNotEmpty())
+        @php $avecReserve = $solde->contains(fn ($s) => $s['reserve_appareil'] > 0); @endphp
         <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-100">
                 <h3 class="font-semibold text-slate-800">Solde du préfet</h3>
-                <p class="text-xs text-slate-500">Ce que vous avez reçu en bon état, ce que vous avez déjà transféré au sous-préfet et ce qui vous reste.</p>
+                <p class="text-xs text-slate-500">Ce que vous avez reçu en bon état, ce que vous avez déjà transféré au sous-préfet et ce qui vous reste.
+                    @if($avecReserve) Une part est réservée à l'appareil désigné pour redistribuer hors connexion : elle n'est plus disponible en ligne. @endif</p>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm">
@@ -94,20 +96,22 @@
                             <th class="px-5 py-3 text-right font-semibold">Reçu utilisable</th>
                             <th class="px-5 py-3 text-right font-semibold">Transféré</th>
                             <th class="px-5 py-3 text-right font-semibold">Reliquat</th>
+                            @if($avecReserve) <th class="px-5 py-3 text-right font-semibold">Réservé à l'appareil</th> @endif
                             @if($peutRedistribuer) <th class="px-5 py-3 text-right font-semibold">À redistribuer</th> @endif
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-50">
                         @foreach($decharge->lignes as $l)
-                            @php $s = $solde->get($l->materiel_id, ['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0]); @endphp
+                            @php $s = $solde->get($l->materiel_id, ['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0, 'reserve_appareil' => 0, 'mobilisable' => 0]); @endphp
                             <tr>
                                 <td class="px-5 py-3 font-medium text-slate-800">{{ $l->materiel?->libelle }}</td>
                                 <td class="px-5 py-3 text-right text-slate-600">{{ $n($s['recu_utilisable']) }}</td>
                                 <td class="px-5 py-3 text-right text-slate-600">{{ $n($s['transfere']) }}</td>
                                 <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ $n($s['reliquat']) }}</td>
+                                @if($avecReserve) <td class="px-5 py-3 text-right text-slate-600">{{ $n($s['reserve_appareil']) }}</td> @endif
                                 @if($peutRedistribuer)
                                     <td class="px-5 py-3 text-right">
-                                        <input type="number" form="redistribution" name="lignes[{{ $l->materiel_id }}]" min="0" max="{{ max(0, $s['reliquat']) }}" step="1"
+                                        <input type="number" form="redistribution" name="lignes[{{ $l->materiel_id }}]" min="0" max="{{ max(0, $s['mobilisable']) }}" step="1"
                                                value="{{ old('lignes.'.$l->materiel_id) }}" placeholder="0"
                                                aria-label="Quantité à redistribuer : {{ $l->materiel?->libelle }}" class="w-28 text-right {{ $champ }}">
                                     </td>

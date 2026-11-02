@@ -78,13 +78,14 @@ class DechargeController extends Controller
             return $attend && ! $dejaFait;
         })->pluck('id')->all() : [];
 
-        // Le préfet d'une décharge qui passe par lui : solde, redistribution et annulation (pas son délégué).
+        // L'autorité de la préfecture d'une décharge qui passe par elle (le préfet ou son adjoint habilité) : solde,
+        // redistribution et annulation.
         $estPrefetDeLaDecharge = $ecriture && $decharge->circuit === 'via_prefet'
             && $decharge->remisA?->type === 'prefecture'
-            && $this->perimetre->estTitulaireDe($utilisateur, $decharge->remisA);
+            && $this->perimetre->estAutoriteDe($utilisateur, $decharge->remisA);
         $solde = $estPrefetDeLaDecharge && $decharge->estPartie() ? $this->remises->soldePrefet($decharge) : collect();
         $peutRedistribuer = $estPrefetDeLaDecharge && $ouvert && $decharge->statut_document === 'validee'
-            && $solde->contains(fn (array $s) => $s['reliquat'] > 0);
+            && $solde->contains(fn (array $s) => $s['mobilisable'] > 0);
         $annulables = $estPrefetDeLaDecharge && $ouvert
             ? $remises->filter(fn (Remise $r) => $r->etape === 'redistribution' && $r->statut === 'en_attente' && $r->declarations->isEmpty())->pluck('id')->all()
             : [];

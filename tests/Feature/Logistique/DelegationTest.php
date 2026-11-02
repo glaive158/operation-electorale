@@ -292,7 +292,7 @@ class DelegationTest extends TestCase
         $this->assertNull($declaration->delegation_id);
     }
 
-    public function test_delegue_de_la_prefecture_signe_la_livraison_via_le_prefet_sans_preparer_la_redistribution(): void
+    public function test_delegue_de_la_prefecture_signe_la_livraison_via_le_prefet_et_prepare_la_redistribution(): void
     {
         $prefet = $this->autoriteFictive($this->prefecture);
         $this->autoriteFictive($this->sousPrefecture1);
@@ -301,7 +301,7 @@ class DelegationTest extends TestCase
         $remise = $this->livraison($decharge);
         $this->assertSame($this->prefecture->id, (int) $remise->a_id);
 
-        $this->deleguer($prefet, $this->prefecture, $adjoint);
+        $delegation = $this->deleguer($prefet, $this->prefecture, $adjoint);
         $perimetre = app(PerimetreTerrain::class);
 
         // La décharge de la sous-préfecture, remise à la préfecture, est visible de l'adjoint.
@@ -311,28 +311,26 @@ class DelegationTest extends TestCase
         $this->declarer($adjoint, $remise);
         $this->assertSame('recue', $remise->refresh()->statut);
 
-        // Préparer la redistribution reste le fait du préfet.
+        // L'adjoint habilité prépare la redistribution comme le préfet (spec : « le préfet ou l'adjoint habilité »).
         $this->actingAs($adjoint);
-        try {
-            app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 40]);
-            $this->fail('Redistribution préparée par un délégué.');
-        } catch (RegleLogistique $e) {
-            $this->assertSame('Redistribution hors de votre périmètre.', $e->getMessage());
-        }
-        $this->actingAs($prefet);
         $redistribution = app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 40]);
         $this->assertSame('redistribution', $redistribution->etape);
+        $this->assertSame($adjoint->id, $redistribution->preparee_par);
 
-        // Il ne peut pas non plus déclarer, côté préfecture, la remise de la redistribution.
-        $this->actingAs($adjoint);
+        // Il signe aussi le départ, côté préfecture, de la remise de la redistribution ; la délégation est consignée.
+        $declaration = app(DeclarationService::class)->declarer(
+            $redistribution->load('lignes'), 'tablette', ['nom' => 'Adjoint', 'qualite' => 'Chef de poste'],
+            [$this->urnes->id => ['recu' => 40, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        );
+        $this->assertSame($delegation->id, JournalEntree::where('action', 'declaration_reception')->where('objet_id', $declaration->id)->sole()->apres['delegation_depart_id']);
+
+        // Un compte sans délégation reste hors périmètre.
+        $this->actingAs($this->adjoint('chef_poste'));
         try {
-            app(DeclarationService::class)->declarer(
-                $redistribution->load('lignes'), 'tablette', ['nom' => 'Adjoint', 'qualite' => 'Chef de poste'],
-                [$this->urnes->id => ['recu' => 40, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
-            );
-            $this->fail('Déclaration de départ acceptée pour un délégué.');
+            app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 10]);
+            $this->fail('Redistribution préparée par un compte sans délégation.');
         } catch (RegleLogistique $e) {
-            $this->assertSame('Déclaration hors de votre périmètre.', $e->getMessage());
+            $this->assertSame('Redistribution hors de votre périmètre.', $e->getMessage());
         }
         $this->actingAs($this->responsable);
     }

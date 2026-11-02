@@ -161,13 +161,13 @@ class ArbitrageDeclarationTest extends TestCase
         $solde = fn () => app(RemiseService::class)->soldePrefet($decharge)->get($this->urnes->id);
 
         // Tant que rien n'est retenu, aucune déclaration ne compte.
-        $this->assertSame(['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0], $solde());
+        $this->assertSame(['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0, 'reserve_appareil' => 0, 'mobilisable' => 0], $solde());
 
         app(ArbitrageService::class)->retenir($compte, 'Le compte du préfet fait foi.');
 
         // 90 reçus moins 10 défectueux : la tablette écartée (100) ne s'ajoute ni ne remplace.
         $this->assertSame('ecartee', $tablette->refresh()->statut);
-        $this->assertSame(['recu_utilisable' => 80, 'transfere' => 0, 'reliquat' => 80], $solde());
+        $this->assertSame(['recu_utilisable' => 80, 'transfere' => 0, 'reliquat' => 80, 'reserve_appareil' => 0, 'mobilisable' => 80], $solde());
     }
 
     public function test_gestionnaire_ne_peut_pas_arbitrer(): void

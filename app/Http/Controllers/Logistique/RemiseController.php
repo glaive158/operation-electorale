@@ -4,12 +4,14 @@ namespace App\Http\Controllers\Logistique;
 
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Remise;
 use App\Models\User;
+use App\Services\Logistique\ArbitrageService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\RemiseService;
 use Illuminate\Http\Request;
 
-/** Affectation de l'agent et chargement d'une décharge validée. */
+/** Affectation de l'agent, chargement d'une décharge validée et arbitrage des redistributions à arbitrer. */
 class RemiseController extends Controller
 {
     use ExecuteAction;
@@ -17,6 +19,7 @@ class RemiseController extends Controller
     public function __construct(
         private readonly DechargeService $decharges,
         private readonly RemiseService $remises,
+        private readonly ArbitrageService $arbitrage,
     ) {}
 
     public function affecter(Request $request, Decharge $decharge)
@@ -30,6 +33,21 @@ class RemiseController extends Controller
         return $this->executer(
             fn () => $this->decharges->affecterAgent($decharge, $agent, $donnees['motif']),
             $agent === null ? 'Affectation de l\'agent retirée.' : 'Agent affecté.',
+        );
+    }
+
+    public function arbitrer(Request $request, Remise $remise)
+    {
+        $donnees = $request->validate([
+            'decision' => 'required|in:valider,rejeter',
+            'motif' => 'required|string|max:500',
+        ]);
+
+        return $this->executer(
+            fn () => $this->arbitrage->arbitrerRemise($remise, $donnees['decision'], $donnees['motif']),
+            $donnees['decision'] === 'valider'
+                ? 'Redistribution validée : le sous-préfet peut déclarer sa réception.'
+                : 'Redistribution rejetée : rien n\'a été compté.',
         );
     }
 

@@ -84,7 +84,7 @@ class RedistributionTest extends TestCase
         $stock = app(StockService::class);
         $physique = $stock->physique($this->urnes);
         $mouvements = MouvementStock::count();
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100, 'reserve_appareil' => 0, 'mobilisable' => 100], $this->solde($decharge));
 
         $remise = $this->redistribuer($decharge, [$this->urnes->id => 80]);
 
@@ -94,7 +94,7 @@ class RedistributionTest extends TestCase
             [$remise->de_type, $remise->de_id, $remise->a_type, $remise->a_id]);
         $this->assertSame($this->autoriteFictive($this->prefecture)->id, $remise->preparee_par);
         $this->assertSame([[$this->urnes->id, 80]], $remise->lignes->map(fn ($l) => [$l->materiel_id, $l->quantite])->all());
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 80, 'reliquat' => 20], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 80, 'reliquat' => 20, 'reserve_appareil' => 0, 'mobilisable' => 20], $this->solde($decharge));
         $this->assertSame($physique, $stock->physique($this->urnes));
         $this->assertSame($mouvements, MouvementStock::count());
         $this->assertSame(1, JournalEntree::where('action', 'preparation_redistribution')->where('objet_id', $remise->id)->count());
@@ -119,7 +119,7 @@ class RedistributionTest extends TestCase
     {
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
 
-        $this->assertSame(['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0, 'reserve_appareil' => 0, 'mobilisable' => 0], $this->solde($decharge));
     }
 
     public function test_redistribution_120_sur_100_refusee(): void
@@ -140,14 +140,14 @@ class RedistributionTest extends TestCase
             'Redistribution supérieure au reçu utilisable du préfet pour Urnes : reçu utilisable 100, déjà transféré 80, demandé 30.');
 
         $this->redistribuer($decharge, [$this->urnes->id => 20]);
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 100, 'reliquat' => 0], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 100, 'reliquat' => 0, 'reserve_appareil' => 0, 'mobilisable' => 0], $this->solde($decharge));
         $this->assertSame(2, Remise::where('etape', 'redistribution')->count());
     }
 
     public function test_defectueux_non_redistribuables(): void
     {
         $decharge = $this->recueParLePrefet(10);
-        $this->assertSame(['recu_utilisable' => 90, 'transfere' => 0, 'reliquat' => 90], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 90, 'transfere' => 0, 'reliquat' => 90, 'reserve_appareil' => 0, 'mobilisable' => 90], $this->solde($decharge));
 
         $this->refus(fn () => $this->redistribuer($decharge, [$this->urnes->id => 91]),
             'Redistribution supérieure au reçu utilisable du préfet pour Urnes : reçu utilisable 90, déjà transféré 0, demandé 91.');
@@ -188,7 +188,7 @@ class RedistributionTest extends TestCase
         $this->assertSame('recue', $remise->refresh()->statut);
         $this->assertSame('recue_destinataire', $decharge->refresh()->statut_acheminement);
         // Le solde du préfet ne bouge pas à la réception : seul le transfert compte.
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 80, 'reliquat' => 20], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 80, 'reliquat' => 20, 'reserve_appareil' => 0, 'mobilisable' => 20], $this->solde($decharge));
     }
 
     public function test_autre_prefet_refuse(): void
@@ -235,7 +235,7 @@ class RedistributionTest extends TestCase
         $remise->refresh();
         $this->assertSame('annulee', $remise->statut);
         $this->assertSame('Erreur de saisie', $remise->motif_annulation);
-        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100], $this->solde($decharge));
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100, 'reserve_appareil' => 0, 'mobilisable' => 100], $this->solde($decharge));
         $entree = JournalEntree::where('action', 'annulation_redistribution')->where('objet_id', $remise->id)->sole();
         $this->assertSame('en_attente', $entree->avant['statut']);
         $this->assertSame('Erreur de saisie', $entree->motif);
