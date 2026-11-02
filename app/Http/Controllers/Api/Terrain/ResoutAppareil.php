@@ -35,15 +35,27 @@ trait ResoutAppareil
     }
 
     /**
-     * L'identité de l'appareil est-elle établie ? Le jeton de l'appelant doit avoir été créé pour cet appareil : l'en-tête
-     * seul ne prouve rien, n'importe quel terminal peut recopier l'identifiant de la tablette désignée.
+     * L'appareil désigné que l'appelant est en train d'utiliser : actif (sauf `$actifSeulement` faux : un appareil révoqué
+     * reste reconnu pour que sa synchronisation soit arbitrée), dont le jeton épinglé à la désignation est
+     * le jeton de la requête (et n'a pas expiré), et dont l'identifiant égale l'en-tête X-Appareil quand il est envoyé.
+     * L'en-tête seul ne prouve rien, ni l'UUID annoncé à la connexion : seul le jeton épinglé par le central fait foi.
      */
-    private function jetonLieA(Request $request, string $identifiant): bool
+    private function appareilReconnu(Request $request, ?string $identifiant, bool $actifSeulement = true): ?Appareil
     {
         $jeton = $request->user()?->currentAccessToken();
-        $lie = $jeton instanceof Model ? $jeton->getAttribute('appareil_identifiant') : null;
+        if (! $jeton instanceof Model || $jeton->getKey() === null) {
+            return null;
+        }
+        if ($jeton->getAttribute('expires_at') !== null && ! $jeton->getAttribute('expires_at')->isFuture()) {
+            return null;
+        }
 
-        return is_string($lie) && hash_equals(mb_strtolower($lie), $identifiant);
+        $appareil = Appareil::where('jeton_id', $jeton->getKey())->when($actifSeulement, fn ($q) => $q->where('actif', true))->first();
+        if ($appareil === null || ($identifiant !== null && ! hash_equals(mb_strtolower($appareil->identifiant), $identifiant))) {
+            return null;
+        }
+
+        return $appareil;
     }
 
     /**
@@ -63,14 +75,13 @@ trait ResoutAppareil
         }
     }
 
-    /** L'appareil désigné (actif) de la préfecture, identifié par l'en-tête et le jeton ; sinon 403. */
+    /** L'appareil désigné (actif) de la préfecture, annoncé par l'en-tête (obligatoire ici) et prouvé par le jeton ; sinon 403. */
     private function appareilDesigne(Request $request, Destinataire $prefecture): Appareil
     {
         $identifiant = $this->identifiantAppareil($request);
-        $appareil = $identifiant === null || ! $this->jetonLieA($request, $identifiant) ? null
-            : Appareil::where('identifiant', $identifiant)->where('actif', true)->where('destinataire_id', $prefecture->id)->first();
+        $appareil = $identifiant === null ? null : $this->appareilReconnu($request, $identifiant);
 
-        if ($appareil === null) {
+        if ($appareil === null || (int) $appareil->destinataire_id !== (int) $prefecture->id) {
             throw new HttpResponseException(response()->json(['message' => 'Appareil non désigné pour cette préfecture.'], 403));
         }
 

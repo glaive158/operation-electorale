@@ -29,7 +29,7 @@
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-100">
             <h3 class="font-semibold text-slate-800">Préfectures</h3>
-            <p class="text-xs text-slate-500">L'identifiant de l'appareil est celui qu'il affiche à la première connexion (un UUID). Désigner un nouvel appareil révoque le précédent et libère sa réserve.</p>
+            <p class="text-xs text-slate-500">L'identifiant de l'appareil est celui qu'il affiche à la première connexion (un UUID). La tablette doit d'abord s'être connectée avec un compte de la préfecture : sa connexion est alors épinglée à la désignation, et seule elle est reconnue comme l'appareil désigné. Désigner un nouvel appareil révoque le précédent et libère sa réserve ; redésigner l'appareil actif après une reconnexion épingle son nouveau jeton.</p>
         </div>
         <div class="overflow-x-auto">
             <table class="w-full text-sm">
@@ -52,6 +52,12 @@
                                 @if($actif)
                                     <p class="text-slate-800">{{ $actif->nom }}</p>
                                     <p class="text-xs text-slate-500 break-all">{{ $actif->identifiant }}</p>
+                                    @if($actif->estReconnaissable())
+                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Tablette reconnue</span>
+                                    @else
+                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">Tablette non reconnue</span>
+                                        <p class="text-xs text-amber-700">Le jeton de la tablette est supprimé ou expiré : reconnectez-la avec un compte de la préfecture, puis désignez-la de nouveau.</p>
+                                    @endif
                                     @if($peutAdministrer)
                                         <form method="POST" action="{{ route('logistique.appareils.revoquer', $actif) }}" class="flex flex-wrap gap-2 items-center mt-1"
                                               onsubmit="return confirm('Révoquer cet appareil ? Sa réserve sera libérée.');">

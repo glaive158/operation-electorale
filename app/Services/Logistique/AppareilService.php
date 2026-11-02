@@ -11,11 +11,13 @@ use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\ReserveAppareil;
+use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use Laravel\Sanctum\PersonalAccessToken;
 use LogicException;
 
 /**
@@ -25,6 +27,10 @@ use LogicException;
  * réserve (RemiseService::redistribuerSynchronisee), qui se consomme au fil des remises synchronisées. Le reste est
  * libéré à la demande, ou à la révocation de l'appareil.
  *
+ * L'identité de l'appareil se prouve par son jeton, épinglé à la désignation (jeton_id) : le central désigne une
+ * tablette qui s'est connectée avec son UUID et un compte de la préfecture ; annoncer le même UUID à la connexion
+ * ne suffit pas à être reconnu.
+ *
  * Ordre des verrous : cycle, décharge, remise, appareil, réserves. Désigner et révoquer ne prennent que la
  * préfecture, l'appareil et ses réserves (jamais une décharge).
  */
@@ -33,6 +39,8 @@ class AppareilService
     private const MAX_NOM = 100;
 
     private const MAX_QUANTITE = 10_000_000;
+
+    private const TABLETTE_NON_CONNECTEE = "Connectez d'abord la tablette avec un compte de la préfecture.";
 
     private const NON_DESIGNE = "Cet appareil n'est pas l'appareil désigné de la préfecture.";
 
@@ -72,7 +80,23 @@ class AppareilService
             if ($existant !== null && (int) $existant->destinataire_id !== (int) $destinataire->id) {
                 throw new RegleLogistique('Cet appareil est déjà enregistré pour une autre préfecture.');
             }
+
+            // Le jeton de la tablette, ouvert avec son UUID par un compte de la préfecture : il est épinglé à l'appareil.
+            $jeton = $this->jetonDeLaTablette($destinataire, $identifiant);
+            if ($jeton === null) {
+                throw new RegleLogistique(self::TABLETTE_NON_CONNECTEE);
+            }
+
             if ($existant?->actif) {
+                // Redésigner l'appareil actif reconnecte sa tablette : le nouveau jeton remplace l'ancien.
+                if ((int) $existant->jeton_id !== (int) $jeton->getKey()) {
+                    $avant = $existant->jeton_id;
+                    $existant->forceFill(['jeton_id' => $jeton->getKey(), 'nom' => $nom])->save();
+                    Journal::noter('appareil', $existant->id, 'epinglage_appareil', ['jeton_id' => $avant], [
+                        'jeton_id' => $jeton->getKey(), 'identifiant' => $identifiant,
+                    ]);
+                }
+
                 return $existant;
             }
 
@@ -82,14 +106,14 @@ class AppareilService
 
             if ($existant === null) {
                 $appareil = new Appareil(['destinataire_id' => $destinataire->id, 'identifiant' => $identifiant, 'nom' => $nom, 'designe_par' => auth()->id()]);
-                $appareil->save();
+                $appareil->forceFill(['jeton_id' => $jeton->getKey()])->save();
             } else {
                 $appareil = $existant;
-                $appareil->forceFill(['actif' => true, 'revoque_le' => null, 'nom' => $nom, 'designe_par' => auth()->id()])->save();
+                $appareil->forceFill(['actif' => true, 'revoque_le' => null, 'nom' => $nom, 'designe_par' => auth()->id(), 'jeton_id' => $jeton->getKey()])->save();
             }
 
             Journal::noter('appareil', $appareil->id, 'designation_appareil', null, [
-                'destinataire_id' => $destinataire->id, 'identifiant' => $identifiant, 'nom' => $nom,
+                'destinataire_id' => $destinataire->id, 'identifiant' => $identifiant, 'nom' => $nom, 'jeton_id' => $jeton->getKey(),
             ]);
 
             return $appareil;
@@ -257,10 +281,25 @@ class AppareilService
         }, attempts: 3);
     }
 
-    /** L'appareil actif qui porte cet identifiant, ou null. */
-    public function actif(string $identifiant): ?Appareil
+    /**
+     * Le jeton le plus récent, non expiré, ouvert avec cet UUID par un compte actif qui est l'autorité de la préfecture
+     * (le titulaire ou l'adjoint habilité), ou null : la tablette ne s'est pas encore connectée avec un tel compte.
+     */
+    private function jetonDeLaTablette(Destinataire $prefecture, string $identifiant): ?PersonalAccessToken
     {
-        return Appareil::where('identifiant', mb_strtolower($identifiant))->where('actif', true)->first();
+        $maintenant = now();
+        $jetons = PersonalAccessToken::where('appareil_identifiant', $identifiant)->where('tokenable_type', (new User)->getMorphClass())
+            ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', $maintenant))
+            ->orderByDesc('id')->get();
+
+        foreach ($jetons as $jeton) {
+            $compte = User::find($jeton->tokenable_id);
+            if ($compte !== null && $this->perimetre->estAutoriteDe($compte, $prefecture, $maintenant)) {
+                return $jeton;
+            }
+        }
+
+        return null;
     }
 
     /**

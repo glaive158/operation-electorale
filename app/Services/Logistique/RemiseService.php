@@ -245,7 +245,7 @@ class RemiseService
      *
      * - Sans identifiant d'appareil (envoi en ligne) : la règle de preparerRedistribution, sur le mobilisable.
      * - Avec l'identifiant de l'appareil désigné de la préfecture, dont l'identité est établie (`$identiteVerifiee` :
-     *   le jeton de l'appelant est lié à cet appareil) : la remise est créée dans la limite de sa réserve active,
+     *   la requête porte le jeton épinglé à cet appareil à sa désignation) : la remise est créée dans la limite de sa réserve active,
      *   qu'elle consomme. Tout dépassement, un appareil non désigné, révoqué ou d'une autre préfecture, ou un
      *   état de la décharge qui n'autorise plus la redistribution (cycle clos, réception à vérifier…) n'est pas
      *   perdu : la remise est conservée au statut « à arbitrer », sans aucun transfert compté.

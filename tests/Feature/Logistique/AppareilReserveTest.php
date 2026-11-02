@@ -70,9 +70,31 @@ class AppareilReserveTest extends TestCase
         }
     }
 
-    private function designer(?string $identifiant = null, string $nom = 'Tablette de la préfecture', ?Destinataire $prefecture = null): Appareil
+    /** @var array<string, PersonalAccessToken> jeton ouvert par la tablette, par identifiant (celui qui est épinglé à la désignation) */
+    private array $tablettes = [];
+
+    /** Jeton de terrain de $utilisateur, ouvert en annonçant (ou non) l'UUID d'un appareil. */
+    private function jeton(User $utilisateur, ?string $appareil = null): PersonalAccessToken
     {
-        return app(AppareilService::class)->designer($prefecture ?? $this->prefecture, $identifiant ?? (string) Str::uuid(), $nom);
+        $jeton = $utilisateur->createToken($appareil ?? 'Tablette', ['terrain'])->accessToken;
+        if ($appareil !== null) {
+            $jeton->forceFill(['appareil_identifiant' => mb_strtolower($appareil)])->save();
+        }
+
+        return $jeton;
+    }
+
+    /**
+     * Désigne l'appareil : la tablette s'est d'abord connectée avec son UUID et un compte de la préfecture
+     * (`$connecte`, l'autorité par défaut) ; ce jeton est épinglé à la désignation.
+     */
+    private function designer(?string $identifiant = null, string $nom = 'Tablette de la préfecture', ?Destinataire $prefecture = null, ?User $connecte = null): Appareil
+    {
+        $identifiant = mb_strtolower($identifiant ?? (string) Str::uuid());
+        $prefecture ??= $this->prefecture;
+        $this->tablettes[$identifiant] = $this->jeton($connecte ?? $this->autoriteFictive($prefecture), $identifiant);
+
+        return app(AppareilService::class)->designer($prefecture, $identifiant, $nom);
     }
 
     private function reserver(Appareil $appareil, Decharge $decharge, ?array $quantites = null, ?User $par = null)
@@ -119,32 +141,43 @@ class AppareilReserveTest extends TestCase
         ];
     }
 
-    /** Authentifie $utilisateur par un jeton de terrain, lié à l'appareil $lie (identité prouvée) ou non. */
-    private function terrain(User $utilisateur, ?string $lie): void
+    /** Authentifie $utilisateur par ce jeton de terrain (un jeton ordinaire, sans appareil, à défaut). */
+    private function terrain(User $utilisateur, ?PersonalAccessToken $jeton = null): void
     {
-        $jeton = new PersonalAccessToken(['name' => 'test', 'abilities' => ['terrain']]);
-        $jeton->forceFill(['appareil_identifiant' => $lie === null ? null : mb_strtolower($lie)]);
-        $utilisateur->withAccessToken($jeton);
+        $utilisateur->withAccessToken($jeton ?? $this->jeton($utilisateur));
         $this->app['auth']->guard('sanctum')->setUser($utilisateur);
         $this->app['auth']->shouldUse('sanctum');
     }
 
     /**
-     * Envoie une redistribution. Par défaut le jeton est celui de l'appareil annoncé par l'en-tête ; `$jeton` le
-     * remplace (null : jeton sans appareil).
+     * Le jeton d'une requête : par défaut, celui que la tablette de l'appareil annoncé a épinglé s'il appartient à
+     * l'utilisateur ; sinon un jeton ouvert avec le même UUID (une autorité qui recopie l'identifiant). `null` : un jeton
+     * ordinaire ; un jeton : celui-là.
      */
-    private function sync(Decharge $decharge, array $corps, ?string $appareil, ?User $par = null, string|false|null $jeton = false)
+    private function jetonDeRequete(User $utilisateur, ?string $appareil, PersonalAccessToken|string|null $jeton): ?PersonalAccessToken
     {
-        $this->terrain($par ?? $this->prefet, $jeton === false ? $appareil : $jeton);
+        if ($jeton instanceof PersonalAccessToken || ($jeton === null)) {
+            return $jeton;
+        }
+        $epingle = $appareil === null ? null : ($this->tablettes[mb_strtolower($appareil)] ?? null);
+
+        return $epingle !== null && (int) $epingle->tokenable_id === $utilisateur->id ? $epingle : $this->jeton($utilisateur, $appareil);
+    }
+
+    private function sync(Decharge $decharge, array $corps, ?string $appareil, ?User $par = null, PersonalAccessToken|string|null $jeton = 'auto')
+    {
+        $par ??= $this->prefet;
+        $this->terrain($par, $this->jetonDeRequete($par, $appareil, $jeton));
         $this->withoutHeader('X-Appareil');
 
         return $this->withHeaders($appareil === null ? [] : ['X-Appareil' => $appareil])
             ->postJson("/api/terrain/decharges/{$decharge->id}/redistributions", $corps);
     }
 
-    private function api(string $methode, Decharge $decharge, string $chemin, ?string $appareil, array $corps = [], ?User $par = null, string|false|null $jeton = false)
+    private function api(string $methode, Decharge $decharge, string $chemin, ?string $appareil, array $corps = [], ?User $par = null, PersonalAccessToken|string|null $jeton = 'auto')
     {
-        $this->terrain($par ?? $this->prefet, $jeton === false ? $appareil : $jeton);
+        $par ??= $this->prefet;
+        $this->terrain($par, $this->jetonDeRequete($par, $appareil, $jeton));
         $this->withoutHeader('X-Appareil');
 
         return $this->withHeaders($appareil === null ? [] : ['X-Appareil' => $appareil])
@@ -604,8 +637,8 @@ class AppareilReserveTest extends TestCase
     public function test_delegue_reserve_pour_l_appareil_par_l_api(): void
     {
         $decharge = $this->recueParLePrefet();
-        $appareil = $this->designer();
         $adjoint = $this->adjoint('sous_prefet');
+        $appareil = $this->designer(null, 'Tablette', null, $adjoint);
 
         $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $adjoint)->assertOk()
             ->assertJsonPath('reserve.appareil', $appareil->identifiant)
@@ -688,21 +721,24 @@ class AppareilReserveTest extends TestCase
 
     public function test_api_etat_de_l_appareil(): void
     {
-        $appareil = $this->designer(null, 'Tablette du préfet');
-        $ancien = $this->designer();
+        $revoque = $this->designer(null, 'Tablette du préfet');
+        $actif = $this->designer();
 
-        $this->terrain($this->prefet, $ancien->identifiant);
-        $this->withHeaders(['X-Appareil' => $ancien->identifiant])->getJson('/api/terrain/appareil')->assertOk()
+        $this->terrain($this->prefet, $this->tablettes[$actif->identifiant]);
+        $this->withoutHeader('X-Appareil')->getJson('/api/terrain/appareil')->assertOk()
             ->assertJsonPath('designe', true)
-            ->assertJsonPath('appareil.identifiant', $ancien->identifiant)
+            ->assertJsonPath('appareil.identifiant', $actif->identifiant)
             ->assertJsonPath('appareil.prefecture.id', $this->prefecture->id);
-        $this->withHeaders(['X-Appareil' => $appareil->identifiant])->getJson('/api/terrain/appareil')->assertOk()
+        $this->withHeaders(['X-Appareil' => $actif->identifiant])->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', true);
+        // L'en-tête, s'il est envoyé, doit être celui de l'appareil du jeton.
+        $this->withHeaders(['X-Appareil' => $revoque->identifiant])->getJson('/api/terrain/appareil')->assertOk()
             ->assertJsonPath('designe', false)->assertJsonPath('appareil', null);
-        $this->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
 
-        // Sans jeton lié à l'appareil, l'en-tête seul ne prouve rien.
+        // Un jeton ordinaire, même ouvert avec l'UUID de la tablette, n'est pas l'appareil.
+        $this->terrain($this->prefet, $this->jeton($this->prefet, $actif->identifiant));
+        $this->withHeaders(['X-Appareil' => $actif->identifiant])->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
         $this->terrain($this->prefet, null);
-        $this->withHeaders(['X-Appareil' => $ancien->identifiant])->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
+        $this->withoutHeader('X-Appareil')->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
     }
 
     public function test_affectations_de_preparation_excluent_la_reserve(): void
@@ -791,6 +827,10 @@ class AppareilReserveTest extends TestCase
         $this->post(route('logistique.remises.arbitrage', $remise), ['decision' => 'valider', 'motif' => 'Ok'])->assertForbidden();
 
         $this->actingAs($this->responsable);
+        // La tablette doit d'abord s'être connectée avec un compte de la préfecture.
+        $this->post(route('logistique.appareils.designer', $this->prefecture), ['identifiant' => $identifiant, 'nom' => 'Tablette'])
+            ->assertSessionHas('error', "Connectez d'abord la tablette avec un compte de la préfecture.");
+        $this->jeton($this->prefet, $identifiant);
         $this->post(route('logistique.appareils.designer', $this->prefecture), ['identifiant' => $identifiant, 'nom' => 'Tablette'])
             ->assertRedirect()->assertSessionHas('success');
         $appareil = Appareil::where('identifiant', $identifiant)->sole();
@@ -808,31 +848,108 @@ class AppareilReserveTest extends TestCase
     public function test_un_jeton_d_une_autre_autorite_ne_fait_pas_de_l_en_tete_l_appareil_designe(): void
     {
         $decharge = $this->recueParLePrefet();
-        $appareil = $this->designer();
         $adjoint = $this->adjoint('sous_prefet');
-        $this->reserver($appareil, $decharge, [$this->urnes->id => 60]);
+        $appareil = $this->designer(null, 'Tablette', null, $adjoint);
+        $this->reserver($appareil, $decharge, [$this->urnes->id => 60], $this->prefet);
+        $epingle = $this->tablettes[$appareil->identifiant];
+        $this->assertSame($epingle->getKey(), $appareil->fresh()->jeton_id);
 
-        // L'adjoint recopie l'identifiant de la tablette désignée avec son propre jeton, non lié à elle.
-        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, null)->assertForbidden();
-        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, (string) Str::uuid())->assertForbidden();
-        $this->api('DELETE', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, null)->assertForbidden();
-        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, (string) Str::uuid())->assertForbidden();
+        // Le préfet, ou un autre jeton ouvert avec l'UUID de la tablette (connexion qui recopie l'identifiant), ne sont pas l'appareil.
+        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet)->assertForbidden();
+        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, null)->assertForbidden();
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, null)->assertForbidden();
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, $this->jeton($adjoint, $appareil->identifiant))->assertForbidden();
+        $this->api('DELETE', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet)->assertForbidden();
         $this->assertSame(60, $this->solde($decharge)['reserve_appareil']);
 
         // Même chose à la synchronisation : l'identité n'étant pas établie, la remise est à arbitrer, sans toucher la réserve.
-        foreach ([null, (string) Str::uuid()] as $jeton) {
-            $reponse = $this->sync($decharge, $this->corps([$this->urnes->id => 10]), $appareil->identifiant, $adjoint, $jeton)->assertCreated();
+        foreach ([$this->prefet, $adjoint] as $compte) {
+            $reponse = $this->sync($decharge, $this->corps([$this->urnes->id => 10]), $appareil->identifiant, $compte, $this->jeton($compte, $appareil->identifiant))->assertCreated();
             $this->assertSame('a_arbitrer', $reponse->json('redistribution.statut'));
             $this->assertSame('Appareil non désigné pour cette préfecture.', $reponse->json('redistribution.raison'));
             $this->assertNull(Remise::findOrFail($reponse->json('redistribution.id'))->appareil_id);
         }
         $this->assertSame(['transfere' => 0, 'reserve_appareil' => 60], array_intersect_key($this->solde($decharge), ['transfere' => 0, 'reserve_appareil' => 0]));
 
-        // Le jeton de l'appareil désigné (identifiant en majuscules dans l'en-tête compris) fonctionne, y compris pour un adjoint.
-        $this->api('GET', $decharge, 'reserve', strtoupper($appareil->identifiant), [], $adjoint, $appareil->identifiant)->assertOk()
+        // Le jeton épinglé (en-tête en majuscules compris) est l'appareil, ici ouvert par un adjoint.
+        $this->api('GET', $decharge, 'reserve', strtoupper($appareil->identifiant), [], $adjoint, $epingle)->assertOk()
             ->assertJsonPath('reserve.lignes.0.quantite', 60);
-        $this->sync($decharge, $this->corps([$this->urnes->id => 10]), strtoupper($appareil->identifiant), $adjoint, $appareil->identifiant)
+        $this->sync($decharge, $this->corps([$this->urnes->id => 10]), strtoupper($appareil->identifiant), $adjoint, $epingle)
             ->assertCreated()->assertJsonPath('redistribution.statut', 'en_attente');
+        // L'en-tête, s'il est envoyé, doit être celui de l'appareil du jeton.
+        $this->api('GET', $decharge, 'reserve', (string) Str::uuid(), [], $adjoint, $epingle)->assertForbidden();
+    }
+
+    public function test_connexion_avec_l_uuid_de_la_tablette_apres_la_designation_ne_la_remplace_pas(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $appareil = $this->designer();
+        $this->reserver($appareil, $decharge, [$this->urnes->id => 60]);
+
+        // Une vraie connexion, avec l'UUID de la tablette : le jeton est lié à l'UUID mais n'est pas épinglé.
+        $this->postJson('/api/terrain/jetons', ['email' => $this->prefet->email, 'password' => 'password', 'appareil' => $appareil->identifiant])->assertCreated();
+        $nouveau = $this->prefet->tokens()->latest('id')->firstOrFail();
+        $this->assertSame($appareil->identifiant, $nouveau->appareil_identifiant);
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, $nouveau)->assertForbidden();
+        $this->sync($decharge, $this->corps([$this->urnes->id => 10]), $appareil->identifiant, $this->prefet, $nouveau)
+            ->assertCreated()->assertJsonPath('redistribution.statut', 'a_arbitrer');
+
+        // Il reste à redésigner : le nouveau jeton est alors épinglé (l'ancien ne l'est plus).
+        $this->en($this->responsable, fn () => app(AppareilService::class)->designer($this->prefecture, $appareil->identifiant, 'Tablette'));
+        $this->assertSame($nouveau->getKey(), $appareil->fresh()->jeton_id);
+        $this->assertSame(1, JournalEntree::where('action', 'epinglage_appareil')->where('objet_id', $appareil->id)->count());
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, $nouveau)->assertOk();
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, $this->tablettes[$appareil->identifiant])->assertForbidden();
+    }
+
+    public function test_jeton_epingle_supprime_ou_expire_l_appareil_n_est_plus_reconnu(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $appareil = $this->designer();
+        $epingle = $this->tablettes[$appareil->identifiant];
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant)->assertOk();
+
+        $epingle->forceFill(['expires_at' => now()->subMinute()])->save();
+        $this->assertFalse($appareil->fresh()->estReconnaissable());
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], null, $epingle->fresh())->assertForbidden();
+        $this->actingAs($this->responsable)->get(route('logistique.appareils.index'))->assertSee('Tablette non reconnue');
+
+        $epingle->forceFill(['expires_at' => null])->save();
+        $this->actingAs($this->responsable)->get(route('logistique.appareils.index'))->assertSee('Tablette reconnue')->assertDontSee('Tablette non reconnue');
+
+        $epingle->delete();
+        $this->assertNull($appareil->fresh()->jeton_id);
+        $this->assertTrue($appareil->fresh()->actif);
+        $this->actingAs($this->responsable)->get(route('logistique.appareils.index'))->assertSee('Tablette non reconnue');
+        $this->sync($decharge, $this->corps([$this->urnes->id => 10]), $appareil->identifiant, $this->prefet, $this->jeton($this->prefet, $appareil->identifiant))
+            ->assertCreated()->assertJsonPath('redistribution.statut', 'a_arbitrer');
+    }
+
+    public function test_designation_exige_une_tablette_connectee_avec_un_compte_de_la_prefecture(): void
+    {
+        $identifiant = (string) Str::uuid();
+        $refus = "Connectez d'abord la tablette avec un compte de la préfecture.";
+
+        // Aucune connexion avec cet UUID.
+        $this->refus(fn () => app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette'), $refus);
+
+        // Connexion d'un compte qui n'est pas l'autorité de la préfecture, ou d'une autorité d'une autre préfecture.
+        $this->jeton($this->autoriteFictive($this->sousPrefecture1), $identifiant);
+        $this->jeton(User::factory()->create(['role' => 'chef_poste']), $identifiant);
+        $this->jeton(User::factory()->create(['role' => 'prefet']), $identifiant);
+        $this->refus(fn () => app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette'), $refus);
+
+        // Jeton expiré de l'autorité : ignoré.
+        $this->jeton($this->prefet, $identifiant)->forceFill(['expires_at' => now()->subDay()])->save();
+        $this->refus(fn () => app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette'), $refus);
+        $this->assertSame(0, Appareil::count());
+
+        // Le plus récent jeton valide d'un compte actif de la préfecture est épinglé (ici, celui d'un adjoint habilité).
+        $adjoint = $this->adjoint('chef_poste');
+        $this->jeton($this->prefet, $identifiant);
+        $recent = $this->jeton($adjoint, $identifiant);
+        $appareil = app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette');
+        $this->assertSame($recent->getKey(), $appareil->jeton_id);
     }
 
     public function test_jeton_cree_pour_un_appareil_porte_son_identifiant(): void

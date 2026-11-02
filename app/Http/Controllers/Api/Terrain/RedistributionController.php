@@ -42,7 +42,7 @@ class RedistributionController extends Controller
 
         [$remise, $creee] = $this->remises->redistribuerSynchronisee(
             $decharge, $quantites, $donnees['cle'], Carbon::createFromFormat('Y-m-d\TH:i:sP', $donnees['horodatage_terminal']), $identifiant,
-            $identifiant === null || $this->jetonLieA($request, $identifiant),
+            $identifiant === null || $this->appareilReconnu($request, $identifiant, false) !== null,
         );
 
         return response()->json(['redistribution' => $this->representation($remise)], $creee ? 201 : 200);

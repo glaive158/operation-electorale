@@ -30,7 +30,7 @@ class AppareilController extends Controller
 
         return view('logistique.appareils.index', [
             'prefectures' => Destinataire::where('type', 'prefecture')->orderBy('libelle')->get(),
-            'appareils' => Appareil::orderByDesc('id')->get()->groupBy('destinataire_id'),
+            'appareils' => Appareil::with('jeton')->orderByDesc('id')->get()->groupBy('destinataire_id'),
             'remises' => $remises,
             'parties' => $this->libelles->pour($remises),
         ]);
