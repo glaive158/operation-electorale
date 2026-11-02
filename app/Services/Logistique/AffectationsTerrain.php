@@ -225,8 +225,10 @@ class AffectationsTerrain
             return [];
         }
 
+        // Déclarations actives (ni écartées ni remplacées) : statut pour la retenue et l'arbitrage, mode pour savoir si
+        // une déclaration de tablette existe déjà (tablette réinstallée, seconde tablette).
         $declarations = RestitutionDeclaration::whereIn('restitution_id', $restitutions->pluck('id'))
-            ->whereIn('statut', ['retenue', 'a_verifier'])->get(['restitution_id', 'statut'])->groupBy('restitution_id');
+            ->whereNotIn('statut', ['ecartee', 'remplacee'])->get(['restitution_id', 'statut', 'mode'])->groupBy('restitution_id');
         $materiels = Materiel::whereIn('id', $restitutions->flatMap->lignes->pluck('materiel_id')->unique()->all())->pluck('libelle', 'id');
         $agents = User::whereIn('id', $restitutions->where('detenteur_type', 'agent')->pluck('detenteur_id')->unique()->all())->get()->keyBy('id');
         $destinataireIds = $restitutions->where('detenteur_type', 'destinataire')->pluck('detenteur_id')->unique()->all();
@@ -234,7 +236,9 @@ class AffectationsTerrain
         $autorites = $this->autorites($destinataireIds);
 
         return $restitutions->map(function (Restitution $r) use ($utilisateur, $agent, $declarations, $materiels, $agents, $libelles, $autorites) {
-            $statuts = $declarations->get($r->id, collect())->pluck('statut');
+            $actives = $declarations->get($r->id, collect());
+            $statuts = $actives->pluck('statut');
+            $dejaTablette = $actives->contains('mode', 'tablette');
             $retenue = $statuts->contains('retenue');
             $estDestinataire = $r->detenteur_type === 'destinataire';
             $detenteurAgent = $estDestinataire ? null : $agents->get($r->detenteur_id);
@@ -255,7 +259,7 @@ class AffectationsTerrain
                 ])->values()->all(),
                 'declaration_retenue' => $retenue,
                 'arbitrage_en_attente' => $statuts->contains('a_verifier'),
-                'peut_declarer_tablette' => $agent && $designe && $estDestinataire && $r->statut === 'a_preparer',
+                'peut_declarer_tablette' => $agent && $designe && $estDestinataire && $r->statut === 'a_preparer' && ! $dejaTablette,
                 'peut_prendre_en_charge' => $agent && $preneur && $retenue && $r->statut === 'a_preparer',
             ]);
         })->values()->all();

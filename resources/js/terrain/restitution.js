@@ -20,6 +20,10 @@ import { creerSignature } from './signature.js';
 import { duCompte } from './vue.js';
 
 export const MESSAGE_LECTURE_SEULE = 'À déclarer depuis le compte du détenteur';
+export const MESSAGE_ARBITRAGE = 'Arbitrage du responsable en attente';
+
+/** Plafond d'une quantité, celui de l'API (lignes.*.restitue). */
+export const QUANTITE_MAX = 10_000_000;
 
 export const LIBELLES_RESTITUTION = Object.freeze({
     a_preparer: 'À préparer',
@@ -67,7 +71,9 @@ export function etatRestitution(element, file, utilisateurId = null) {
         prise,
         peutDeclarer: aPreparer && element.peut_declarer_tablette === true && declaration === null,
         lectureSeule: aPreparer && element.peut_declarer_tablette !== true && declaration === null && element.declaration_retenue !== true,
-        peutPrendreEnCharge: aPreparer && priseEnCharge === null
+        arbitrage: element.arbitrage_en_attente === true,
+        // Une déclaration attend l'arbitrage du responsable : le serveur refuserait la prise en charge.
+        peutPrendreEnCharge: aPreparer && priseEnCharge === null && element.arbitrage_en_attente !== true
             && (element.peut_prendre_en_charge === true || (element.peut_declarer_tablette === true && retenueIci)),
     };
 }
@@ -184,6 +190,7 @@ export async function ecranRestitutions(ctx) {
             h('ul', { class: 'text-sm text-slate-700 list-disc pl-5' }, (element.lignes ?? []).map((l) => h('li', {}, `${l.libelle} : ${l.attendu} à rendre`))),
             ...details(etat).map((t) => h('p', { class: 'text-sm text-slate-600' }, t)),
             etat.lectureSeule ? h('p', { class: 'text-sm text-slate-600' }, MESSAGE_LECTURE_SEULE) : null,
+            etat.arbitrage && etat.prise === false ? h('p', { role: 'status', class: 'text-sm text-amber-700' }, `${MESSAGE_ARBITRAGE} : la prise en charge attend sa décision.`) : null,
             zone,
             actions.length ? h('div', { class: 'flex flex-wrap gap-2 justify-end' }, actions) : null);
     };
@@ -268,8 +275,14 @@ export async function ecranRestitution(ctx, id) {
         const continuer = () => {
             champs.forEach((c, i) => { saisies[i].restitue = c.restitue.value; saisies[i].observation = c.observation.value; });
             for (let i = 0; i < champs.length; i += 1) {
-                if (lireEntier(champs[i].restitue) === null) {
+                const quantite = lireEntier(champs[i].restitue);
+                if (quantite === null) {
                     remplacer(erreur, alerte(`Quantité invalide pour « ${saisies[i].libelle} » : entier positif ou nul.`));
+
+                    return;
+                }
+                if (quantite > QUANTITE_MAX) {
+                    remplacer(erreur, alerte(`Quantité trop grande pour « ${saisies[i].libelle} » : 10 000 000 au plus.`));
 
                     return;
                 }

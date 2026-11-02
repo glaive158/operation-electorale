@@ -238,6 +238,37 @@ test('restitution : liste, declaration a faire puis refus du serveur affiche ave
     assert.equal(ctx.cycles.length, 1);
 });
 
+test('restitution : quantite au-dela du plafond de l\'API refusee avant la signature', async () => {
+    const ctx = await contexte();
+    const racine = await ecranRestitution(ctx, '41');
+
+    saisir(parAria(racine, 'Rendu : Urnes'), '10000001');
+    await parTexte(racine, 'button', 'Continuer').click();
+    assert.match(texte(racine), /Quantité trop grande pour « Urnes » : 10 000 000 au plus\./);
+    assert.equal(parId(racine, 'restitution-code'), null, 'reste à l\'étape des quantités');
+
+    saisir(parAria(racine, 'Rendu : Urnes'), '10000000');
+    await parTexte(racine, 'button', 'Continuer').click();
+    assert.ok(parId(racine, 'restitution-code'), 'le plafond lui-même est accepté');
+    assert.equal((await ctx.file.lister()).length, 0);
+});
+
+test('prise en charge : masquee pendant un arbitrage du responsable, avec un avis', async () => {
+    const ctx = await contexte({ restitutions: [elementRestitution({ declaration_retenue: true, arbitrage_en_attente: true, peut_prendre_en_charge: true })] });
+
+    assert.equal(etatRestitution(elementRestitution({ arbitrage_en_attente: true, peut_prendre_en_charge: true }), [], 3).peutPrendreEnCharge, false);
+    const liste = await ecranRestitutions(ctx);
+    assert.match(texte(liste), /Arbitrage du responsable en attente/);
+    assert.equal(parTexte(liste, 'button', 'Prise en charge'), null);
+    assert.equal(ctx.appelsApi.length, 0);
+
+    // Sans arbitrage en attente, l'avis disparaît et la prise en charge revient.
+    await ctx.stockage.meta.ecrire('restitutions', [elementRestitution({ declaration_retenue: true, peut_prendre_en_charge: true })]);
+    const apres = await ecranRestitutions(ctx);
+    assert.doesNotMatch(texte(apres), /Arbitrage du responsable en attente/);
+    assert.ok(parTexte(apres, 'button', 'Prise en charge'));
+});
+
 test('prise en charge : en ligne, appel direct puis retour pris en charge', async () => {
     const ctx = await contexte({ restitutions: [elementRestitution({ declaration_retenue: true, peut_prendre_en_charge: true })] });
     ctx.reponsesApi.push({ status: 200, corps: { restitution: { id: 41, statut: 'en_retour', agent_id: 3 } } });

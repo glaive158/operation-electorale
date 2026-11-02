@@ -4,13 +4,16 @@ namespace Tests\Feature\Logistique;
 
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\JournalEntree;
+use App\Models\Logistique\PieceJointe;
 use App\Models\Logistique\Restitution;
 use App\Models\Logistique\RestitutionDeclaration;
+use App\Models\Logistique\RestitutionDeclarationPiece;
 use App\Models\Logistique\RestitutionDocument;
 use App\Models\Logistique\RestitutionLigne;
 use App\Models\User;
 use App\Services\Logistique\CodeReceptionService;
 use App\Services\Logistique\DeclarationService;
+use App\Services\Logistique\PieceJointeService;
 use App\Services\Logistique\PreuveService;
 use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\RestitutionService;
@@ -583,5 +586,96 @@ class EcransRestitutionTest extends TestCase
             $this->assertSame($vecteur['empreinte'], Canonique::empreinte($contenu), "Empreinte du vecteur {$i}");
             $this->assertSame(hash('sha256', $vecteur['json']), $vecteur['empreinte'], "Cohérence du vecteur {$i}");
         }
+    }
+
+    public function test_tablette_ne_redeclare_pas_une_restitution_deja_declaree_sur_tablette(): void
+    {
+        $restitution = $this->ouverte();
+        app(RestitutionService::class)->affecterAgent($restitution, $this->agentRetour);
+        [$avant] = $this->restitutionsApi($this->agentRetour);
+        $this->assertTrue($avant['peut_declarer_tablette']);
+
+        $this->terrain($this->agentRetour)->postJson('/api/terrain/restitutions/'.$restitution->id.'/declarations', $this->corpsTablette($restitution, 100, 'cle-tablette-restitution-02'))
+            ->assertCreated();
+
+        // Tablette réinstallée ou seconde tablette : la déclaration de tablette existe déjà côté serveur.
+        [$apres] = $this->restitutionsApi($this->agentRetour);
+        $this->assertFalse($apres['peut_declarer_tablette']);
+        $this->assertTrue($apres['declaration_retenue']);
+        $this->assertTrue($apres['peut_prendre_en_charge']);
+
+        // Écartée par l'arbitrage, elle ne compte plus : la tablette peut de nouveau déclarer.
+        RestitutionDeclaration::where('restitution_id', $restitution->id)->update(['statut' => 'ecartee']);
+        [$ecartee] = $this->restitutionsApi($this->agentRetour);
+        $this->assertTrue($ecartee['peut_declarer_tablette']);
+    }
+
+    public function test_agent_detenteur_declare_depuis_son_compte_et_prend_en_charge_par_l_api(): void
+    {
+        // Un agent charge 100 urnes, la préfecture n'en reçoit que 90 : 10 attendues de l'agent lui-même.
+        $detenteur = User::factory()->create(['role' => 'agent_transport', 'name' => 'Ndiaye', 'prenom' => 'Ousmane']);
+        $this->approuverPlanFictif([[$this->sousPrefecture1, $this->urnes, 200]]);
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100], $detenteur);
+        $this->deposerRecue($decharge, [$this->urnes->id => 90]);
+        $this->actingAs($this->responsable);
+        app(RestitutionService::class)->ouvrir($this->cycle);
+        $restitution = Restitution::where('detenteur_type', 'agent')->where('detenteur_id', $detenteur->id)->sole();
+        $this->assertNull($restitution->agent_id);
+
+        $element = collect($this->restitutionsApi($detenteur))->firstWhere('id', $restitution->id);
+        $this->assertSame(['type' => 'agent', 'id' => $detenteur->id, 'nom' => 'Ousmane Ndiaye'], $element['detenteur']);
+        $this->assertFalse($element['peut_declarer_tablette'], 'un agent détenteur déclare depuis son compte');
+        $this->assertFalse($element['peut_prendre_en_charge'], 'rien de retenu');
+
+        // Déclaration depuis son compte sur le web.
+        $this->actingAs($detenteur)->get(route('terrain.restitutions.index'))->assertOk()
+            ->assertSee(route('terrain.restitutions.declarer', $restitution), false);
+        $this->post(route('terrain.restitutions.declarer', $restitution), [
+            'cle' => (string) Str::ulid(), 'signataire_nom' => 'Ousmane Ndiaye', 'signataire_qualite' => 'Agent de transport',
+            'lignes' => [$this->urnes->id => ['restitue' => 10, 'observation' => '']],
+        ])->assertRedirect(route('terrain.restitutions.index'))->assertSessionHas('success', 'Restitution déclarée.');
+        $this->assertSame('retenue', RestitutionDeclaration::where('restitution_id', $restitution->id)->sole()->statut);
+
+        $element = collect($this->restitutionsApi($detenteur))->firstWhere('id', $restitution->id);
+        $this->assertFalse($element['peut_declarer_tablette']);
+        $this->assertTrue($element['peut_prendre_en_charge'], 'sans agent désigné, le détenteur prend son retour en charge');
+
+        // Prise en charge par l'API, par le détenteur lui-même ; un rejeu renvoie le même résultat.
+        $url = '/api/terrain/restitutions/'.$restitution->id.'/prise-en-charge';
+        $this->terrain($detenteur)->postJson($url)->assertOk()
+            ->assertJsonPath('restitution.statut', 'en_retour')->assertJsonPath('restitution.agent_id', $detenteur->id);
+        $this->terrain($detenteur)->postJson($url)->assertOk()->assertJsonPath('restitution.statut', 'en_retour');
+        $this->assertSame($detenteur->id, $restitution->refresh()->agent_id);
+    }
+
+    public function test_jeton_d_une_autorite_sur_l_api_de_restitution_introuvable(): void
+    {
+        $restitution = $this->declaree();
+        $url = '/api/terrain/restitutions/'.$restitution->id;
+
+        // Le sous-préfet détenteur, avec un jeton de terrain : ni déclaration de tablette ni prise en charge.
+        $this->terrain($this->sousPrefet)->postJson($url.'/declarations', $this->corpsTablette($restitution, 100, 'cle-tablette-restitution-03'))->assertNotFound();
+        $this->terrain($this->sousPrefet)->postJson($url.'/prise-en-charge')->assertNotFound();
+        $this->assertSame('a_preparer', $restitution->refresh()->statut);
+        $this->assertSame(1, RestitutionDeclaration::where('restitution_id', $restitution->id)->count());
+    }
+
+    public function test_page_terrain_ne_montre_que_les_pieces_visibles(): void
+    {
+        $restitution = $this->declaree();
+        $declaration = RestitutionDeclaration::where('restitution_id', $restitution->id)->sole();
+        $visible = str_repeat('a', 64);
+        $cachee = str_repeat('b', 64);
+        foreach ([$visible => 'signature', $cachee => 'photo'] as $empreinte => $role) {
+            $piece = PieceJointe::create(['empreinte' => $empreinte, 'chemin' => 'pieces/'.$empreinte.'.png', 'taille' => 10, 'type_mime' => 'image/png', 'user_id' => $this->sousPrefet->id]);
+            RestitutionDeclarationPiece::create(['restitution_declaration_id' => $declaration->id, 'empreinte' => $empreinte, 'role' => $role, 'piece_jointe_id' => $piece->id]);
+        }
+        // Le service de visibilité refuse la seconde pièce à ce compte.
+        $this->partialMock(PieceJointeService::class, fn ($mock) => $mock->shouldReceive('visiblePar')
+            ->andReturnUsing(fn (User $u, string $empreinte) => $empreinte === $cachee ? null : PieceJointe::where('empreinte', $empreinte)->first()));
+
+        $this->actingAs($this->sousPrefet)->get(route('terrain.restitutions.index'))->assertOk()
+            ->assertSee(route('terrain.pieces.show', $visible), false)
+            ->assertDontSee(route('terrain.pieces.show', $cachee), false);
     }
 }
