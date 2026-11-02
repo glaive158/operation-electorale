@@ -28,7 +28,6 @@ class DechargeController extends Controller
         'sous_prefet' => 'Sous-préfet',
         'chef_poste' => 'Chef de poste',
         'agent_transport' => 'Agent de transport',
-        'gouverneur' => 'Gouverneur',
     ];
 
     public function __construct(
@@ -50,8 +49,8 @@ class DechargeController extends Controller
     public function show(Request $request, Decharge $decharge)
     {
         $utilisateur = $request->user();
-        // Hors périmètre ou brouillon : 404, pour ne rien révéler.
-        abort_unless($this->perimetre->peutVoir($utilisateur, $decharge), 404);
+        // Profil sans espace de décharges (gouverneur, commission…), hors périmètre ou brouillon : 404, pour ne rien révéler.
+        abort_unless(Gate::allows('logistique-terrain') && $this->perimetre->peutVoir($utilisateur, $decharge), 404);
 
         $decharge->load([
             'cycle', 'destinataire', 'remisA', 'agent',

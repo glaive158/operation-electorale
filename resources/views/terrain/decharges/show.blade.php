@@ -20,7 +20,7 @@
 <div class="space-y-5">
     @include('logistique._erreurs')
 
-    <p><a href="{{ route('terrain.decharges.index') }}" class="text-sm text-slate-500 underline">← {{ auth()->user()->role === 'gouverneur' ? 'Décharges de la région' : 'Mes décharges' }}</a></p>
+    <p><a href="{{ route('terrain.decharges.index') }}" class="text-sm text-slate-500 underline">← Mes décharges</a></p>
 
     @if($annulee)
         <div class="p-5 rounded-xl border-2 border-red-300 bg-red-50 text-red-800">

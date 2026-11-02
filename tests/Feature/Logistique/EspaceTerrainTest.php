@@ -383,17 +383,11 @@ class EspaceTerrainTest extends TestCase
             ->assertSee('Préfecture de Thiès')->assertSee('Sous-préfecture de Sindia')
             ->assertDontSee('Préfecture de Kaolack')
             ->assertDontSee('Clôturer avec écart');
-        $this->get(route('terrain.decharges.index'))->assertOk()->assertSee($thies->numero);
-        $reponse = $this->get(route('terrain.decharges.show', $thies))->assertOk()->assertSee($thies->numero);
-        // Aucun formulaire d'écriture.
-        foreach ([
-            route('terrain.reclamations.store', $thies), route('terrain.redistributions.store', $thies),
-            route('terrain.declarations.store', Remise::where('decharge_id', $thies->id)->where('etape', 'livraison')->sole()),
-        ] as $action) {
-            $reponse->assertDontSee($action, false);
-        }
-        $reponse->assertDontSee('name="cle"', false);
+        // Indicateurs seulement (§14) : ni la liste, ni la page d'une décharge, même de sa région.
+        $this->get(route('terrain.decharges.index'))->assertForbidden();
+        $this->get(route('terrain.decharges.show', $thies))->assertNotFound();
         $this->get(route('terrain.decharges.show', $kaolack))->assertNotFound();
+        $this->get(route('logistique.decharges.qr', $thies->identifiant))->assertForbidden();
 
         // Toute écriture du terrain lui est interdite.
         $this->post(route('terrain.reclamations.store', $thies), [
@@ -441,7 +435,7 @@ class EspaceTerrainTest extends TestCase
         foreach (['logistique_gestionnaire', 'logistique_responsable', 'admin', 'commission'] as $role) {
             $this->actingAs($this->utilisateur($role));
             $this->get(route('terrain.decharges.index'))->assertForbidden();
-            $this->get(route('terrain.decharges.show', $decharge))->assertForbidden();
+            $this->get(route('terrain.decharges.show', $decharge))->assertNotFound();
             $this->get(route('terrain.suivi'))->assertForbidden();
             $this->post(route('terrain.declarations.store', $remise), ['cle' => (string) Str::ulid()])->assertForbidden();
             $this->post(route('terrain.redistributions.store', $decharge), [])->assertForbidden();
@@ -474,13 +468,17 @@ class EspaceTerrainTest extends TestCase
         foreach ($routes as $nom => $route) {
             $middleware = $route->gatherMiddleware();
             $this->assertContains('auth', $middleware, $nom);
-            $attendu = in_array('GET', $route->methods(), true) ? 'can:logistique-terrain-lecture' : 'can:logistique-terrain';
-            $this->assertContains($attendu, $middleware, $nom);
-            if (! in_array('GET', $route->methods(), true)) {
-                $this->assertNotContains('can:logistique-terrain-lecture', $middleware, "{$nom} : écriture ouverte en lecture.");
+            // Le suivi ouvre aussi au gouverneur ; la page d'une décharge se refuse dans le contrôleur (404).
+            $attendu = match ($nom) {
+                'terrain.suivi' => 'can:logistique-suivi-terrain',
+                'terrain.decharges.show' => null,
+                default => 'can:logistique-terrain',
+            };
+            if ($attendu !== null) {
+                $this->assertContains($attendu, $middleware, $nom);
             }
+            $this->assertNotContains('can:logistique-suivi-terrain', array_diff($middleware, $nom === 'terrain.suivi' ? ['can:logistique-suivi-terrain'] : []), "{$nom} : ouvert au gouverneur.");
         }
-        $this->assertContains('role:prefet,sous_prefet,chef_poste,gouverneur', $routes['terrain.suivi']->gatherMiddleware());
     }
 
     public function test_qr_dans_le_perimetre_redirige_vers_le_terrain(): void
@@ -491,9 +489,6 @@ class EspaceTerrainTest extends TestCase
             ->get(route('logistique.decharges.qr', $decharge->identifiant))
             ->assertRedirect(route('terrain.decharges.show', $decharge));
         $this->actingAs($this->autoriteFictive($this->sousPrefecture1))
-            ->get(route('logistique.decharges.qr', $decharge->identifiant))
-            ->assertRedirect(route('terrain.decharges.show', $decharge));
-        $this->actingAs($this->gouverneur())
             ->get(route('logistique.decharges.qr', $decharge->identifiant))
             ->assertRedirect(route('terrain.decharges.show', $decharge));
         $this->actingAs($decharge->agent)
@@ -547,7 +542,8 @@ class EspaceTerrainTest extends TestCase
             ->assertOk()->assertSee('Mes décharges')->assertSee(route('terrain.suivi'), false)
             ->assertDontSee('Suivi de la région')->assertDontSee(route('logistique.stock.index'), false);
         $this->actingAs($this->gouverneur())->get(route('terrain.suivi'))
-            ->assertOk()->assertSee('Suivi de la région')->assertDontSee('Mes décharges');
+            ->assertOk()->assertSee('Suivi de la région')->assertDontSee('Mes décharges')->assertDontSee('Décharges de la région')
+            ->assertDontSee(route('terrain.decharges.index'), false);
         $this->actingAs($this->utilisateur('agent_transport'))->get(route('terrain.decharges.index'))
             ->assertOk()->assertSee('Mes décharges')->assertDontSee(route('terrain.suivi'), false)
             ->assertDontSee(route('operations.index'), false);

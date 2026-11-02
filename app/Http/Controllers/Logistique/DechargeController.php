@@ -36,8 +36,7 @@ class DechargeController extends Controller
         private readonly LectureRecensement $recensement,
         private readonly LibellesRemises $libelles,
         private readonly PerimetreTerrain $perimetre,
-    ) {
-    }
+    ) {}
 
     public function index(Request $request, Cycle $cycle)
     {
@@ -106,7 +105,7 @@ class DechargeController extends Controller
 
     /**
      * Cible du QR code imprimé sur le document : retrouve la décharge par son identifiant stable, puis oriente
-     * selon le profil. Le personnel logistique va à la fiche centrale ; une autorité, un agent ou le gouverneur
+     * selon le profil. Le personnel logistique va à la fiche centrale ; une autorité ou un agent
      * dont la décharge est dans le périmètre va à la page du terrain ; tout autre profil est refusé.
      */
     public function qr(string $identifiant)
@@ -116,7 +115,7 @@ class DechargeController extends Controller
         if (Gate::allows('logistique-gerer')) {
             return redirect()->route('logistique.decharges.show', $decharge);
         }
-        if (Gate::allows('logistique-terrain-lecture') && $this->perimetre->peutVoir(auth()->user(), $decharge)) {
+        if (Gate::allows('logistique-terrain') && $this->perimetre->peutVoir(auth()->user(), $decharge)) {
             return redirect()->route('terrain.decharges.show', $decharge);
         }
 

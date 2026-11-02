@@ -132,12 +132,12 @@ Route::middleware(['auth'])->group(function () {
 
     /* ── Espace terrain : autorités, agents de transport et gouverneur, dans leur périmètre ── */
     Route::prefix('terrain')->name('terrain.')->group(function () {
-        Route::middleware('can:logistique-terrain-lecture')->group(function () {
-            Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
-            Route::get('decharges/{decharge}', [TerrainDechargeController::class, 'show'])->name('decharges.show');
-            Route::get('suivi', [TerrainIndicateurController::class, 'index'])->middleware('role:prefet,sous_prefet,chef_poste,gouverneur')->name('suivi');
-        });
+        // Le gouverneur ne voit que les indicateurs de sa région (§14) : pas de décharges.
+        Route::get('suivi', [TerrainIndicateurController::class, 'index'])->middleware('can:logistique-suivi-terrain')->name('suivi');
+        // La page d'une décharge répond 404 hors périmètre ou à un profil sans accès, pour ne rien révéler.
+        Route::get('decharges/{decharge}', [TerrainDechargeController::class, 'show'])->name('decharges.show');
         Route::middleware('can:logistique-terrain')->group(function () {
+            Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
             Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
             Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
             Route::post('remises/{remise}/annulation', [TerrainRedistributionController::class, 'annuler'])->name('redistributions.annuler');

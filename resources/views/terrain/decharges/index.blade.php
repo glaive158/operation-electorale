@@ -1,6 +1,6 @@
 @extends('layouts.app')
-@section('title', auth()->user()->role === 'gouverneur' ? 'Décharges de la région' : 'Mes décharges')
-@section('page-title', auth()->user()->role === 'gouverneur' ? 'Décharges de la région' : 'Mes décharges')
+@section('title', 'Mes décharges')
+@section('page-title', 'Mes décharges')
 
 @php
     use App\Models\Logistique\Decharge;

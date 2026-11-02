@@ -24,7 +24,7 @@ class AppServiceProvider extends ServiceProvider
         Gate::define('logistique-gerer', fn (User $user) => $user->hasRole(['admin', 'logistique_gestionnaire', 'logistique_responsable']));
         Gate::define('logistique-administrer', fn (User $user) => $user->hasRole(['admin', 'logistique_responsable']));
         Gate::define('logistique-terrain', fn (User $user) => $user->actif && $user->hasRole(['prefet', 'sous_prefet', 'chef_poste', 'agent_transport']));
-        // Lecture seule : les rôles de terrain et le gouverneur, qui consulte sa région sans rien écrire.
-        Gate::define('logistique-terrain-lecture', fn (User $user) => $user->actif && $user->hasRole(['prefet', 'sous_prefet', 'chef_poste', 'agent_transport', 'gouverneur']));
+        // Suivi (indicateurs) : les autorités de terrain et le gouverneur, qui ne voit que les indicateurs de sa région.
+        Gate::define('logistique-suivi-terrain', fn (User $user) => $user->actif && $user->hasRole(['prefet', 'sous_prefet', 'chef_poste', 'gouverneur']));
     }
 }
