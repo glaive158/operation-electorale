@@ -4,6 +4,7 @@ namespace App\Services\Logistique;
 
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
@@ -53,27 +54,31 @@ class AffectationsTerrain
     private function remisesAFaire(User $utilisateur, Builder $deLaPortee)
     {
         $requete = Remise::query()->whereIn('decharge_id', $deLaPortee)->whereIn('statut', self::A_FAIRE);
-        $destinataires = $this->perimetre->destinataireIds($utilisateur)->all();
+        ['ids' => $destinataires, 'delegues' => $delegues] = $this->perimetre->portee($utilisateur);
 
         return match ($utilisateur->role) {
             'agent_transport' => $requete->where('etape', 'livraison'),
-            'prefet' => $requete->where(function ($q) use ($utilisateur) {
+            // Le préfet constate ses livraisons et le départ de ses redistributions ; ce qui est adressé à un
+            // destinataire qui lui est délégué se constate comme pour un sous-préfet (ce qu'on lui remet).
+            'prefet' => $requete->where(function ($q) use ($utilisateur, $delegues) {
                 $prefectures = $this->prefectures($utilisateur);
                 $q->where(fn ($l) => $l->where('etape', 'livraison')->where('a_type', 'destinataire')->whereIn('a_id', $prefectures))
                     ->orWhere(fn ($r) => $r->where('etape', 'redistribution')->where('de_type', 'destinataire')->whereIn('de_id', $prefectures));
+                if ($delegues->isNotEmpty()) {
+                    $q->orWhere(fn ($d) => $d->where('etape', '!=', 'chargement')->where('a_type', 'destinataire')->whereIn('a_id', $delegues->all()));
+                }
             }),
             'sous_prefet', 'chef_poste' => $requete->where('etape', '!=', 'chargement')
-                ->where('a_type', 'destinataire')->whereIn('a_id', $destinataires),
+                ->where('a_type', 'destinataire')->whereIn('a_id', $destinataires->all()),
             default => $requete->whereRaw('1 = 0'),
         };
     }
 
-    /** @return list<int> les préfectures dont l'utilisateur est l'autorité */
+    /** @return list<int> les préfectures dont l'utilisateur est l'autorité (titulaire, jamais délégué) */
     private function prefectures(User $utilisateur): array
     {
-        return Destinataire::where('type', 'prefecture')
-            ->whereIn('id', $this->perimetre->destinataireIds($utilisateur)->all())
-            ->where('autorite_user_id', $utilisateur->id)->pluck('id')->map(fn ($id) => (int) $id)->all();
+        return Destinataire::where('type', 'prefecture')->where('autorite_user_id', $utilisateur->id)
+            ->pluck('id')->map(fn ($id) => (int) $id)->all();
     }
 
     /**
@@ -174,7 +179,7 @@ class AffectationsTerrain
 
     /**
      * Qui doit signer pour chaque destinataire : le compte rattaché s'il y en a un, sinon le signataire
-     * enregistré sans compte. Les délégués arrivent avec les délégations.
+     * enregistré sans compte, et les délégués en vigueur maintenant (chargés en un lot pour tous les destinataires).
      *
      * @param  list<int>  $destinataireIds
      * @return Collection<int, array<string, mixed>> par identifiant de destinataire
@@ -183,17 +188,44 @@ class AffectationsTerrain
     {
         $destinataires = Destinataire::whereIn('id', $destinataireIds)->get();
         $comptes = User::whereIn('id', $destinataires->pluck('autorite_user_id')->filter()->all())->get()->keyBy('id');
+        $delegues = $this->delegues($destinataires->pluck('id')->all());
 
-        return $destinataires->mapWithKeys(function (Destinataire $destinataire) use ($comptes) {
+        return $destinataires->mapWithKeys(function (Destinataire $destinataire) use ($comptes, $delegues) {
             $compte = $destinataire->autorite_user_id === null ? null : $comptes->get($destinataire->autorite_user_id);
 
             return [$destinataire->id => [
                 'user_id' => $compte?->id,
                 'nom' => (string) ($destinataire->signataire_nom ?: $compte?->nom_complet),
                 'qualite' => (string) $destinataire->signataire_qualite,
-                'delegues' => [],
+                'delegues' => $delegues->get($destinataire->id, []),
             ]];
         });
+    }
+
+    /**
+     * Les délégués en vigueur maintenant, par identifiant de destinataire : un seul lot, comptes inclus, comme
+     * le périmètre (compte actif d'un rôle d'autorité), triés par compte.
+     *
+     * @param  list<int>  $destinataireIds
+     * @return Collection<int, list<array{user_id: int, nom: string, qualite: string}>>
+     */
+    private function delegues(array $destinataireIds): Collection
+    {
+        if ($destinataireIds === []) {
+            return collect();
+        }
+
+        return Delegation::query()->activesA(now())->whereIn('delegations.destinataire_id', $destinataireIds)
+            ->join('users', 'users.id', '=', 'delegations.delegue_user_id')
+            ->where('users.actif', true)->whereIn('users.role', CodeReceptionService::ROLES_AUTORITE)
+            ->orderBy('users.id')->orderBy('delegations.id')
+            ->get(['delegations.destinataire_id', 'users.id as user_id', 'users.name', 'users.prenom', 'users.role'])
+            ->groupBy('destinataire_id')
+            ->map(fn (Collection $lignes) => $lignes->unique('user_id')->map(fn ($l) => [
+                'user_id' => (int) $l->user_id,
+                'nom' => trim($l->prenom.' '.$l->name),
+                'qualite' => Delegation::QUALITES[$l->role] ?? '',
+            ])->values()->all());
     }
 
     /** @return array<string, mixed> */

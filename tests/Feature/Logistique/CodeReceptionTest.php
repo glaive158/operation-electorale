@@ -365,6 +365,26 @@ class CodeReceptionTest extends TestCase
         $this->assertSame(0, NotificationOp::where('user_id', $inactif->id)->count());
     }
 
+    public function test_changement_de_role_reserve_au_responsable(): void
+    {
+        $chef = $this->autorite('chef_poste', ['doit_choisir_code' => false, 'code_reception_hash' => Hash::make(self::CODE)]);
+
+        foreach (['gestionnaire' => 'logistique_gestionnaire', 'prefet' => 'prefet', 'commission' => 'commission'] as $role) {
+            $this->actingAs(User::factory()->create(['role' => $role]));
+            try {
+                $this->service()->apresChangementDeRole($chef);
+                $this->fail('Changement accepté pour '.$role);
+            } catch (RegleLogistique $e) {
+                $this->assertSame('Seul le responsable logistique peut changer le rôle d\'un compte et annuler son code de réception.', $e->getMessage());
+            }
+        }
+        $this->assertNotNull($chef->fresh()->code_reception_hash);
+
+        $this->actingAs(User::factory()->create(['role' => 'logistique_responsable']));
+        $this->service()->apresChangementDeRole($chef);
+        $this->assertNull($chef->fresh()->code_reception_hash);
+    }
+
     public function test_doit_choisir_code_pose_par_les_ecrans_d_utilisateurs(): void
     {
         $this->actingAs(User::factory()->create(['role' => 'admin']));

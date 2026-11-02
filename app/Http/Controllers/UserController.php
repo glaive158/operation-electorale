@@ -127,7 +127,7 @@ class UserController extends Controller
             if ($user->role !== $ancienRole) {
                 app(CodeReceptionService::class)->apresChangementDeRole($user);
             }
-        });
+        }, attempts: 3);
         return redirect()->route('users.index')->with('success', 'Utilisateur mis à jour.');
     }
 

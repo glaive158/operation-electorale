@@ -53,6 +53,8 @@ class Declaration extends Model
             'remise_id' => 'integer',
             'user_id' => 'integer',
             'decharge_id' => 'integer',
+            'signataire_user_id' => 'integer',
+            'delegation_id' => 'integer',
             'horodatage_terminal' => 'datetime',
             'anomalies' => 'array',
         ];
@@ -76,6 +78,18 @@ class Declaration extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /** Le compte qui a signé : l'autorité destinataire ou son délégué. */
+    public function signataireUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'signataire_user_id');
+    }
+
+    /** La délégation au titre de laquelle un délégué a signé (null pour l'autorité elle-même). */
+    public function delegation(): BelongsTo
+    {
+        return $this->belongsTo(Delegation::class);
     }
 
     /** Vrai tant que la déclaration compte dans le rapprochement (ni écartée ni remplacée). */

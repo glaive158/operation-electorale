@@ -149,6 +149,9 @@ class CodeReceptionService
     public function apresChangementDeRole(User $u): void
     {
         $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul le responsable logistique peut changer le rôle d\'un compte et annuler son code de réception.');
+        }
 
         DB::transaction(function () use ($u) {
             $actuel = $this->verrouillerCompte($u);

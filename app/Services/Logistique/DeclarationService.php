@@ -8,6 +8,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\DeclarationLigne;
+use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
@@ -33,7 +34,10 @@ class DeclarationService
 
     private const MAX_QUANTITE = 10_000_000;
 
-    public function __construct(private readonly PerimetreTerrain $perimetre) {}
+    public function __construct(
+        private readonly PerimetreTerrain $perimetre,
+        private readonly DelegationService $delegations,
+    ) {}
 
     /**
      * Enregistre une déclaration de réception sur une remise de livraison ou de redistribution.
@@ -94,7 +98,7 @@ class DeclarationService
             if (! in_array($actuelle->etape, ['livraison', 'redistribution'], true)) {
                 throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
             }
-            $anomalies = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
+            ['anomalies' => $anomalies, 'delegation' => $delegation] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
 
             if (! in_array($actuelle->statut, ['en_attente', 'a_verifier'], true) && ! $this->attendUneConfirmation($actuelle)) {
                 throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
@@ -120,6 +124,9 @@ class DeclarationService
             $declaration->forceFill([
                 'statut' => $anomalies === [] ? 'valide' : 'a_verifier',
                 'anomalies' => $anomalies === [] ? null : $anomalies,
+                // Au compte, le signataire est celui qui est connecté : l'autorité, ou son délégué (et la délégation).
+                'signataire_user_id' => $mode === 'compte' ? $auteur->id : null,
+                'delegation_id' => $delegation?->id,
             ])->save();
             foreach ($lignes as $ligne) {
                 DeclarationLigne::create(['declaration_id' => $declaration->id] + $ligne);
@@ -131,6 +138,7 @@ class DeclarationService
             Journal::noter('declaration', $declaration->id, 'declaration_reception', null, [
                 'remise_id' => $actuelle->id, 'decharge_id' => $decharge->id, 'mode' => $mode,
                 'statut' => $declaration->statut, 'anomalies' => $declaration->anomalies ?? [],
+                'signataire_user_id' => $declaration->signataire_user_id, 'delegation_id' => $declaration->delegation_id,
                 'cle' => $cle, 'empreinte' => $empreinte, 'signataire' => $signataire, 'lignes' => $lignes,
                 'horodatage_terminal' => $horodatageTerminal?->toIso8601String(),
             ]);
@@ -196,9 +204,10 @@ class DeclarationService
     /**
      * Qui a le droit de déclarer, et avec quelles anomalies : le compte de l'autorité destinataire ; la tablette
      * de l'agent de la décharge (un ancien agent est accepté mais à vérifier) ou, sur une redistribution,
-     * celle de l'autorité qui redistribue.
+     * celle de l'autorité qui redistribue. Au compte, le délégué en vigueur de l'autorité destinataire déclare
+     * aussi, et la délégation est rapportée ; le départ d'une redistribution reste celui de l'autorité elle-même.
      *
-     * @return list<string>
+     * @return array{anomalies: list<string>, delegation: ?Delegation}
      */
     private function controlerDroit(User $auteur, Remise $remise, Decharge $decharge, string $mode): array
     {
@@ -212,7 +221,9 @@ class DeclarationService
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
 
-            return [];
+            $delegation = $this->perimetre->estTitulaireDe($auteur, $destinataire) ? null : $this->delegations->activeA($destinataire, $auteur, now());
+
+            return ['anomalies' => [], 'delegation' => $delegation];
         }
 
         if ($remise->etape === 'livraison') {
@@ -220,20 +231,20 @@ class DeclarationService
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
             if ($decharge->agent_id !== null && (int) $decharge->agent_id === (int) $auteur->id) {
-                return [];
+                return ['anomalies' => [], 'delegation' => null];
             }
             if ((int) $remise->de_id === (int) $auteur->id) {
-                return ['affectation_retiree'];
+                return ['anomalies' => ['affectation_retiree'], 'delegation' => null];
             }
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
         $destinataire = $remise->de_type === 'destinataire' && $remise->de_id !== null ? Destinataire::find($remise->de_id) : null;
-        if ($destinataire === null || ! $this->perimetre->estAutoriteDe($auteur, $destinataire)) {
+        if ($destinataire === null || ! $this->perimetre->estTitulaireDe($auteur, $destinataire)) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
-        return [];
+        return ['anomalies' => [], 'delegation' => null];
     }
 
     /**

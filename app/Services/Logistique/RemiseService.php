@@ -328,7 +328,8 @@ class RemiseService
 
     /**
      * La préfecture qui redistribue une décharge : celle à qui elle est remise, dont l'auteur est l'autorité,
-     * pour une sous-préfecture en circuit via le préfet. Sinon la redistribution est hors périmètre.
+     * pour une sous-préfecture en circuit via le préfet. Sinon la redistribution est hors périmètre. Seul le
+     * titulaire redistribue : un délégué reçoit pour la préfecture mais ne prépare pas la redistribution.
      */
     private function prefectureQuiRedistribue(Decharge $decharge, User $auteur): Destinataire
     {
@@ -341,7 +342,7 @@ class RemiseService
             || $prefecture->type !== 'prefecture'
             || $destinataire->type !== 'sous_prefecture'
             || (int) $destinataire->prefecture_id !== (int) $prefecture->id
-            || ! $this->perimetre->estAutoriteDe($auteur, $prefecture)) {
+            || ! $this->perimetre->estTitulaireDe($auteur, $prefecture)) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 

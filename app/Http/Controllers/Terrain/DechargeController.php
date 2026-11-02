@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Terrain;
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
 use App\Models\User;
@@ -23,10 +24,7 @@ class DechargeController extends Controller
     private const PAR_PAGE = 50;
 
     /** Qualité proposée au signataire d'une déclaration, d'après le rôle. */
-    public const QUALITES = [
-        'prefet' => 'Préfet',
-        'sous_prefet' => 'Sous-préfet',
-        'chef_poste' => 'Chef de poste',
+    public const QUALITES = Delegation::QUALITES + [
         'agent_transport' => 'Agent de transport',
     ];
 
@@ -80,10 +78,10 @@ class DechargeController extends Controller
             return $attend && ! $dejaFait;
         })->pluck('id')->all() : [];
 
-        // Le préfet d'une décharge qui passe par lui : solde, redistribution et annulation.
+        // Le préfet d'une décharge qui passe par lui : solde, redistribution et annulation (pas son délégué).
         $estPrefetDeLaDecharge = $ecriture && $decharge->circuit === 'via_prefet'
             && $decharge->remisA?->type === 'prefecture'
-            && $this->perimetre->estAutoriteDe($utilisateur, $decharge->remisA);
+            && $this->perimetre->estTitulaireDe($utilisateur, $decharge->remisA);
         $solde = $estPrefetDeLaDecharge && $decharge->estPartie() ? $this->remises->soldePrefet($decharge) : collect();
         $peutRedistribuer = $estPrefetDeLaDecharge && $ouvert && $decharge->statut_document === 'validee'
             && $solde->contains(fn (array $s) => $s['reliquat'] > 0);
