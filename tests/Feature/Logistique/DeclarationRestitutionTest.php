@@ -890,14 +890,7 @@ class DeclarationRestitutionTest extends TestCase
         $this->assertSame(['agent_id' => $this->agentRetour->id], $journal->avant);
         $this->assertSame(['agent_id' => $autre->id], $journal->apres);
 
-        // L'ancien agent ne déclare plus à la tablette.
-        $horodatage = now()->toIso8601String();
-        try {
-            $this->tablette($this->lignes(100), null, $horodatage);
-            $this->fail("L'ancien agent ne devait plus déclarer.");
-        } catch (ModelNotFoundException) {
-        }
-
+        // L'ancien agent peut encore envoyer une saisie déjà faite : voir test_ancien_agent_de_retour_declaration_a_verifier.
         $refus = [
             'Seul un agent de transport actif peut être désigné pour le retour.' => [
                 $this->responsable, User::factory()->create(['role' => 'agent_transport', 'actif' => false]),
@@ -928,6 +921,48 @@ class DeclarationRestitutionTest extends TestCase
         $this->service()->prendreEnCharge($this->restitution, $autre);
         $this->expectException(RegleLogistique::class);
         $this->service()->affecterAgent($this->restitution, $this->agentRetour);
+    }
+
+    public function test_ancien_agent_de_retour_declaration_a_verifier(): void
+    {
+        // Saisie faite hors connexion par l'agent désigné, puis un autre agent est désigné avant l'envoi (spec §13).
+        $nouveau = User::factory()->create(['role' => 'agent_transport']);
+        $this->service()->affecterAgent($this->restitution, $nouveau);
+        $horodatage = now()->toIso8601String();
+        $lignes = $this->lignes(100);
+        $bloc = $this->bloc($lignes, $horodatage);
+
+        $declaration = $this->tablette($lignes, $bloc, $horodatage);
+
+        $this->assertSame('a_verifier', $declaration->statut);
+        $this->assertSame(['affectation_retiree'], $declaration->anomalies);
+        $this->assertSame('verifiee_code', $declaration->verification_identite, 'Les contrôles de preuve sont les mêmes.');
+        $this->assertSame($this->agentRetour->id, $declaration->user_id);
+        $this->assertSame(0, $this->declareRestitue(), 'Rien ne compte avant l\'arbitrage du responsable.');
+        $this->assertSame(0, $this->echecs());
+
+        // Rejeu de l'envoi : la déclaration enregistrée, sans rien refaire.
+        $rejeu = $this->tablette($lignes, $bloc, $horodatage);
+        $this->assertSame($declaration->id, $rejeu->id);
+        $this->assertSame(1, RestitutionDeclaration::count());
+        $this->assertSame(1, JournalEntree::where('action', 'declaration_restitution')->count());
+
+        // Un mauvais code d'un ancien agent est compté comme pour l'agent désigné.
+        $autreHorodatage = now()->addMinute()->toIso8601String();
+        RestitutionDeclaration::query()->update(['statut' => 'ecartee']);
+        $echec = $this->tablette($lignes, $this->bloc($lignes, $autreHorodatage, '000111', 'cle-restitution-0002'), $autreHorodatage, 'cle-restitution-0002');
+        $this->assertSame('echec', $echec->verification_identite);
+        $this->assertSame(['affectation_retiree', 'identite'], $echec->anomalies);
+        $this->assertSame(1, $this->echecs());
+
+        // Le nouvel agent ne prend pas en charge sur cette déclaration : elle attend l'arbitrage.
+        $this->actingAs($nouveau);
+        try {
+            $this->service()->prendreEnCharge($this->restitution, $nouveau);
+            $this->fail('Prise en charge acceptée sans déclaration retenue.');
+        } catch (RegleLogistique) {
+            $this->assertSame('a_preparer', $this->restitution->refresh()->statut);
+        }
     }
 
     public function test_declaration_possible_sur_un_cycle_clos(): void

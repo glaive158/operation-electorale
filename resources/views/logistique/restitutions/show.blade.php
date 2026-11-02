@@ -8,7 +8,7 @@
     $n = fn ($v) => number_format((int) $v, 0, ',', ' ');
     $classes = ['a_preparer' => 'bg-slate-100 text-slate-600', 'en_retour' => 'bg-sky-100 text-sky-700', 'recue_central' => 'bg-amber-100 text-amber-700', 'controlee' => 'bg-green-100 text-green-700'];
     $classesDeclaration = ['retenue' => 'bg-green-100 text-green-700', 'concordante' => 'bg-green-50 text-green-700', 'a_verifier' => 'bg-red-100 text-red-700', 'valide' => 'bg-slate-100 text-slate-600', 'ecartee' => 'bg-slate-200 text-slate-500', 'remplacee' => 'bg-slate-200 text-slate-500'];
-    $anomalies = ['excedent' => 'Retour supérieur à l\'attendu', 'divergence' => 'Divergence avec l\'autre déclaration', 'identite' => 'Identité du signataire non établie'];
+    $anomalies = ['excedent' => 'Retour supérieur à l\'attendu', 'divergence' => 'Divergence avec l\'autre déclaration', 'identite' => 'Identité du signataire non établie', 'affectation_retiree' => 'Agent de retour n\'étant plus désigné'];
     $champ = 'px-2 py-1 rounded-lg border border-slate-300 text-sm focus:outline-none';
     $bouton = 'px-3 py-1.5 rounded-lg text-white text-xs font-medium hover:opacity-90';
     $arbitrable = $administrer && $restitution->statut === 'a_preparer';

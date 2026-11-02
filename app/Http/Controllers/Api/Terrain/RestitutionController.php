@@ -22,8 +22,9 @@ class RestitutionController extends Controller
 
     public function declarer(Request $request, Restitution $restitution): JsonResponse
     {
-        // Hors du périmètre de l'agent, la restitution n'existe pas : avant même de lire l'envoi.
-        abort_unless((int) $restitution->agent_id === (int) $request->user()->id, 404);
+        // Hors du périmètre de l'agent, la restitution n'existe pas : avant même de lire l'envoi. Un agent désigné
+        // avant l'agent actuel envoie encore sa saisie, reçue à vérifier (spec §13).
+        abort_unless($this->restitutions->estAgentDeRetour($restitution, $request->user()), 404);
 
         $donnees = $request->validate([
             'mode' => ['required', 'in:tablette'],

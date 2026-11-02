@@ -8,6 +8,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\JournalEntree;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Restitution;
 use App\Models\Logistique\RestitutionDeclaration;
@@ -225,7 +226,9 @@ class RestitutionService
      *   détenteur lui-même ; il signe par sa connexion.
      * - `tablette` : l'auteur est l'agent de retour désigné, le signataire est le détenteur, qui atteste par son code
      *   personnel (bloc de preuve, vérifié comme pour une remise) ; sans bloc (repli), l'identité n'est pas vérifiée.
-     *   Hors de son périmètre, la restitution n'existe pas pour l'agent (ModelNotFoundException, 404).
+     *   Un agent désigné avant l'agent actuel envoie encore la saisie faite sur sa tablette : elle est reçue, à
+     *   vérifier (anomalie « affectation_retiree », spec §13). Pour un agent jamais désigné, la restitution n'existe
+     *   pas (ModelNotFoundException, 404).
      *
      * Chaque ligne de la restitution est déclarée une fois ; un retour supérieur à l'attendu est accepté mais à
      * vérifier (excédent). Idempotence : même clé et même envoi ⇒ la déclaration enregistrée, sans rien refaire ;
@@ -756,9 +759,9 @@ class RestitutionService
                     return [$existante, true];
                 }
 
-                $delegation = $this->controlerDroit($auteur, $actuelle, $mode);
+                ['delegation' => $delegation, 'anomalies' => $anomalies] = $this->controlerDroit($auteur, $actuelle, $mode);
                 $this->controlerStatut($actuelle, $mode);
-                $anomalies = $this->controlerLignes($actuelle, $lignes);
+                $anomalies = [...$anomalies, ...$this->controlerLignes($actuelle, $lignes)];
                 if ($preuve !== null && ! in_array($preuve['verification'], Declaration::VERIFICATIONS_ETABLIES, true)) {
                     $anomalies[] = 'identite';
                 }
@@ -942,22 +945,59 @@ class RestitutionService
     }
 
     /**
-     * Qui déclare : au compte, le détenteur (l'autorité titulaire du destinataire ou son délégué actif, dont la
-     * délégation est rapportée ; l'agent détenteur lui-même) ; à la tablette, l'agent de retour désigné.
+     * Agent de retour de la restitution : l'agent désigné, ou un agent désigné avant lui (journal des désignations),
+     * dont la saisie déjà faite sur la tablette est encore reçue (spec §13, P6-R44). Un compte jamais désigné ne
+     * l'est pas : pour lui, la restitution n'existe pas.
      */
-    private function controlerDroit(User $auteur, Restitution $r, string $mode): ?Delegation
+    public function estAgentDeRetour(Restitution $r, User $agent): bool
+    {
+        return $this->designation($agent, $r) !== null;
+    }
+
+    /** « designe » pour l'agent de retour actuel, « retire » pour un agent désigné avant lui, null sinon. */
+    private function designation(User $agent, Restitution $r): ?string
+    {
+        if ($agent->role !== 'agent_transport') {
+            return null;
+        }
+        if ($r->agent_id !== null && (int) $r->agent_id === (int) $agent->id) {
+            return 'designe';
+        }
+        // Quelques désignations au plus par restitution : lues en entier, sans requête JSON propre à la base.
+        $ancien = JournalEntree::where('objet_type', 'restitution')->where('objet_id', $r->id)
+            ->where('action', 'affectation_agent_restitution')->orderBy('id')->get(['id', 'apres'])
+            ->contains(fn (JournalEntree $e) => (int) ($e->apres['agent_id'] ?? 0) === (int) $agent->id);
+
+        return $ancien ? 'retire' : null;
+    }
+
+    /**
+     * Qui déclare : au compte, le détenteur (l'autorité titulaire du destinataire ou son délégué actif, dont la
+     * délégation est rapportée ; l'agent détenteur lui-même) ; à la tablette, l'agent de retour désigné, ou un
+     * agent désigné avant lui (anomalie « affectation_retiree » : la déclaration est à vérifier).
+     *
+     * @return array{delegation: ?Delegation, anomalies: list<string>}
+     */
+    private function controlerDroit(User $auteur, Restitution $r, string $mode): array
     {
         if (! Gate::forUser($auteur)->allows('logistique-terrain')) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
-        if ($mode === 'tablette' || $r->detenteur_type === 'agent') {
-            $attendu = $mode === 'tablette' ? $r->agent_id : $r->detenteur_id;
-            if ($auteur->role !== 'agent_transport' || $attendu === null || (int) $attendu !== (int) $auteur->id) {
+        if ($mode === 'tablette') {
+            $designation = $this->designation($auteur, $r);
+            if ($designation === null) {
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
 
-            return null;
+            return ['delegation' => null, 'anomalies' => $designation === 'retire' ? ['affectation_retiree'] : []];
+        }
+        if ($r->detenteur_type === 'agent') {
+            if ($auteur->role !== 'agent_transport' || (int) $r->detenteur_id !== (int) $auteur->id) {
+                throw new RegleLogistique(self::HORS_PERIMETRE);
+            }
+
+            return ['delegation' => null, 'anomalies' => []];
         }
 
         $destinataire = Destinataire::find($r->detenteur_id);
@@ -967,17 +1007,17 @@ class RestitutionService
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
         if ($this->perimetre->estTitulaireDe($auteur, $destinataire)) {
-            return null;
+            return ['delegation' => null, 'anomalies' => []];
         }
         $delegation = $this->delegations->activeA($destinataire, $auteur, $maintenant);
         if ($delegation === null) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 
-        return $delegation;
+        return ['delegation' => $delegation, 'anomalies' => []];
     }
 
-    /** Une restitution dont l'agent n'est pas l'agent de retour désigné est, pour lui, inconnue (404). */
+    /** Une restitution dont l'agent n'est pas (ou n'a jamais été) l'agent de retour est, pour lui, inconnue (404). */
     private function exigerAgentDesigne(User $auteur, Restitution $r): void
     {
         $actuelle = Restitution::findOrFail($r->id);

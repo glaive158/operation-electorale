@@ -681,6 +681,33 @@ class EcransRestitutionTest extends TestCase
         $this->assertSame($detenteur->id, $restitution->refresh()->agent_id);
     }
 
+    public function test_api_declaration_d_un_ancien_agent_de_retour_a_verifier(): void
+    {
+        $restitution = $this->ouverte();
+        app(RestitutionService::class)->affecterAgent($restitution, $this->agentRetour);
+        $corps = $this->corpsTablette($restitution, 100, 'cle-tablette-ancien-agent-1');
+        // Un autre agent est désigné pendant que la saisie attend le réseau sur la tablette du premier.
+        $nouveau = User::factory()->create(['role' => 'agent_transport']);
+        app(RestitutionService::class)->affecterAgent($restitution, $nouveau);
+        $url = '/api/terrain/restitutions/'.$restitution->id.'/declarations';
+
+        $premier = $this->terrain($this->agentRetour)->postJson($url, $corps)->assertCreated()
+            ->assertJsonPath('declaration.statut', 'a_verifier')
+            ->assertJsonPath('declaration.verification_identite', 'verifiee_code')
+            ->assertJsonPath('declaration.anomalies', ['affectation_retiree']);
+        $this->terrain($this->agentRetour)->postJson($url, $corps)->assertOk()->assertJsonPath('declaration.id', $premier->json('declaration.id'));
+        $this->assertSame(1, RestitutionDeclaration::count());
+
+        // Un agent jamais désigné pour cette restitution : elle n'existe pas pour lui.
+        $intrus = User::factory()->create(['role' => 'agent_transport']);
+        $this->terrain($intrus)->postJson($url, $this->corpsTablette($restitution, 100, 'cle-tablette-ancien-agent-2'))->assertNotFound();
+        $this->assertSame(1, RestitutionDeclaration::count());
+
+        // Le central voit l'anomalie en clair.
+        $this->actingAs($this->responsable)->get(route('logistique.restitutions.show', $restitution))->assertOk()
+            ->assertSee('Agent de retour n&#039;étant plus désigné', false);
+    }
+
     public function test_jeton_d_une_autorite_sur_l_api_de_restitution_introuvable(): void
     {
         $restitution = $this->declaree();
