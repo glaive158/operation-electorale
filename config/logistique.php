@@ -29,6 +29,11 @@ return [
 
     'lieu_document' => 'Dakar',
 
+    /*
+    | Durée de validité (en jours) d'un jeton d'accès de l'application de terrain.
+    */
+    'jeton_jours' => (int) env('LOGISTIQUE_JETON_JOURS', 30),
+
     'nb_decharge' => 'NB : la présente décharge doit être retournée signée à la Division Logistique et de la Planification.',
 
 ];
