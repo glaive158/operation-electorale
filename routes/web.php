@@ -15,6 +15,7 @@ use App\Http\Controllers\Logistique\CommandeController;
 use App\Http\Controllers\Logistique\CommissionController;
 use App\Http\Controllers\Logistique\CorrespondanceController;
 use App\Http\Controllers\Logistique\CycleController;
+use App\Http\Controllers\Logistique\DechargeController;
 use App\Http\Controllers\Logistique\EntiteController;
 use App\Http\Controllers\Logistique\GeographieController;
 use App\Http\Controllers\Logistique\InstantaneController;
@@ -142,6 +143,9 @@ Route::middleware(['auth'])->group(function () {
         Route::post('cycles/{cycle}/plans', [PlanDotationController::class, 'store'])->name('plans.store');
         Route::get('plans/{plan}', [PlanDotationController::class, 'show'])->name('plans.show');
         Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
+
+        Route::get('decharges/qr/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
+        Route::get('decharges/{decharge}', [DechargeController::class, 'show'])->name('decharges.show');
 
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
