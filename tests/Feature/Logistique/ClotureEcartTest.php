@@ -170,6 +170,14 @@ class ClotureEcartTest extends TestCase
         $this->assertSame(1, Arbitrage::count());
         $this->refus(fn () => $this->cloturer(1, 0, $this->urnes, $this->prefecture),
             'Abandon supérieur au reste à réceptionner pour Urnes : reste 0.');
+
+        // La sous-préfecture est bloquée par la réception à vérifier de sa décharge, même adressée au préfet ;
+        // une fois la réception arbitrée, son abandon passe.
+        $message = 'Une réception est à vérifier pour Urnes : arbitrez-la avant d\'accepter un écart.';
+        $this->refus(fn () => $this->cloturer(10, 0, $this->urnes, $this->sousPrefecture1), $message);
+        $this->cloturer(0, 10, $this->urnes, $this->sousPrefecture1);
+        app(ArbitrageService::class)->rejeter(Declaration::where('decharge_id', $aVerifier->id)->sole(), 'Excédent impossible.');
+        $this->cloturer(10, 0, $this->urnes, $this->sousPrefecture1);
     }
 
     public function test_la_redistribution_retenue_reduit_le_reste_du_sous_prefet(): void

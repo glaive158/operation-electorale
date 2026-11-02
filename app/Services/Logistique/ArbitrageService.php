@@ -110,12 +110,15 @@ class ArbitrageService
         }, attempts: 3);
     }
 
-    /** Une remise non annulée vers le destinataire, portant l'article, attend un arbitrage (reçu non établi). */
+    /**
+     * Une remise (livraison ou redistribution) d'une décharge du destinataire, portant l'article, attend un
+     * arbitrage : le reçu n'est pas établi, et un litige au préfet peut devenir une redistribution au destinataire.
+     * Le statut `a_verifier` exclut déjà les remises annulées.
+     */
     private function receptionAVerifier(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): bool
     {
         return Remise::query()
             ->whereIn('decharge_id', Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)->select('id'))
-            ->where('a_type', 'destinataire')->where('a_id', $destinataire->id)
             ->where('statut', 'a_verifier')
             ->whereHas('lignes', fn ($q) => $q->where('materiel_id', $materiel->id))
             ->exists();
