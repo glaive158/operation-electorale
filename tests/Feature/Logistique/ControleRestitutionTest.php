@@ -115,9 +115,51 @@ class ControleRestitutionTest extends TestCase
         $this->assertSame(0, $this->ligne($r, $this->urnes)->recu_central);
     }
 
+    public function test_reception_corrigee_tant_que_rien_n_est_controle(): void
+    {
+        $r = $this->restitution([$this->urnes->id => 71], 'en_retour');
+        $this->service()->receptionner($r, [$this->urnes->id => 17]);
+        $this->assertSame('recue_central', $r->fresh()->statut);
+
+        // Erreur de saisie (17 pour 71) : la réception se corrige tant que le contrôle n'a pas eu lieu.
+        $this->service()->receptionner($r, [$this->urnes->id => 71]);
+        $this->assertSame('recue_central', $r->fresh()->statut);
+        $this->assertSame(71, $this->ligne($r, $this->urnes)->recu_central);
+        $correction = JournalEntree::where('action', 'reception_restitution')->orderByDesc('id')->first();
+        $this->assertSame(['statut' => 'recue_central', 'recu_central' => [$this->urnes->id => 17]], $correction->avant);
+        $this->assertSame('recue_central', $correction->apres['statut']);
+        $this->assertSame([$this->urnes->id => 71], $correction->apres['recu_central']);
+        $this->assertSame(2, JournalEntree::where('action', 'reception_restitution')->count());
+
+        // Le contrôle porte sur le reçu corrigé.
+        try {
+            $this->service()->controler($r, [$this->urnes->id => $this->controle(17, 0, 0)]);
+            $this->fail('Contrôle sur l\'ancien reçu accepté.');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame('Contrôle incomplet pour Urnes : bon + à réparer + réformé doit valoir 71.', $e->getMessage());
+        }
+        $this->service()->controler($r, [$this->urnes->id => $this->controle(70, 0, 1)]);
+        $this->assertSame('recue_central', $r->fresh()->statut, 'La réforme attend sa décision.');
+
+        // Contrôlée (même en attente de la décision de réforme, puis contrôlée tout à fait) : la réception ne bouge plus.
+        foreach ([false, true] as $decidee) {
+            if ($decidee) {
+                $this->service()->deciderReforme($this->ligne($r, $this->urnes), 'Urne fendue');
+                $this->assertSame('controlee', $r->fresh()->statut);
+            }
+            try {
+                $this->service()->receptionner($r, [$this->urnes->id => 60]);
+                $this->fail('Réception corrigée après le contrôle.');
+            } catch (RegleLogistique) {
+                $this->assertSame(71, $this->ligne($r, $this->urnes)->recu_central);
+            }
+        }
+        $this->assertSame(2, JournalEntree::where('action', 'reception_restitution')->count());
+    }
+
     public function test_reception_refuse_hors_en_retour(): void
     {
-        foreach (['a_preparer', 'recue_central', 'controlee'] as $statut) {
+        foreach (['a_preparer', 'controlee'] as $statut) {
             $r = $this->restitution([$this->urnes->id => 10], $statut);
 
             try {

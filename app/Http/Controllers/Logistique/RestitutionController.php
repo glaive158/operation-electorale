@@ -103,7 +103,9 @@ class RestitutionController extends Controller
             'agents' => $restitution->statut === 'a_preparer'
                 ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
                 : collect(),
-            'peutReceptionner' => $restitution->statut === 'en_retour',
+            // Reçue au central, la réception se corrige tant que le contrôle n'a rien réparti (P6-R42).
+            'peutReceptionner' => $restitution->statut === 'en_retour' || ($restitution->statut === 'recue_central' && ! $controlee),
+            'correction' => $restitution->statut === 'recue_central',
             'peutControler' => $restitution->statut === 'recue_central' && ! $controlee && $aVerifier->isEmpty(),
             'fiches' => [
                 'declaration' => $retenue !== null && in_array($restitution->statut, ['en_retour', 'recue_central', 'controlee'], true),

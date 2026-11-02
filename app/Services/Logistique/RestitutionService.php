@@ -410,7 +410,8 @@ class RestitutionService
      * Réception au central : le gestionnaire compte ce que l'agent a rapporté, article par article (chaque ligne
      * de la restitution, une seule fois, de 0 à 10 000 000). Aucun mouvement de stock : le contrôle décide de
      * l'état. Seul un retour pris en charge (« en retour ») se réceptionne ; la restitution passe « reçue au
-     * central ». Un cycle clos n'y fait pas obstacle (spec §9.3).
+     * central ». Une réception déjà enregistrée se corrige de la même façon tant que le contrôle n'a rien réparti ;
+     * le journal garde l'ancien reçu. Un cycle clos n'y fait pas obstacle (spec §9.3).
      *
      * @param  array<int|string, mixed>  $recus  quantité reçue par identifiant d'article
      */
@@ -423,10 +424,14 @@ class RestitutionService
         DB::transaction(function () use ($r, $recus) {
             $this->verrouillerCycle($r);
             $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
-            if ($actuelle->statut !== 'en_retour') {
+            if (! in_array($actuelle->statut, ['en_retour', 'recue_central'], true)) {
                 throw new RegleLogistique('Seul un retour pris en charge peut être réceptionné au central.');
             }
             $lignes = $this->lignesDe($actuelle, $recus, 'reçue');
+            // Une réception se corrige (erreur de saisie) tant que le contrôle n'a rien réparti (P6-R42).
+            if ($lignes->contains(fn (RestitutionLigne $l) => $l->bon + $l->a_reparer + $l->reforme > 0)) {
+                throw new RegleLogistique('Ce retour est déjà contrôlé : sa réception ne se corrige plus.');
+            }
 
             $avant = [];
             foreach ($lignes as $materielId => $ligne) {
@@ -435,11 +440,14 @@ class RestitutionService
                     $ligne->forceFill(['recu_central' => $recus[$materielId]])->save();
                 }
             }
-            $actuelle->forceFill(['statut' => 'recue_central'])->save();
+            $statut = $actuelle->statut;
+            if ($statut !== 'recue_central') {
+                $actuelle->forceFill(['statut' => 'recue_central'])->save();
+            }
 
             ksort($recus);
             Journal::noter('restitution', $actuelle->id, 'reception_restitution', [
-                'statut' => 'en_retour', 'recu_central' => $avant,
+                'statut' => $statut, 'recu_central' => $avant,
             ], [
                 'statut' => 'recue_central', 'recu_central' => $recus,
                 'declare_restitue' => $lignes->map(fn (RestitutionLigne $l) => $l->declare_restitue)->all(),

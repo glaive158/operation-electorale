@@ -421,7 +421,13 @@ class EcransRestitutionTest extends TestCase
         $this->post(route('logistique.restitutions.receptionner', $restitution), ['recus' => [$this->urnes->id => 100]])
             ->assertRedirect()->assertSessionHas('success');
         $this->assertSame('recue_central', $restitution->fresh()->statut);
-        $this->get($page)->assertOk()->assertSee(route('logistique.restitutions.controler', $restitution), false);
+        $this->get($page)->assertOk()->assertSee(route('logistique.restitutions.controler', $restitution), false)
+            ->assertSee(route('logistique.restitutions.receptionner', $restitution), false)->assertSee('Corriger la réception');
+
+        // Correction de la réception avant le contrôle : le formulaire reprend le reçu enregistré.
+        $this->post(route('logistique.restitutions.receptionner', $restitution), ['recus' => [$this->urnes->id => 90]])->assertSessionHas('success');
+        $this->get($page)->assertOk()->assertSee('name="recus['.$this->urnes->id.']" required min="0" max="10000000" step="1" value="90"', false);
+        $this->post(route('logistique.restitutions.receptionner', $restitution), ['recus' => [$this->urnes->id => 100]])->assertSessionHas('success');
 
         // Contrôle incomplet : refusé avec le message du service.
         $this->post(route('logistique.restitutions.controler', $restitution), ['controle' => [$this->urnes->id => ['bon' => 80, 'a_reparer' => 10, 'reforme' => 0]]])
@@ -432,6 +438,7 @@ class EcransRestitutionTest extends TestCase
         $ligne = $this->ligne($restitution);
         $this->assertSame([80, 10, 10], [$ligne->bon, $ligne->a_reparer, $ligne->reforme]);
         $this->assertSame('recue_central', $restitution->fresh()->statut, 'La réforme attend la décision du responsable.');
+        $this->get($page)->assertOk()->assertDontSee(route('logistique.restitutions.receptionner', $restitution), false)->assertDontSee('Corriger la réception');
 
         // Décision de réforme : le responsable seul.
         $reforme = route('logistique.restitutions.reforme', $ligne);

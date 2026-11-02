@@ -133,16 +133,21 @@
             <form method="POST" action="{{ route('logistique.restitutions.receptionner', $restitution) }}" class="px-6 py-4 border-t border-slate-100 space-y-3"
                   onsubmit="this.querySelector('button[type=submit]').disabled = true;">
                 @csrf
-                <p class="text-sm font-medium text-slate-800">Réception au central : ce que l'agent a rapporté</p>
+                @if($correction)
+                    <p class="text-sm font-medium text-slate-800">Corriger la réception : ce que l'agent a réellement rapporté</p>
+                    <p class="text-xs text-slate-500">Possible tant que le contrôle n'est pas enregistré ; l'ancien reçu reste au journal.</p>
+                @else
+                    <p class="text-sm font-medium text-slate-800">Réception au central : ce que l'agent a rapporté</p>
+                @endif
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                     @foreach($lignes as $l)
                         <label class="block text-xs text-slate-500">{{ $l->materiel?->libelle }} (déclaré : {{ $n($l->declare_restitue) }})
-                            <input type="number" name="recus[{{ $l->materiel_id }}]" required min="0" max="10000000" step="1" value="{{ old('recus.'.$l->materiel_id, $l->declare_restitue) }}"
+                            <input type="number" name="recus[{{ $l->materiel_id }}]" required min="0" max="10000000" step="1" value="{{ old('recus.'.$l->materiel_id, $correction ? $l->recu_central : $l->declare_restitue) }}"
                                    class="mt-1 w-full text-right {{ $champ }}">
                         </label>
                     @endforeach
                 </div>
-                <button type="submit" class="px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90" style="background:#009A44;">Enregistrer la réception</button>
+                <button type="submit" class="px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90" style="background:{{ $correction ? '#0284c7' : '#009A44' }};">{{ $correction ? 'Corriger la réception' : 'Enregistrer la réception' }}</button>
             </form>
         @endif
 
