@@ -91,7 +91,8 @@ class AffectationsTerrain
 
         $candidates = $decharges->clone()
             ->where('circuit', 'via_prefet')->whereIn('remis_a_id', $prefectures)
-            ->whereColumn('destinataire_id', '!=', 'remis_a_id')
+            ->whereExists(fn ($q) => $q->from('destinataires')->whereColumn('destinataires.id', 'decharges.destinataire_id')
+                ->where('destinataires.type', 'sous_prefecture')->whereColumn('destinataires.prefecture_id', 'decharges.remis_a_id'))
             ->whereExists(fn ($q) => $q->from('remises')->whereColumn('remises.decharge_id', 'decharges.id')
                 ->where('remises.etape', 'livraison')->where('remises.statut', 'recue'))
             ->orderBy('id')->get();
@@ -136,13 +137,15 @@ class AffectationsTerrain
 
         $elements = [];
         foreach ($remises as $remise) {
+            // L'autorité n'existe que pour un destinataire : un identifiant d'agent ne désigne jamais un destinataire.
+            $autorite = $remise->a_type === 'destinataire' ? $autorites->get($remise->a_id) : null;
             $elements[] = $this->empreinter([
                 'remise' => [
                     'id' => $remise->id, 'etape' => $remise->etape, 'statut' => $remise->statut,
                     'de' => $libelles[$remise->id]['de'], 'a' => $libelles[$remise->id]['a'],
                 ],
                 'decharge' => $this->decharge($decharges[$remise->decharge_id]),
-                'autorite_attendue' => $autorites[$remise->a_id] ?? $this->autoriteInconnue(),
+                'autorite_attendue' => $autorite ?? $this->autoriteInconnue(),
                 'lignes' => $lignes($remise->lignes->mapWithKeys(fn ($l) => [(int) $l->materiel_id => (int) $l->quantite])),
             ]);
         }
@@ -196,7 +199,7 @@ class AffectationsTerrain
     /** @return array<string, mixed> */
     private function autoriteInconnue(): array
     {
-        return ['user_id' => null, 'nom' => '', 'qualite' => '', 'delegues' => []];
+        return ['user_id' => null, 'nom' => null, 'qualite' => null, 'delegues' => []];
     }
 
     /**

@@ -131,5 +131,14 @@
         },
         "json": "{\"lignes\":[{\"defectueux\":2,\"materiel_id\":3,\"observation\":\"Caisse écrasée / vérifiée\",\"recu\":10},{\"defectueux\":0,\"materiel_id\":5,\"observation\":null,\"recu\":4}],\"mode\":\"compte\",\"remise_id\":7,\"signataire\":{\"nom\":\"Awa Diop\",\"qualite\":\"Préfète\"}}",
         "empreinte": "84fe3f40e66519dbc3db78ab7a9a1d98ac4e97d88e9d9eb94a31b68373f631be"
+    },
+    {
+        "note": "objet dont les clés \"1\",\"0\" trient en 0..n-1 : encodé comme une LISTE [\"b\",\"a\"] (PHP array_is_list après tri) ; le JS doit faire de même",
+        "entree": {
+            "1": "a",
+            "0": "b"
+        },
+        "json": "[\"b\",\"a\"]",
+        "empreinte": "02d8bc3008a9bb0dcc4b86d7fd3428ced792355c733c19756bec5a56dc61b2c5"
     }
 ]

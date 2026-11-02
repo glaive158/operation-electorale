@@ -262,6 +262,100 @@ class AffectationsTest extends TestCase
         $this->assertNotSame($apres['empreinte_element'], $this->elements($agent)[0]['empreinte_element']);
     }
 
+    public function test_redistribution_annulee_disparait_des_listes(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100, $this->isoloirs->id => 50]);
+        $this->deposerRecue($d1, []);
+        $redistribution = $this->redistribuer($d1->refresh(), [$this->urnes->id => 60]);
+        $this->assertContains('redistribution:en_attente:'.$d1->id, $this->resume($this->elements($prefet)));
+        $this->assertSame(['redistribution:en_attente:'.$d1->id], $this->resume($this->elements($sousPrefet)));
+
+        $this->actingAs($prefet);
+        app(RemiseService::class)->annulerRedistribution($redistribution, 'Erreur de quantité');
+        $this->actingAs($this->responsable);
+
+        $this->assertSame(['preparer:'.$d1->id], $this->resume($this->elements($prefet)));
+        $this->assertSame([], $this->elements($sousPrefet));
+    }
+
+    public function test_decharge_annulee_ou_brouillon_ne_donne_rien(): void
+    {
+        $agent = $this->agentTransport('Agent A');
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $d2 = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20], $agent);
+        $this->assertSame(['livraison:en_attente:'.$d2->id], $this->resume($this->elements($agent)));
+
+        foreach (['annulee', 'brouillon'] as $statut) {
+            $d2->forceFill(['statut_document' => $statut])->save();
+            $this->assertSame([], $this->elements($agent), $statut);
+            $this->assertSame([], $this->elements($prefet), $statut);
+        }
+        $this->terrain($agent)->getJson('/api/terrain/decharges/'.$d2->identifiant)->assertNotFound();
+        $this->actingAs($this->responsable);
+    }
+
+    public function test_sous_prefet_d_une_autre_sous_prefecture_n_a_rien(): void
+    {
+        $autreSousPrefet = $this->autoriteFictive($this->sousPrefecture2);
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100, $this->isoloirs->id => 50]);
+        $this->deposerRecue($d1, []);
+        $this->redistribuer($d1->refresh(), [$this->urnes->id => 60]);
+
+        $this->assertSame([], $this->elements($autreSousPrefet));
+        $this->terrain($autreSousPrefet)->getJson('/api/terrain/decharges/'.$d1->identifiant)->assertNotFound();
+        $this->actingAs($this->responsable);
+    }
+
+    public function test_detail_d_une_decharge_donne_la_preparation_au_prefet(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100, $this->isoloirs->id => 50]);
+        $this->deposerRecue($d1, [$this->urnes->id => ['recu' => 100, 'defectueux' => 10]]);
+
+        $elements = $this->terrain($prefet)->getJson('/api/terrain/decharges/'.$d1->identifiant)
+            ->assertOk()->json('elements');
+        $this->actingAs($this->responsable);
+
+        $this->assertCount(1, $elements);
+        $this->assertNull($elements[0]['remise']);
+        $this->assertSame($d1->id, $elements[0]['decharge']['id']);
+        $this->assertSame([
+            ['materiel_id' => $this->urnes->id, 'libelle' => 'Urnes', 'quantite' => 90],
+            ['materiel_id' => $this->isoloirs->id, 'libelle' => 'Isoloirs', 'quantite' => 50],
+        ], $elements[0]['lignes']);
+        $this->assertSame($sousPrefet->id, $elements[0]['autorite_attendue']['user_id']);
+    }
+
+    public function test_preparation_jamais_offerte_hors_du_perimetre_de_redistribution(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100, $this->isoloirs->id => 50]);
+        $this->deposerRecue($d1, []);
+        $this->assertSame(['preparer:'.$d1->id], $this->resume($this->elements($prefet)));
+
+        // Destinataire rattaché à une autre préfecture : le service refuserait la redistribution, on ne l'offre pas.
+        $autre = Destinataire::create(['type' => 'prefecture', 'libelle' => 'Préfecture de Kaolack', 'departement_id' => 11]);
+        $this->sousPrefecture1->forceFill(['prefecture_id' => $autre->id])->save();
+        $this->assertSame([], $this->elements($prefet));
+    }
+
+    public function test_remise_a_verifier_visible_du_sous_prefet(): void
+    {
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100, $this->isoloirs->id => 50]);
+        $this->deposerRecue($d1, []);
+        $redistribution = $this->redistribuer($d1->refresh(), [$this->urnes->id => 60]);
+
+        $redistribution->forceFill(['statut' => 'a_verifier'])->save();
+
+        $elements = $this->elements($sousPrefet);
+        $this->assertSame(['redistribution:a_verifier:'.$d1->id], $this->resume($elements));
+        $this->assertSame($redistribution->id, $elements[0]['remise']['id']);
+    }
+
     public function test_canonique_vecteurs(): void
     {
         $vecteurs = json_decode(file_get_contents(base_path('tests/fixtures/canonique.json')), true, 512, JSON_THROW_ON_ERROR);
