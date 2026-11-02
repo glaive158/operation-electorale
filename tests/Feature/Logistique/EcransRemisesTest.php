@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Logistique;
 
+use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Decharge;
@@ -17,6 +18,7 @@ use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\ReclamationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -176,7 +178,7 @@ class EcransRemisesTest extends TestCase
 
         $this->get(route('logistique.declarations.a-verifier', $this->cycle))
             ->assertOk()
-            ->assertSeeInOrder([$decharge->numero, 'Préfecture de Thiès', 'Annoncé', 'compte', 'Signataire de test', 'tablette', 'Agent', 'Urnes', '60'])
+            ->assertSeeInOrder([$decharge->numero, 'Préfecture de Thiès', 'Annoncé', 'Déclaration : Compte', 'Signataire de test', 'Déclaration : Tablette', 'Agent', 'Urnes', '60'])
             ->assertSee('Réservé aux responsables logistiques')
             ->assertDontSee(route('logistique.declarations.retenir', $this->tablette($decharge)), false);
 
@@ -229,6 +231,22 @@ class EcransRemisesTest extends TestCase
         $this->assertSame('retenue', $tablette->fresh()->statut);
         $this->assertSame('recue_destinataire', $decharge->fresh()->statut_acheminement);
         $this->assertSame(0, DechargeDocument::count());
+    }
+
+    public function test_regle_refusee_a_l_emission_n_est_pas_signalee_comme_erreur(): void
+    {
+        $decharge = $this->aVerifier();
+        $tablette = $this->tablette($decharge);
+        $this->partialMock(DechargePdfService::class, function ($mock) {
+            $mock->shouldReceive('emettre')->andThrow(new RegleLogistique('Modèle de décharge indisponible.'));
+        });
+        Exceptions::fake();
+        $this->actingAs($this->responsable);
+
+        $this->post(route('logistique.declarations.retenir', $tablette), ['motif' => 'Constat de l\'agent.'])
+            ->assertSessionHas('success')->assertSessionHas('warning');
+
+        Exceptions::assertNothingReported();
     }
 
     public function test_responsable_rejette(): void
@@ -431,6 +449,28 @@ class EcransRemisesTest extends TestCase
         $this->actingAs($this->responsable);
         $this->get(route('logistique.suivi.index', $this->cycle))
             ->assertOk()->assertSee(route('logistique.clotures-ecart.store', $this->cycle), false)->assertSee('Clôturer avec écart');
+    }
+
+    public function test_suivi_limite_l_expedition_annulee_au_non_engage(): void
+    {
+        // 100 de besoin, 30 engagés par une décharge validée : au plus 70 d'expédition annulée.
+        $this->dechargeValidee(30);
+        $this->actingAs($this->responsable);
+
+        $this->get(route('logistique.suivi.index', $this->cycle))
+            ->assertOk()
+            ->assertSee('Expédition annulée (non engagé, au plus 70)')
+            ->assertSee('name="expedition_annulee" min="0" max="70"', false);
+    }
+
+    public function test_fiche_de_decharge_montre_le_libelle_du_mode(): void
+    {
+        $decharge = $this->aVerifier();
+        $this->actingAs($this->gestionnaire);
+
+        $this->get(route('logistique.decharges.show', $decharge))
+            ->assertOk()->assertSee('mode : Compte')->assertSee('mode : Tablette')
+            ->assertDontSee('mode compte')->assertDontSee('mode tablette');
     }
 
     public function test_menu_visible(): void

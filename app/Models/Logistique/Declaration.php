@@ -17,8 +17,8 @@ class Declaration extends Model
     protected $table = 'declarations';
 
     public const MODES = [
-        'tablette' => 'tablette',
-        'compte' => 'compte',
+        'tablette' => 'Tablette',
+        'compte' => 'Compte',
     ];
 
     public const STATUTS = [

@@ -46,7 +46,7 @@
                     @php $arbitrable = $peutArbitrer && in_array($declaration->statut, ['a_verifier', 'valide'], true); @endphp
                     <div class="border border-slate-200 rounded-xl p-4 space-y-3">
                         <div class="flex flex-wrap items-center gap-2 text-sm">
-                            <span class="font-medium text-slate-800">Déclaration {{ $declaration->mode }}</span>
+                            <span class="font-medium text-slate-800">Déclaration : {{ Declaration::MODES[$declaration->mode] ?? $declaration->mode }}</span>
                             <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ $classesStatut[$declaration->statut] ?? 'bg-slate-200 text-slate-600' }}">{{ Declaration::STATUTS[$declaration->statut] ?? $declaration->statut }}</span>
                         </div>
                         <p class="text-xs text-slate-500">

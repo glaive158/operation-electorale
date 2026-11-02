@@ -101,7 +101,7 @@ class DeclarationService
             $dejaFaite = Declaration::where('remise_id', $actuelle->id)->where('mode', $mode)
                 ->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
             if ($dejaFaite) {
-                throw new RegleLogistique('Une déclaration '.Declaration::MODES[$mode].' existe déjà pour cette remise.');
+                throw new RegleLogistique('Une déclaration '.mb_strtolower(Declaration::MODES[$mode]).' existe déjà pour cette remise.');
             }
 
             $anomalies = array_merge($anomalies, $this->controlerLignes($actuelle, $lignes));

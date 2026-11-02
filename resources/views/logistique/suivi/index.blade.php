@@ -99,8 +99,9 @@
                                                 <label class="block text-xs text-slate-500">Abandonné à la réception (au plus {{ $n($l['reste_a_receptionner']) }})
                                                     <input type="number" name="abandon" min="0" max="{{ $l['reste_a_receptionner'] }}" step="1" value="0" class="mt-1 w-full px-2 py-1 rounded-lg border border-slate-300 text-sm text-right focus:outline-none">
                                                 </label>
-                                                <label class="block text-xs text-slate-500">Expédition annulée (non engagé)
-                                                    <input type="number" name="expedition_annulee" min="0" step="1" value="0" class="mt-1 w-full px-2 py-1 rounded-lg border border-slate-300 text-sm text-right focus:outline-none">
+                                                @php $nonEngage = max(0, $l['besoin_expedition'] - $l['engage']); @endphp
+                                                <label class="block text-xs text-slate-500">Expédition annulée (non engagé, au plus {{ $n($nonEngage) }})
+                                                    <input type="number" name="expedition_annulee" min="0" max="{{ $nonEngage }}" step="1" value="0" class="mt-1 w-full px-2 py-1 rounded-lg border border-slate-300 text-sm text-right focus:outline-none">
                                                 </label>
                                                 <input type="text" name="motif" required maxlength="500" placeholder="Motif" aria-label="Motif de la clôture avec écart" class="w-full px-2 py-1 rounded-lg border border-slate-300 text-sm focus:outline-none">
                                                 <button type="submit" class="px-3 py-1 rounded text-xs text-white hover:opacity-90" style="background:#d97706;">Accepter l'écart</button>

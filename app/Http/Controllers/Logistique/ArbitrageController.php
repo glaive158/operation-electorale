@@ -79,7 +79,9 @@ class ArbitrageController extends Controller
         try {
             $this->pdf->emettre($decharge, 'reception');
         } catch (Throwable $e) {
-            report($e);
+            if (! $e instanceof RegleLogistique) {
+                report($e);
+            }
 
             return $retour->with('warning', 'L\'exemplaire de réception n\'a pas pu être émis : l\'arbitrage est enregistré, utilisez « Émettre le PDF » depuis la fiche de la décharge.');
         }

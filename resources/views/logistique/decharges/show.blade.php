@@ -203,7 +203,7 @@
                     @foreach($remise->declarations as $declaration)
                         <div class="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
                             <span class="font-medium text-slate-800">{{ \App\Models\Logistique\Declaration::STATUTS[$declaration->statut] ?? $declaration->statut }}</span>
-                            — mode {{ $declaration->mode }}, {{ $declaration->signataire_nom }}@if($declaration->signataire_qualite), {{ $declaration->signataire_qualite }}@endif,
+                            — mode : {{ \App\Models\Logistique\Declaration::MODES[$declaration->mode] ?? $declaration->mode }}, {{ $declaration->signataire_nom }}@if($declaration->signataire_qualite), {{ $declaration->signataire_qualite }}@endif,
                             le {{ $declaration->created_at?->format('d/m/Y H:i') }} :
                             @foreach($declaration->lignes as $l)
                                 {{ $l->materiel?->libelle }} reçu {{ $n($l->recu) }}, défectueux {{ $n($l->defectueux) }}{{ $loop->last ? '' : ' ;' }}
