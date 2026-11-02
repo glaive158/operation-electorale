@@ -6,8 +6,10 @@ use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
+use App\Models\Logistique\PlanDotation;
 use App\Services\Logistique\BesoinService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EcartVersionService;
@@ -58,6 +60,21 @@ class BesoinCumuleTest extends TestCase
         $service->valider($decharge);
 
         return $decharge->fresh();
+    }
+
+    /** Brouillon de remplacement écrit directement (la préparation par besoin vient avec les réclamations). */
+    private function brouillonRemplacement(Destinataire $destinataire, Materiel $materiel, int $quantite): Decharge
+    {
+        $decharge = Decharge::create([
+            'cycle_id' => $this->cycle->id, 'destinataire_id' => $destinataire->id, 'categorie' => $materiel->categorie,
+            'nature' => 'remplacement', 'plan_dotation_id' => PlanDotation::courantApprouve($this->cycle)->id,
+            'prepare_par' => $this->responsable->id,
+        ]);
+        DechargeLigne::create([
+            'decharge_id' => $decharge->id, 'materiel_id' => $materiel->id, 'dotation_approuvee' => 100, 'quantite' => $quantite,
+        ]);
+
+        return $decharge;
     }
 
     public function test_besoin_egal_dotation_sans_remplacement(): void
@@ -121,9 +138,10 @@ class BesoinCumuleTest extends TestCase
         $this->remplacer($this->prefecture, $this->urnes, 10);
 
         $service = app(DechargeService::class);
-        $decharge = $service->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        // Le brouillon initial ne reprend pas le remplacement : une décharge de remplacement le porte.
+        $this->assertSame([], app(EngagementService::class)->etatInitial($this->cycle, $this->prefecture, 'materiel_lourd')->filter(fn ($e) => $e['reste'] > 0)->keys()->all());
+        $decharge = $this->brouillonRemplacement($this->prefecture, $this->urnes, 10);
         $ligne = $decharge->lignes()->where('materiel_id', $this->urnes->id)->firstOrFail();
-        $this->assertSame(10, $ligne->quantite);
 
         // Contournement du plafond de saisie : seule la validation arbitre.
         $ligne->forceFill(['quantite' => 11])->save();
@@ -164,7 +182,9 @@ class BesoinCumuleTest extends TestCase
         $this->stockerFictif($this->urnes, 1000);
         $this->dechargeValidee($this->prefecture, $this->urnes, 100);
         $this->remplacer($this->prefecture, $this->urnes, 10);
-        $this->dechargeValidee($this->prefecture, $this->urnes, 10);
+        $remplacement = $this->brouillonRemplacement($this->prefecture, $this->urnes, 10);
+        $service = app(DechargeService::class);
+        $service->valider($remplacement);
 
         $this->assertCount(0, app(EcartVersionService::class)->analyser($this->cycle));
 

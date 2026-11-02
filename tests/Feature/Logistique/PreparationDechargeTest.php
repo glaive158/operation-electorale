@@ -3,6 +3,7 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
@@ -414,6 +415,87 @@ class PreparationDechargeTest extends TestCase
      *
      * @param  list<array{0: Materiel, 1: int}>  $lignes
      */
+    private function remplacement(Destinataire $destinataire, Materiel $article, int $quantite): BesoinRemplacement
+    {
+        return BesoinRemplacement::create([
+            'cycle_id' => $this->cycle->id, 'destinataire_id' => $destinataire->id, 'materiel_id' => $article->id,
+            'quantite' => $quantite, 'motif' => 'Matériel perdu', 'autorise_par' => $this->responsable->id,
+        ]);
+    }
+
+    public function test_brouillon_initial_hors_besoins_de_remplacement(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->prefecture, $this->isoloirs, 40]]);
+        $this->remplacement($this->prefecture, $this->urnes, 10);
+
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+
+        $this->assertSame('initiale', $decharge->nature);
+        $this->assertSame(100, $decharge->lignes->firstWhere('materiel_id', $this->urnes->id)->quantite);
+        $this->assertSame(40, $decharge->lignes->firstWhere('materiel_id', $this->isoloirs->id)->quantite);
+    }
+
+    public function test_reliquat_sans_ligne_pour_un_article_entierement_engage_malgre_un_remplacement(): void
+    {
+        $this->approuverPlanFictif([
+            [$this->prefecture, $this->urnes, 100], [$this->prefecture, $this->isoloirs, 40], [$this->sousPrefecture1, $this->urnes, 50],
+        ]);
+        $this->deposerValidee($this->prefecture, 'materiel_lourd', [[$this->urnes, 100]]);
+        $this->remplacement($this->prefecture, $this->urnes, 10);
+
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+
+        $this->assertSame('reliquat', $decharge->nature);
+        $this->assertSame([$this->isoloirs->id], $decharge->lignes->pluck('materiel_id')->all());
+
+        $this->deposerValidee($this->sousPrefecture1, 'materiel_lourd', [[$this->urnes, 50]]);
+        $this->remplacement($this->sousPrefecture1, $this->urnes, 10);
+        try {
+            $this->service()->preparer($this->cycle, $this->sousPrefecture1, 'materiel_lourd');
+            $this->fail('Un besoin de remplacement seul ne donne pas de brouillon initial.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Rien à expédier pour cette catégorie.', $e->getMessage());
+        }
+    }
+
+    public function test_actualiser_n_ajoute_pas_un_article_couvert_par_un_remplacement(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->prefecture, $this->isoloirs, 40]]);
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $decharge->lignes()->where('materiel_id', $this->urnes->id)->delete();
+        $this->deposerValidee($this->prefecture, 'materiel_lourd', [[$this->urnes, 100]]);
+        $this->remplacement($this->prefecture, $this->urnes, 10);
+
+        $this->service()->actualiser($decharge);
+
+        $this->assertSame([$this->isoloirs->id], $decharge->lignes()->pluck('materiel_id')->all());
+    }
+
+    public function test_remplacer_une_annulee_plafonne_hors_remplacements(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $annulee = $this->deposerValidee($this->prefecture, 'materiel_lourd', [[$this->urnes, 100]], 'annulee');
+        $this->deposerValidee($this->prefecture, 'materiel_lourd', [[$this->urnes, 60]]);
+        $this->remplacement($this->prefecture, $this->urnes, 10);
+
+        $remplacante = $this->service()->remplacer($annulee);
+
+        $this->assertSame(40, $remplacante->lignes->first()->quantite);
+    }
+
+    public function test_les_remplacements_valides_ne_comptent_pas_comme_engage_initial(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $this->remplacement($this->prefecture, $this->urnes, 10);
+        $remplacement = $this->deposerValidee($this->prefecture, 'materiel_lourd', [[$this->urnes, 10]]);
+        $remplacement->forceFill(['nature' => 'remplacement'])->save();
+
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+
+        $this->assertSame('initiale', $decharge->nature);
+        $this->assertSame(100, $decharge->lignes->first()->quantite);
+    }
+
     private function deposerValidee(Destinataire $destinataire, string $categorie, array $lignes, string $statut = 'validee'): Decharge
     {
         $decharge = Decharge::create([

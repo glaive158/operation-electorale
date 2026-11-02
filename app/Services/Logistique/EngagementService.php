@@ -116,6 +116,49 @@ class EngagementService
     }
 
     /**
+     * Comme etat(), pour préparer une décharge initiale ou de reliquat : le reste est net des besoins de
+     * remplacement (couverts par les seules décharges de remplacement) et ne retranche que ce que les décharges
+     * validées initiales ou de reliquat ont déjà promis. Un article qui n'a qu'un besoin de remplacement n'y figure pas.
+     *
+     * @return Collection<int, array{materiel: Materiel, dotation: int, besoin: int, engage: int, reste: int}>
+     */
+    public function etatInitial(Cycle $cycle, Destinataire $destinataire, ?string $categorie = null): Collection
+    {
+        $etat = $this->etat($cycle, $destinataire, $categorie);
+        if ($etat->isEmpty()) {
+            return $etat;
+        }
+
+        $remplacements = DB::table('besoins_remplacement')
+            ->where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
+            ->whereIn('materiel_id', $etat->keys()->all())
+            ->groupBy('materiel_id')
+            ->selectRaw('materiel_id, SUM(quantite) as total')
+            ->pluck('total', 'materiel_id');
+        $engages = DechargeLigne::query()
+            ->join('decharges', 'decharges.id', '=', 'decharge_lignes.decharge_id')
+            ->where('decharges.cycle_id', $cycle->id)
+            ->where('decharges.destinataire_id', $destinataire->id)
+            ->where('decharges.statut_document', 'validee')
+            ->whereIn('decharges.nature', ['initiale', 'reliquat'])
+            ->whereIn('decharge_lignes.materiel_id', $etat->keys()->all())
+            ->groupBy('decharge_lignes.materiel_id')
+            ->selectRaw('decharge_lignes.materiel_id as materiel_id, SUM(decharge_lignes.quantite) as total')
+            ->pluck('total', 'materiel_id');
+
+        return $etat
+            ->reject(fn (array $e, int $id) => $e['dotation'] === 0 && (int) ($remplacements[$id] ?? 0) > 0)
+            ->map(function (array $e, int $id) use ($remplacements, $engages) {
+                $horsRemplacement = max(0, $e['besoin'] - (int) ($remplacements[$id] ?? 0));
+                $e['engage'] = (int) ($engages[$id] ?? 0);
+                $e['besoin'] = $horsRemplacement;
+                $e['reste'] = max(0, $horsRemplacement - $e['engage']);
+
+                return $e;
+            });
+    }
+
+    /**
      * Dotation, besoin, engagé et reste de tous les destinataires par catégorie, en trois requêtes
      * quel que soit leur nombre (plan, remplacements et clôtures, engagé). Même règle que etat() :
      * le reste se calcule article par article (un surplus sur un article ne compense pas le manque

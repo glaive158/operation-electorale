@@ -331,7 +331,7 @@ class DechargeService
                 throw new RegleLogistique(self::BROUILLON_EXISTANT);
             }
 
-            $etat = $this->engagements->etat($cycle, $destinataire, $origine->categorie);
+            $etat = $this->engagements->etatInitial($cycle, $destinataire, $origine->categorie);
             $lignes = [];
             foreach (DechargeLigne::where('decharge_id', $origine->id)->orderBy('id')->get() as $ancienne) {
                 $entree = $etat->get($ancienne->materiel_id);
@@ -396,7 +396,7 @@ class DechargeService
             }
 
             $destinataire = Destinataire::findOrFail($actuelle->destinataire_id);
-            $etat = $this->engagements->etat($cycle, $destinataire, $actuelle->categorie);
+            $etat = $this->engagements->etatInitial($cycle, $destinataire, $actuelle->categorie);
             $existantes = DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('id')->get();
             $planAvant = (int) $actuelle->plan_dotation_id;
 
@@ -496,13 +496,14 @@ class DechargeService
             return self::BROUILLON_EXISTANT;
         }
 
-        $aExpedier = $this->engagements->etat($cycle, $destinataire, $categorie)->filter(fn (array $e) => $e['reste'] > 0);
+        $aExpedier = $this->engagements->etatInitial($cycle, $destinataire, $categorie)->filter(fn (array $e) => $e['reste'] > 0);
         if ($aExpedier->isEmpty()) {
             return self::RIEN_A_EXPEDIER;
         }
 
         $dejaValidee = Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
-            ->where('categorie', $categorie)->where('statut_document', 'validee')->exists();
+            ->where('categorie', $categorie)->where('statut_document', 'validee')
+            ->whereIn('nature', ['initiale', 'reliquat'])->exists();
 
         $decharge = Decharge::create([
             'cycle_id' => $cycle->id,
