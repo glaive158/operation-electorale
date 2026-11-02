@@ -7,6 +7,7 @@ import { creerApi } from './api.js';
 import { h, remplacer } from './dom.js';
 import { ecranConnexion, ecranListe, ecranReception, ecranRedistribution } from './ecrans.js';
 import { creerFile, STATUTS } from './file.js';
+import { ecranRestitution, ecranRestitutions } from './restitution.js';
 import { creerStockage, demanderStockagePersistant, identifiantAppareil, ouvrirBase } from './stockage.js';
 import { creerSync, telechargerDonnees } from './sync.js';
 import { enAttenteDEnvoi } from './vue.js';
@@ -92,8 +93,12 @@ export async function demarrer(racine) {
         const enAttente = enAttenteDEnvoi(elements);
         const designe = (await stockage.meta.lire('appareil_designe'))?.designe === true;
         const derniere = await stockage.meta.lire('derniere_sync');
+        // L'écran de restitution s'ouvre dès qu'une restitution est téléchargée ou qu'un envoi de restitution existe.
+        const restitutions = ((await stockage.meta.lire('restitutions')) ?? []).length > 0
+            || elements.some((e) => e.type === 'declaration_restitution' || e.type === 'prise_en_charge');
         const liens = etat.session && !etat.sessionExpiree
-            ? [h('a', { href: '#/', class: 'text-sm underline' }, 'Réceptions'), designe ? h('a', { href: '#/redistribution', class: 'text-sm underline' }, 'Redistribution') : null]
+            ? [h('a', { href: '#/', class: 'text-sm underline' }, 'Réceptions'), designe ? h('a', { href: '#/redistribution', class: 'text-sm underline' }, 'Redistribution') : null,
+                restitutions ? h('a', { href: '#/restitutions', class: 'text-sm underline' }, 'Restitution') : null]
             : [];
 
         remplacer(enTete,
@@ -162,7 +167,7 @@ export async function demarrer(racine) {
             const route = location.hash;
             const enSaisie = ecran.contains(document.activeElement) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
             // Les écrans avec saisie ne sont jamais redessinés en arrière-plan.
-            if ((route === '' || route === '#/' || route === '#') && !enSaisie) dessiner();
+            if ((route === '' || route === '#/' || route === '#' || route === '#/restitutions') && !enSaisie) dessiner();
             demanderMiseAJour();
         },
     });
@@ -177,6 +182,8 @@ export async function demarrer(racine) {
                 const route = location.hash.replace(/^#/, '') || '/';
                 if (route.startsWith('/reception/')) contenu = await ecranReception(ctx, decodeURIComponent(route.slice('/reception/'.length)));
                 else if (route === '/redistribution') contenu = await ecranRedistribution(ctx);
+                else if (route === '/restitutions') contenu = await ecranRestitutions(ctx);
+                else if (route.startsWith('/restitution/')) contenu = await ecranRestitution(ctx, decodeURIComponent(route.slice('/restitution/'.length)));
                 else contenu = await ecranListe(ctx);
             }
         } catch (erreur) {

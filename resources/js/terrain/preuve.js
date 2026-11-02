@@ -84,6 +84,37 @@ export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cl
     };
 }
 
+/** Lignes d'une restitution telles que le serveur les reçoit : observation rognée, vide => null, entiers, triées. */
+export function normaliserLignesRestitution(lignes) {
+    return lignes.map((ligne) => {
+        const observation = typeof ligne.observation === 'string' ? rogner(ligne.observation) : null;
+
+        return {
+            materiel_id: entier(ligne.materiel_id),
+            restitue: entier(ligne.restitue ?? 0),
+            observation: observation === '' ? null : observation,
+        };
+    }).sort((a, b) => a.materiel_id - b.materiel_id);
+}
+
+/**
+ * Contenu attesté par le bloc d'une déclaration de restitution : le miroir exact de
+ * PreuveService::contenuPreuveRestitution (PHP). Le compte du signataire est à part (`signataire_user_id`).
+ */
+export function contenuPreuveRestitution({ restitution_id, cle, signataire, signataire_user_id, lignes, horodatage_terminal }) {
+    return {
+        restitution_id: entier(restitution_id),
+        cle,
+        signataire: {
+            nom: rogner(String(signataire?.nom ?? '')),
+            qualite: rogner(String(signataire?.qualite ?? '')),
+        },
+        signataire_user_id: entier(signataire_user_id),
+        lignes: normaliserLignesRestitution(lignes),
+        horodatage_terminal,
+    };
+}
+
 /**
  * Construit le bloc de preuve.
  *

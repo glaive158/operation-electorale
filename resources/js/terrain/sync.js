@@ -1,6 +1,6 @@
 /**
- * Synchronisation de la tablette : envoi de la file (pièces, déclarations, redistributions, libérations) puis
- * téléchargement des affectations. Un seul passage à la fois (single-flight) ; déclenché au démarrage, au
+ * Synchronisation de la tablette : envoi de la file (pièces, déclarations, redistributions, libérations,
+ * déclarations de restitution et prises en charge) puis téléchargement des affectations et des restitutions. Un seul passage à la fois (single-flight) ; déclenché au démarrage, au
  * retour du réseau (`online`), à la demande et toutes les 60 secondes.
  *
  * Règles d'envoi :
@@ -15,7 +15,7 @@
  *    réussie, reconnecte() la fait reprendre.
  */
 
-import { STATUTS } from './file.js';
+import { STATUTS, TYPES_DECLARATION } from './file.js';
 
 export const INTERVALLE_MS = 60_000;
 
@@ -30,6 +30,19 @@ export function corpsDeclaration(e) {
         bloc_preuve: e.bloc_preuve,
         pieces: (e.pieces ?? []).map(({ empreinte, role }) => ({ empreinte, role })),
         gps: e.gps ?? null,
+    };
+}
+
+/** Corps de POST /restitutions/{restitution}/declarations : comme une réception, sans position. */
+export function corpsDeclarationRestitution(e) {
+    return {
+        mode: 'tablette',
+        cle: e.cle,
+        horodatage_terminal: e.horodatage_terminal,
+        signataire: e.signataire,
+        lignes: e.lignes,
+        bloc_preuve: e.bloc_preuve,
+        pieces: (e.pieces ?? []).map(({ empreinte, role }) => ({ empreinte, role })),
     };
 }
 
@@ -98,7 +111,9 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
             }
         }
 
-        return api.envoyer('POST', `/remises/${e.remise_id}/declarations`, { json: corpsDeclaration(e) });
+        return e.type === 'declaration_restitution'
+            ? api.envoyer('POST', `/restitutions/${e.restitution_id}/declarations`, { json: corpsDeclarationRestitution(e) })
+            : api.envoyer('POST', `/remises/${e.remise_id}/declarations`, { json: corpsDeclaration(e) });
     }
 
     function envoyerElement(e, tentes) {
@@ -106,7 +121,10 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
             case 'piece':
                 return deposerPiece(e.empreinte);
             case 'declaration':
+            case 'declaration_restitution':
                 return envoyerDeclaration(e, tentes);
+            case 'prise_en_charge':
+                return api.envoyer('POST', `/restitutions/${e.restitution_id}/prise-en-charge`);
             case 'redistribution':
                 return api.envoyer('POST', `/decharges/${e.decharge_id}/redistributions`, { json: corpsRedistribution(e), avecAppareil: true });
             case 'liberation':
@@ -126,7 +144,7 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         for (const empreinte of empreintes) {
             const element = elements.find((x) => x.type === 'piece' && x.empreinte === empreinte);
             const aGarder = element?.statut === STATUTS.A_VERIFIER || element?.statut === STATUTS.EN_ATTENTE;
-            const utilisee = elements.some((x) => x.type === 'declaration' && x.id !== sauf
+            const utilisee = elements.some((x) => TYPES_DECLARATION.includes(x.type) && x.id !== sauf
                 && x.statut !== STATUTS.SYNCHRONISE && (x.pieces ?? []).some((p) => p.empreinte === empreinte));
             if (!aGarder && !utilisee) await pieces.supprimer(empreinte);
         }
@@ -166,7 +184,7 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
             if (issue.status === 401) return { envoyes, session: false };
             if (marque.statut === STATUTS.SYNCHRONISE) {
                 envoyes += 1;
-                if (element.type === 'declaration') await allegerPieces((element.pieces ?? []).map((p) => p.empreinte), element.id);
+                if (TYPES_DECLARATION.includes(element.type)) await allegerPieces((element.pieces ?? []).map((p) => p.empreinte), element.id);
                 // Une pièce partie après sa déclaration (envoi interrompu) : ses octets ne servent plus.
                 if (element.type === 'piece') await allegerPieces([element.empreinte]);
                 if (element.type === 'redistribution' || element.type === 'liberation') await majReserve(element, issue);
@@ -255,6 +273,21 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
     };
 }
 
+/**
+ * Les restitutions téléchargées (à part des affectations : leur forme diffère) sont rangées dans les réglages
+ * locaux. Une restitution que la file attend encore (déclaration ou prise en charge non enregistrée) est gardée
+ * même si le serveur ne la renvoie plus. Une réponse sans liste laisse les précédentes.
+ */
+async function rangerRestitutions({ restitutions, file, meta, maintenant }) {
+    if (!Array.isArray(restitutions)) return;
+    const attendues = new Set(file.filter((f) => (f.type === 'declaration_restitution' || f.type === 'prise_en_charge')
+        && (f.statut === STATUTS.EN_ATTENTE || f.statut === STATUTS.A_VERIFIER)).map((f) => f.restitution_id));
+    const recues = restitutions.map((r) => ({ ...r, telecharge_le: maintenant() }));
+    const ids = new Set(recues.map((r) => r.id));
+    const gardees = ((await meta.lire('restitutions')) ?? []).filter((r) => !ids.has(r.id) && attendues.has(r.id));
+    await meta.ecrire('restitutions', [...recues, ...gardees]);
+}
+
 /** Identifiant local d'une affectation téléchargée. */
 export const idElement = (element) => (element.remise ? `remise-${element.remise.id}` : `preparation-${element.decharge.id}`);
 
@@ -283,6 +316,7 @@ export async function telechargerDonnees({ api, elements, file, meta, maintenant
         if (!nouveaux.has(ancien.id) && !attendus.has(ancien.id)) await elements.delete(ancien.id);
     }
     for (const element of recus) await elements.put(element);
+    await rangerRestitutions({ restitutions: affectations.corps.restitutions, file: file_, meta, maintenant });
 
     const cle = await api.envoyer('GET', '/cle-preuve');
     if (cle.status === 200 && typeof cle.corps?.pem === 'string') {

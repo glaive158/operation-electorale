@@ -14,6 +14,9 @@
  *                 bloc_preuve : chaîne (code chiffré) ou null (repli « signer sans code », identité non vérifiée)
  *   redistribution{ id, cle, horodatage_terminal, decharge_id, ... }
  *   liberation    { id, decharge_id, ... }                                          -> DELETE .../reserve
+ *   declaration_restitution { id, cle, horodatage_terminal, restitution_id, bloc_preuve, pieces, ... }
+ *                 mêmes règles que `declaration` (bloc, pièces)                    -> POST /restitutions/{id}/declarations
+ *   prise_en_charge { id, restitution_id, ... }                                    -> POST /restitutions/{id}/prise-en-charge
  *   autre type    uniquement à l'état `disponible` (données téléchargées, rien à envoyer).
  * Le corps de la requête et l'URL restent l'affaire de sync.js ; la file garde l'élément tel qu'il a été
  * ajouté (cle, bloc_preuve, horodatage_terminal ne sont jamais modifiés : le bloc chiffré n'est jamais refait).
@@ -39,7 +42,9 @@ export const STATUTS = Object.freeze({
 export const MESSAGE_EN_COURS = 'Déclaration en cours de traitement, réessayez.';
 export const MESSAGE_CLE_REUTILISEE = 'Clé d\'idempotence déjà utilisée pour un autre contenu.';
 
-const TYPES_ENVOYES = ['piece', 'declaration', 'redistribution', 'liberation'];
+const TYPES_ENVOYES = ['piece', 'declaration', 'redistribution', 'liberation', 'declaration_restitution', 'prise_en_charge'];
+/** Les déclarations portent un bloc de preuve et annoncent des pièces. */
+export const TYPES_DECLARATION = Object.freeze(['declaration', 'declaration_restitution']);
 const FORMAT_CLE = /^[A-Za-z0-9-]{16,64}$/;
 const FORMAT_EMPREINTE = /^[0-9a-f]{64}$/;
 const FORMAT_HORODATAGE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
@@ -100,14 +105,20 @@ function valider(element) {
     } else if (copie.type === 'liberation') {
         if (typeof copie.id !== 'string' || copie.id === '') throw new TypeError('Identifiant d\'élément manquant.');
         if (!Number.isInteger(copie.decharge_id)) throw new TypeError('Décharge manquante.');
+    } else if (copie.type === 'prise_en_charge') {
+        if (!Number.isInteger(copie.restitution_id)) throw new TypeError('Restitution manquante.');
+        if (typeof copie.id !== 'string' || copie.id === '') throw new TypeError('Identifiant d\'élément manquant.');
     } else {
+        if (copie.type === 'declaration_restitution' && !Number.isInteger(copie.restitution_id)) {
+            throw new TypeError('Restitution manquante.');
+        }
         if (typeof copie.cle !== 'string' || !FORMAT_CLE.test(copie.cle)) {
             throw new TypeError('Clé d\'idempotence invalide (16 à 64 caractères A-Z a-z 0-9 -).');
         }
         if (typeof copie.horodatage_terminal !== 'string' || !FORMAT_HORODATAGE.test(copie.horodatage_terminal)) {
             throw new TypeError('Horodatage invalide : Y-m-dTH:i:s+HH:MM attendu.');
         }
-        if (copie.type === 'declaration') {
+        if (TYPES_DECLARATION.includes(copie.type)) {
             // null : repli sans code, explicitement choisi (le serveur tient l'identité pour non vérifiée).
             if (copie.bloc_preuve !== null && (typeof copie.bloc_preuve !== 'string' || copie.bloc_preuve === '')) {
                 throw new TypeError('Bloc de preuve manquant.');
@@ -195,12 +206,15 @@ export function creerFile({ stockage, horloge = () => Date.now(), delaiReessaiMs
             // la pièce reste en file et le serveur la rattache à son arrivée (§13 « photo interrompue »).
             const piecesJamaisTentees = new Set(enAttente.filter((e) => e.type === 'piece' && !(e.tentatives > 0)).map((e) => e.empreinte));
             const redistributions = new Set(enAttente.filter((e) => e.type === 'redistribution').map((e) => e.decharge_id));
+            // La prise en charge d'un retour suit la déclaration de restitution faite sur la tablette.
+            const restitutionsDeclarees = new Set(enAttente.filter((e) => e.type === 'declaration_restitution').map((e) => e.restitution_id));
 
             const envoyable = (e) => {
                 if (exclure?.has(e.id)) return false;
                 if (!ignorerPasAvant && e.pas_avant !== undefined && e.pas_avant > maintenant) return false;
-                if (e.type === 'declaration') return !e.pieces.some((p) => piecesJamaisTentees.has(p.empreinte));
+                if (TYPES_DECLARATION.includes(e.type)) return !e.pieces.some((p) => piecesJamaisTentees.has(p.empreinte));
                 if (e.type === 'liberation') return !redistributions.has(e.decharge_id);
+                if (e.type === 'prise_en_charge') return !restitutionsDeclarees.has(e.restitution_id);
 
                 return true;
             };

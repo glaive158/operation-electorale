@@ -269,3 +269,41 @@ test('demarrage : stockage persistant demande au navigateur, resultat affiche a 
         Object.defineProperty(globalThis, 'navigator', original);
     }
 });
+
+test('restitution : lien dans l\'en-tete une fois des restitutions telechargees, ecran de liste et de declaration', async () => {
+    indexedDB.bases.clear();
+    globalThis.location.hash = '';
+    const restitution = {
+        id: 41, statut: 'a_preparer', cycle: 'Présidentielle 2027', detenteur: { type: 'destinataire', id: 18, nom: 'Sous-préfecture de Sindia' },
+        autorite_attendue: { user_id: 7, nom: 'Awa Ba', qualite: 'Sous-préfète', delegues: [] },
+        lignes: [{ materiel_id: 3, libelle: 'Urnes', attendu: 100 }],
+        declaration_retenue: false, arbitrage_en_attente: false, peut_declarer_tablette: true, peut_prendre_en_charge: false, empreinte_element: 'x',
+    };
+    reseau({ 'GET /affectations': { status: 200, corps: { genere_le: 'x', elements: [element], restitutions: [restitution] } } });
+    const racine = new Element('div');
+    const ctx = await demarrer(racine);
+    try {
+        assert.equal(parTexte(racine, 'a', 'Restitution'), null, 'pas de lien avant la connexion');
+        parId(racine, 'connexion-email').value = 'agent@exemple.sn';
+        parId(racine, 'connexion-mdp').value = 'mot-de-passe';
+        await trouverTous(racine, (e) => e.tagName === 'FORM')[0].emettre('submit');
+        await attendre(async () => (await ctx.stockage.meta.lire('derniere_sync')) !== undefined);
+        await ctx.rafraichir();
+
+        const lienRestitution = parTexte(racine, 'a', 'Restitution');
+        assert.equal(lienRestitution.getAttribute('href'), '#/restitutions');
+
+        globalThis.location.hash = '#/restitutions';
+        await ctx.rafraichir();
+        assert.match(racine.textContent, /Sous-préfecture de Sindia/);
+        assert.ok(trouverTous(racine, (e) => e.tagName === 'A' && e.getAttribute('href') === '#/restitution/41').length);
+
+        globalThis.location.hash = '#/restitution/41';
+        await ctx.rafraichir();
+        assert.ok(parTexte(racine, 'button', 'Continuer'));
+        assert.match(racine.textContent, /Matériel rendu/);
+    } finally {
+        globalThis.location.hash = '';
+        ctx.arreter();
+    }
+});
