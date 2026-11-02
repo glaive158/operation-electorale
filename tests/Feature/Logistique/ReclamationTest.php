@@ -14,6 +14,7 @@ use App\Models\Logistique\Remise;
 use App\Models\User;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EngagementService;
+use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\ReclamationService;
 use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\StockService;
@@ -406,6 +407,22 @@ class ReclamationTest extends TestCase
         $this->assertSame('resolue', $decharge->refresh()->statut_reclamation);
     }
 
+    public function test_cloture_sans_remplacement_apres_cloture_du_cycle_passe_l_indicateur_en_cloture_avec_ecart(): void
+    {
+        $decharge = $this->partie();
+        $this->deposerRecue($decharge, [$this->urnes->id => 90]);
+        app(StockService::class)->cloturerCycle($this->cycle, 'Fin du cycle');
+        $reclamation = $this->ouvrir($decharge, 10);
+
+        $this->service()->resoudre($reclamation, 'cloture_sans_remplacement', 'Écart accepté après le scrutin.');
+
+        $this->assertSame(['resolue', 'cloture_sans_remplacement'], [$reclamation->refresh()->statut, $reclamation->issue]);
+        $this->assertSame(10, Arbitrage::sole()->quantite_abandon_reception);
+        $ligne = collect(app(IndicateurService::class)->parDestinataire($this->cycle->refresh()))
+            ->first(fn ($l) => $l['destinataire']->is($this->prefecture));
+        $this->assertSame('cloture_avec_ecart', $ligne['etat']);
+    }
+
     public function test_cloture_sans_remplacement_sans_reste_a_receptionner_ne_cree_pas_d_arbitrage(): void
     {
         $decharge = $this->partie();
@@ -437,9 +454,13 @@ class ReclamationTest extends TestCase
         $this->assertSame('resolue', $retrouvee->refresh()->statut);
 
         $this->refus(fn () => $this->service()->resoudre($remplacement, 'remplacement_autorise', 'Motif.', 4), 'Cycle clôturé : décharge de remplacement impossible.');
-        $this->refus(fn () => $this->service()->resoudre($cloture, 'cloture_sans_remplacement', 'Motif.'), "Cycle clôturé : clôture d'écart impossible.");
         $this->assertSame(0, BesoinRemplacement::count());
         $this->assertSame(0, Arbitrage::count());
+
+        // Un abandon seul ne déplace aucun stock : la clôture sans remplacement reste possible après la clôture du cycle.
+        $this->service()->resoudre($cloture, 'cloture_sans_remplacement', 'Motif.');
+        $this->assertSame(['resolue', 'cloture_sans_remplacement'], [$cloture->refresh()->statut, $cloture->issue]);
+        $this->assertSame([5, 0], [Arbitrage::sole()->quantite_abandon_reception, Arbitrage::sole()->quantite_expedition_annulee]);
 
         $this->service()->resoudre($erreur, 'erreur_declaration', 'Saisie erronée.', null, $declaration);
         $this->assertSame('remplacee', $declaration->refresh()->statut);

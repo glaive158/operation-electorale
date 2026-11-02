@@ -74,7 +74,9 @@ class ArbitrageService
             if ($actuel === null) {
                 throw new LogicException('Cycle introuvable : invariant rompu.');
             }
-            if (! $actuel->estOuvert()) {
+            // Un abandon seul ne déplace aucun stock et ne libère aucune réservation : il reste possible après la
+            // clôture du cycle (les réclamations de terrain arrivent après l'élection).
+            if ($expeditionAnnulee > 0 && ! $actuel->estOuvert()) {
                 throw new RegleLogistique('Cycle clôturé : clôture d\'écart impossible.');
             }
 

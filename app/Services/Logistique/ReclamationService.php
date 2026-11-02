@@ -189,9 +189,6 @@ class ReclamationService
                     break;
 
                 case 'cloture_sans_remplacement':
-                    if (! $cycle->estOuvert()) {
-                        throw new RegleLogistique("Cycle clôturé : clôture d'écart impossible.");
-                    }
                     $destinataire = Destinataire::findOrFail($decharge->destinataire_id);
                     $materiel = Materiel::findOrFail($actuelle->materiel_id);
                     // L'abandon ne dépasse pas ce qu'il reste à réceptionner (un remplacement partiel a pu en couvrir une part).

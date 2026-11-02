@@ -242,7 +242,17 @@ class ClotureEcartTest extends TestCase
         Cycle::whereKey($this->cycle->id)->update(['statut' => 'clos']);
 
         $this->refus(fn () => $this->cloturer(0, 10), 'Cycle clôturé : clôture d\'écart impossible.');
+        $this->refus(fn () => $this->cloturer(5, 10), 'Cycle clôturé : clôture d\'écart impossible.');
         $this->assertSame(0, Arbitrage::count());
+    }
+
+    public function test_cycle_cloture_accepte_un_abandon_seul(): void
+    {
+        Cycle::whereKey($this->cycle->id)->update(['statut' => 'clos']);
+
+        $arbitrage = $this->cloturer(10, 0);
+
+        $this->assertSame([10, 0], [$arbitrage->quantite_abandon_reception, $arbitrage->quantite_expedition_annulee]);
     }
 
     public function test_proposition_de_commande_reduite(): void
