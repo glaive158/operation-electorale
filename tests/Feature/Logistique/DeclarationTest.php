@@ -349,6 +349,76 @@ class DeclarationTest extends TestCase
         $this->assertSame('a_verifier', $seconde->refresh()->statut_acheminement);
     }
 
+    public function test_anomalie_d_une_declaration_met_les_deux_a_verifier_sans_divergence(): void
+    {
+        $decharge = $this->chargee();
+        $remise = $this->livraison($decharge);
+        $ancien = $decharge->agent;
+        $decharge->forceFill(['agent_id' => User::factory()->create(['role' => 'agent_transport'])->id])->save();
+
+        // Contenus identiques, mais la tablette vient d'un agent qui n'est plus affecté.
+        $tablette = $this->declarer($ancien, $remise, 'tablette', $this->lignes($remise, 100));
+        $compte = $this->declarer($this->autoriteFictive($this->prefecture), $remise, 'compte', $this->lignes($remise, 100));
+
+        $this->assertSame('a_verifier', $tablette->refresh()->statut);
+        $this->assertSame('a_verifier', $compte->refresh()->statut);
+        $this->assertSame(['affectation_retiree'], $tablette->anomalies);
+        $this->assertNull($compte->anomalies);
+        $this->assertSame(0, JournalEntree::where('action', 'divergence_declarations')->count());
+        $this->assertSame('a_verifier', $remise->refresh()->statut);
+        $this->assertSame('a_verifier', $decharge->refresh()->statut_acheminement);
+    }
+
+    public function test_declaration_retenue_repasse_a_verifier_et_le_journal_garde_la_trace(): void
+    {
+        $decharge = $this->chargee();
+        $remise = $this->livraison($decharge);
+        $ancien = $decharge->agent;
+        $decharge->forceFill(['agent_id' => User::factory()->create(['role' => 'agent_transport'])->id])->save();
+
+        $compte = $this->declarer($this->autoriteFictive($this->prefecture), $remise, 'compte', $this->lignes($remise, 100));
+        $this->assertSame('retenue', $compte->statut);
+        $this->assertSame('recue', $remise->refresh()->statut);
+
+        $tablette = $this->declarer($ancien, $remise, 'tablette', $this->lignes($remise, 100));
+
+        $this->assertSame('a_verifier', $compte->refresh()->statut);
+        $this->assertSame('a_verifier', $tablette->refresh()->statut);
+        $this->assertNull($compte->anomalies);
+        $this->assertSame('a_verifier', $remise->refresh()->statut);
+        $this->assertSame('a_verifier', $decharge->refresh()->statut_acheminement);
+
+        $entree = JournalEntree::where('action', 'statut_declaration')->where('objet_type', 'declaration')
+            ->where('objet_id', $compte->id)->latest('id')->firstOrFail();
+        $this->assertSame('retenue', $entree->avant['statut']);
+        $this->assertSame('a_verifier', $entree->apres['statut']);
+        // La tablette naît déjà à vérifier : aucun changement de statut à tracer pour elle.
+        $this->assertSame(0, JournalEntree::where('action', 'statut_declaration')->where('objet_id', $tablette->id)->count());
+    }
+
+    public function test_apres_retenue_appele_directement_apres_un_changement_de_statut(): void
+    {
+        $decharge = $this->chargee($this->sousPrefecture1, 100);
+        $livraison = $this->livraison($decharge);
+        $this->declarer($this->autoriteFictive($this->prefecture), $livraison, 'compte', $this->lignes($livraison, 100));
+        $redistribution = $this->redistribution($decharge, 40);
+        $this->declarer($this->autoriteFictive($this->sousPrefecture1), $redistribution, 'compte', $this->lignes($redistribution, 40));
+        $service = app(DeclarationService::class);
+        $this->assertSame('recue_destinataire', $decharge->refresh()->statut_acheminement);
+
+        // Une remise passée à vérifier à la main : la décharge l'est aussi.
+        $redistribution->forceFill(['statut' => 'a_verifier'])->save();
+        $service->apresRetenue($redistribution);
+        $this->assertSame('a_verifier', $decharge->refresh()->statut_acheminement);
+
+        // Redevenue reçue, avec une déclaration retenue chez le destinataire final.
+        $redistribution->forceFill(['statut' => 'recue'])->save();
+        $service->apresRetenue($redistribution);
+        $this->assertSame('recue_destinataire', $decharge->refresh()->statut_acheminement);
+        $this->assertSame(1, JournalEntree::where('action', 'acheminement_decharge')->where('objet_id', $decharge->id)
+            ->where('apres->statut_acheminement', 'a_verifier')->count());
+    }
+
     public function test_hors_perimetre_refuse(): void
     {
         $decharge = $this->chargee();

@@ -151,6 +151,8 @@ class DeclarationService
      * anomalie : « à vérifier » tant qu'une de ses remises l'est ; sinon « reçue par le destinataire » si le
      * destinataire final a une déclaration retenue, « reçue par l'intermédiaire » si une autre remise en a une,
      * et « chargée » si aucune ne l'est. Une redistribution partielle laisse la décharge reçue par le destinataire.
+     *
+     * Hors de declarer(), l'appelant détient déjà le verrou du cycle (ordre des verrous : cycle d'abord).
      */
     public function apresRetenue(Remise $remise): void
     {
@@ -314,6 +316,11 @@ class DeclarationService
             if ($cible === 'retenue') {
                 Journal::noter('declaration', $declaration->id, 'retenue_declaration', ['statut' => $avant], [
                     'statut' => 'retenue', 'remise_id' => $remise->id, 'mode' => $declaration->mode,
+                ]);
+            }
+            if ($cible !== $avant) {
+                Journal::noter('declaration', $declaration->id, 'statut_declaration', ['statut' => $avant], [
+                    'statut' => $cible, 'remise_id' => $remise->id, 'anomalies' => $anomalies,
                 ]);
             }
         }
