@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Logistique;
 
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\CircuitDepartement;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
@@ -85,6 +86,51 @@ class EcransDechargesTest extends TestCase
         $this->get(route('logistique.decharges.pdf', [$decharge, 'reception']))->assertNotFound();
     }
 
+    public function test_exemplaire_de_reception_depuis_la_fiche(): void
+    {
+        $this->preparerPlan();
+        $chargee = $this->deposerChargee($this->prefecture, [$this->urnes->id => 100]);
+        $this->actingAs($this->gestionnaire);
+
+        $this->get(route('logistique.decharges.show', $chargee))
+            ->assertOk()->assertDontSee('Exemplaire de réception');
+        $this->get(route('logistique.decharges.pdf', [$chargee, 'reception']))->assertNotFound();
+
+        $this->actingAs($this->responsable);
+        $this->deposerRecue($chargee, [$this->urnes->id => 100]);
+        $this->actingAs($this->gestionnaire);
+
+        $this->get(route('logistique.decharges.show', $chargee))
+            ->assertOk()->assertSee('Exemplaire de réception')->assertSee('Non émis')->assertSee('Émettre le PDF');
+        $this->post(route('logistique.decharges.emettre', $chargee), ['exemplaire' => 'reception'])
+            ->assertSessionHas('success');
+
+        $this->get(route('logistique.decharges.show', $chargee))
+            ->assertOk()->assertSee(route('logistique.decharges.pdf', [$chargee, 'reception']), false);
+        $reponse = $this->get(route('logistique.decharges.pdf', [$chargee, 'reception']));
+        $reponse->assertOk();
+        $this->assertStringStartsWith('%PDF', $reponse->getContent());
+    }
+
+    public function test_besoin_affiche_a_cote_de_la_dotation_avec_un_remplacement(): void
+    {
+        $this->preparerPlan();
+        $decharge = $this->dechargeValidee(100);
+        BesoinRemplacement::create([
+            'cycle_id' => $this->cycle->id, 'destinataire_id' => $this->prefecture->id, 'materiel_id' => $this->urnes->id,
+            'quantite' => 10, 'motif' => 'Matériel perdu', 'autorise_par' => $this->responsable->id,
+        ]);
+        $this->actingAs($this->gestionnaire);
+
+        // Dotation 100, besoin 110, engagé 100, reste 10.
+        $this->get(route('logistique.expeditions.index', $this->cycle))
+            ->assertOk()->assertSeeInOrder(['Dotation', 'Besoin', 'Engagé', 'Reste', 'Préfecture de Thiès', '100', '110', '100', '10']);
+        $this->get(route('logistique.ecarts.index', $this->cycle))
+            ->assertOk()->assertSeeInOrder(['Dotation', 'Besoin', 'Engagé', 'Préfecture de Thiès', 'Urnes', '100', '110', '100']);
+        $this->get(route('logistique.decharges.show', $decharge))
+            ->assertOk()->assertSeeInOrder(['Dotation approuvée', 'Besoin', 'Déjà engagé', 'Urnes', '100', '110']);
+    }
+
     public function test_apercu_du_brouillon_en_ligne(): void
     {
         $this->preparerPlan();
@@ -128,7 +174,10 @@ class EcransDechargesTest extends TestCase
             ->assertSessionHas('success');
         $this->assertSame(1, DechargeDocument::where('exemplaire', 'initial')->count());
 
+        // L'exemplaire de réception est connu, mais pas émissible tant que le destinataire n'a rien reçu.
         $this->post(route('logistique.decharges.emettre', $decharge), ['exemplaire' => 'reception'])
+            ->assertSessionHasNoErrors()->assertSessionHas('error', 'Ce document ne peut pas être émis pour cette décharge.');
+        $this->post(route('logistique.decharges.emettre', $decharge), ['exemplaire' => 'inconnu'])
             ->assertSessionHasErrors('exemplaire');
         $this->get(route('logistique.decharges.show', $decharge))
             ->assertOk()->assertDontSee('Émettre le PDF');
@@ -506,12 +555,12 @@ class EcransDechargesTest extends TestCase
         $html = $this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent();
         [$entetes, $cellules] = $this->colonnesFiche($html);
         $this->assertSame($entetes, $cellules);
-        $this->assertSame(5, $entetes);
+        $this->assertSame(6, $entetes);
 
         $decharge->lignes()->delete();
         $html = $this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent();
         [, , $vide] = $this->colonnesFiche($html);
-        $this->assertStringContainsString('colspan="5"', $vide);
+        $this->assertStringContainsString('colspan="6"', $vide);
     }
 
     public function test_fiche_d_un_brouillon_sur_cycle_ouvert_garde_des_colonnes_alignees(): void
@@ -522,7 +571,7 @@ class EcransDechargesTest extends TestCase
 
         [$entetes, $cellules] = $this->colonnesFiche($this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent());
 
-        $this->assertSame(6, $entetes);
-        $this->assertSame(6, $cellules);
+        $this->assertSame(7, $entetes);
+        $this->assertSame(7, $cellules);
     }
 }

@@ -20,9 +20,11 @@
     $exemplairesAttendus = array_filter([
         'initial' => $decharge->statut_document !== 'brouillon',
         'annulation' => $annulee,
+        'reception' => $decharge->documents->contains('exemplaire', 'reception')
+            || ($decharge->statut_document === 'validee' && $decharge->statut_acheminement === 'recue_destinataire'),
     ]);
     $documents = $decharge->documents->keyBy('exemplaire');
-    $libellesExemplaire = ['initial' => 'Décharge', 'annulation' => 'Exemplaire d\'annulation'];
+    $libellesExemplaire = ['initial' => 'Décharge', 'annulation' => 'Exemplaire d\'annulation', 'reception' => 'Exemplaire de réception'];
 @endphp
 
 @section('content')
@@ -95,6 +97,7 @@
                     <tr class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
                         <th class="px-5 py-3 text-left font-semibold">Article</th>
                         <th class="px-5 py-3 text-right font-semibold">Dotation approuvée</th>
+                        <th class="px-5 py-3 text-right font-semibold">Besoin</th>
                         <th class="px-5 py-3 text-right font-semibold">Déjà engagé</th>
                         <th class="px-5 py-3 text-right font-semibold">Cette expédition</th>
                         <th class="px-5 py-3 text-left font-semibold">Observations</th>
@@ -110,6 +113,7 @@
                                 @if($l->cle_affichee) <span class="block text-xs font-normal text-slate-500">{{ $l->cle_affichee }}</span> @endif
                             </td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($l->dotation_approuvee) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-600">{{ $n($etat->get($l->materiel_id)['besoin'] ?? 0) }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($engage) }}</td>
                             @if($brouillon && $ouvert)
                                 <td class="px-5 py-3 text-right">
@@ -130,7 +134,7 @@
                             @endif
                         </tr>
                     @empty
-                        <tr><td colspan="{{ $brouillon && $ouvert ? 6 : 5 }}" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
+                        <tr><td colspan="{{ $brouillon && $ouvert ? 7 : 6 }}" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
                     @endforelse
                 </tbody>
             </table>

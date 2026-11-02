@@ -138,7 +138,7 @@
 @foreach($reception['declarations'] as $declaration)
     <div class="declaration">
         <strong>{{ $declaration['statut_libelle'] }}</strong> — {{ \App\Models\Logistique\Remise::ETAPES[$declaration['etape']] }}, mode {{ $declaration['mode'] }} —
-        {{ $declaration['signataire_nom'] }}, {{ $declaration['signataire_qualite'] }} —
+        {{ $declaration['signataire_nom'] }}@if(filled($declaration['signataire_qualite'])), {{ $declaration['signataire_qualite'] }}@endif —
         terminal : {{ $horodatage($declaration['horodatage_terminal']) }} ; serveur : {{ $horodatage($declaration['horodatage_serveur']) }}<br>
         @foreach($declaration['lignes'] as $l)
             {{ $l['libelle'] }} : reçu {{ $nombre($l['recu']) }}, défectueux {{ $nombre($l['defectueux']) }}@if(filled($l['observation'])) ({{ $l['observation'] }})@endif{{ $loop->last ? '' : ' ;' }}

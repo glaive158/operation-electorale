@@ -77,10 +77,9 @@ class DechargeController extends Controller
             'lignes.materiel',
         ]);
 
-        // Un brouillon n'a pas encore figé son engagé : on montre l'état courant du destinataire.
-        $etat = $decharge->estBrouillon()
-            ? $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie)
-            : collect();
+        // Un brouillon n'a pas encore figé son engagé : on montre l'état courant du destinataire. Le besoin
+        // (dotation, remplacements et clôtures) se lit toujours sur l'état courant.
+        $etat = $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie);
 
         return view('logistique.decharges.show', [
             'decharge' => $decharge,
@@ -188,7 +187,7 @@ class DechargeController extends Controller
 
     public function emettre(Request $request, Decharge $decharge)
     {
-        $donnees = $request->validate(['exemplaire' => ['required', Rule::in(['initial', 'annulation'])]]);
+        $donnees = $request->validate(['exemplaire' => ['required', Rule::in(DechargeDocument::EXEMPLAIRES)]]);
 
         return $this->executer(fn () => $this->pdf->emettre($decharge, $donnees['exemplaire']), 'PDF émis et archivé.');
     }
@@ -217,7 +216,7 @@ class DechargeController extends Controller
     /** Exemplaire archivé, servi après contrôle de son empreinte. */
     public function pdf(Decharge $decharge, string $exemplaire)
     {
-        abort_unless(in_array($exemplaire, ['initial', 'annulation'], true), 404);
+        abort_unless(in_array($exemplaire, DechargeDocument::EXEMPLAIRES, true), 404);
         $document = DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', $exemplaire)->firstOrFail();
 
         try {

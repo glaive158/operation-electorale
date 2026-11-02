@@ -132,11 +132,13 @@ class PdfReceptionTest extends TestCase
         $this->assertSame(strlen($octets), $premier->taille);
 
         // Une réception arbitrée plus tard n'altère pas l'exemplaire déjà émis : le fichier archivé fait foi.
+        $avant = DonneesDecharge::reception($decharge);
         $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->sole();
         $this->declarerTablette($decharge, $remise, 60);
         $this->assertSame('a_verifier', $remise->refresh()->statut);
         $tablette = $remise->declarations()->where('mode', 'tablette')->sole();
         app(ArbitrageService::class)->retenir($tablette, 'Constat de l\'agent.');
+        $this->assertNotEquals($avant, DonneesDecharge::reception($decharge->refresh()), 'Les données vivantes de la réception ont bien changé.');
 
         $second = $this->pdf()->emettre($decharge->refresh(), 'reception');
 
@@ -147,6 +149,48 @@ class PdfReceptionTest extends TestCase
         $this->assertSame(1, DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', 'reception')->count());
         $this->assertSame(1, JournalEntree::where('objet_id', $decharge->id)->where('action', 'emission_pdf')->count());
         $this->assertCount(1, $disque->allFiles());
+    }
+
+    public function test_exemplaire_emis_reste_lisible_quand_la_reception_repasse_a_verifier(): void
+    {
+        $decharge = $this->dechargeRecue();
+        $document = $this->pdf()->emettre($decharge, 'reception');
+        $octets = $this->pdf()->contenu($document);
+
+        $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->sole();
+        $this->declarerTablette($decharge, $remise, 60);
+        $this->assertSame('a_verifier', $decharge->refresh()->statut_acheminement);
+
+        $this->assertSame($octets, $this->pdf()->contenu($document->refresh()));
+        $this->assertSame($document->id, $this->pdf()->emettre($decharge, 'reception')->id);
+    }
+
+    public function test_reception_non_emise_refusee_quand_la_reception_est_a_verifier(): void
+    {
+        $decharge = $this->dechargeRecue();
+        $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->sole();
+        $this->declarerTablette($decharge, $remise, 60);
+        $this->assertSame('a_verifier', $decharge->refresh()->statut_acheminement);
+
+        try {
+            $this->pdf()->emettre($decharge, 'reception');
+            $this->fail('Une réception à vérifier ne s\'émet pas.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Ce document ne peut pas être émis pour cette décharge.', $e->getMessage());
+        }
+        $this->assertSame(0, DechargeDocument::count());
+    }
+
+    public function test_declaration_sans_qualite_sans_virgule_pendante(): void
+    {
+        $decharge = $this->dechargeRecue();
+        Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->sole()
+            ->declarations()->sole()->forceFill(['signataire_qualite' => ''])->save();
+
+        $texte = $this->texte($this->pdf()->html($decharge, 'reception'));
+
+        $this->assertStringContainsString('Signataire de test —', $texte);
+        $this->assertStringNotContainsString('Signataire de test, —', $texte);
     }
 
     public function test_reception_ne_compte_que_les_declarations_retenues(): void
