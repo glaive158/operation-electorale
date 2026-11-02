@@ -24,12 +24,18 @@ export const LIBELLES_ETAPE = Object.freeze({
     redistribution: 'Redistribution',
 });
 
+/**
+ * États d'identité d'une déclaration envoyée. Mêmes libellés que le central (Declaration::VERIFICATIONS), sauf
+ * a_verifier et echec, volontairement plus explicites : ils disent à l'agent de terrain qui vérifie la suite.
+ */
 export const LIBELLES_VERIFICATION = Object.freeze({
-    verifiee_code: 'Identité vérifiée par le code',
+    en_attente: 'Vérification en attente',
+    verifiee_code: 'Vérifiée par code',
+    verifiee_appareil: 'Vérifiée par l\'appareil',
+    non_verifiee: 'Non vérifiée',
     a_verifier: 'Identité à vérifier par le service logistique',
-    echec: 'Code non reconnu : identité à vérifier par le service logistique',
-    non_verifiee: 'Identité non vérifiée',
-    compte: 'Identité vérifiée par le compte',
+    echec: 'Échec du code : identité à vérifier par le service logistique',
+    compte: 'Confirmée depuis le compte',
 });
 
 const declarationsActives = (file) => file.filter((e) => e.type === 'declaration');

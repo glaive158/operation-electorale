@@ -102,7 +102,7 @@ export async function demarrer(racine) {
                 h('span', { class: 'text-xs text-slate-300', id: 'compteur-file' }, enAttente ? `${enAttente} envoi(s) en attente` : 'Rien en attente d\'envoi'),
                 derniere ? h('span', { class: 'text-xs text-slate-400' }, `Dernière synchronisation : ${new Date(derniere).toLocaleString('fr-FR')}`) : null,
                 h('span', { class: 'flex gap-3 ml-auto items-center' }, liens,
-                    etat.session && !etat.sessionExpiree ? h('button', { type: 'button', class: 'text-sm px-3 py-1 rounded bg-sen-green hover:opacity-90', id: 'bouton-sync', onclick: () => { sync.cycle().then(rafraichirEntete); } }, 'Synchroniser') : null)),
+                    etat.session && !etat.sessionExpiree ? h('button', { type: 'button', class: 'text-sm px-3 py-1 rounded bg-sen-green hover:opacity-90', id: 'bouton-sync', onclick: () => { sync.cycle({ manuel: true }).then(rafraichirEntete); } }, 'Synchroniser') : null)),
             etat.miseAJour ? h('div', { class: 'bg-amber-100 text-amber-900 text-xs px-4 py-2' }, 'Une nouvelle version est prête : elle sera appliquée quand tous les envois seront terminés.') : null,
             etat.message ? h('div', { class: 'bg-red-600 text-white text-xs px-4 py-2', role: 'alert' }, etat.message) : null);
         remplacer(pied, `Identifiant de la tablette : ${appareil}`);

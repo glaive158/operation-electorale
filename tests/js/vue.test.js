@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { STATUTS } from '../../resources/js/terrain/file.js';
 import {
-    construireListe, dechargesDeRedistribution, duCompte, detailSynchronisation, enAttenteDEnvoi, indicateurHorsLigne, LIBELLES_STATUT,
+    construireListe, dechargesDeRedistribution, duCompte, detailSynchronisation, enAttenteDEnvoi, indicateurHorsLigne, LIBELLES_STATUT, LIBELLES_VERIFICATION,
     reserveRestante, statutAffiche, texteHorsLigne,
 } from '../../resources/js/terrain/vue.js';
 
@@ -52,7 +52,7 @@ test('la liste garde les declarations dont l\'affectation n\'est plus telecharge
     assert.deepEqual(lignes.map((l) => [l.remise_id, l.statut]), [[4, 'a_verifier'], [1, 'disponible'], [2, 'en_attente'], [3, 'synchronise']]);
     assert.equal(lignes[0].detail, 'Cette remise n\'attend pas de déclaration.');
     assert.equal(lignes[3].titre, 'Décharge n° 9');
-    assert.equal(lignes[3].detail, 'Identité vérifiée par le code');
+    assert.equal(lignes[3].detail, 'Vérifiée par code');
 });
 
 test('detail d\'une declaration contestee', () => {
@@ -121,4 +121,15 @@ test('la liste ne montre que les declarations du compte connecte', () => {
     assert.equal(lignes.some((l) => l.detail === 'secret d\'un autre'), false);
     assert.deepEqual(duCompte(file, 3).map((e) => e.remise_id), [1, 4, 5]);
     assert.deepEqual(duCompte(file, 99).map((e) => e.remise_id), [2, 5], 'sans titulaire connu : visible de tous');
+});
+
+test('chaque etat d\'identite du serveur a un libelle, ceux du central pour les etats etablis ou en attente', () => {
+    assert.deepEqual(Object.keys(LIBELLES_VERIFICATION).sort(), ['a_verifier', 'compte', 'echec', 'en_attente', 'non_verifiee', 'verifiee_appareil', 'verifiee_code']);
+    assert.equal(LIBELLES_VERIFICATION.en_attente, 'Vérification en attente');
+    assert.equal(LIBELLES_VERIFICATION.verifiee_appareil, 'Vérifiée par l\'appareil');
+    assert.equal(LIBELLES_VERIFICATION.verifiee_code, 'Vérifiée par code');
+    assert.equal(LIBELLES_VERIFICATION.non_verifiee, 'Non vérifiée');
+    assert.equal(LIBELLES_VERIFICATION.compte, 'Confirmée depuis le compte');
+    // Un echec ou une identite a verifier ne se presente jamais comme verifiee.
+    for (const etat of ['echec', 'a_verifier', 'non_verifiee', 'en_attente']) assert.doesNotMatch(LIBELLES_VERIFICATION[etat], /^Vérifiée|^Confirmée/);
 });

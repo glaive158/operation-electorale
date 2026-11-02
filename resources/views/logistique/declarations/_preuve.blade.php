@@ -10,8 +10,8 @@
     use App\Models\Logistique\DeclarationPiece;
 
     $etat = $declaration->verification_identite ?? 'non_verifiee';
-    // Seule une identité établie (code, appareil, compte) est présentée comme confirmée.
-    $classeEtat = $declaration->identiteEtablie() ? 'bg-green-100 text-green-700' : ($etat === 'echec' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700');
+    // Seule une identité établie (code, appareil, compte) et non contestée est présentée comme confirmée.
+    $classeEtat = $declaration->identiteEtablie() && ($declaration->contestation ?? 'aucune') !== 'contestee' ? 'bg-green-100 text-green-700' : ($etat === 'echec' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700');
     $signataire = $declaration->signataireUser;
     $delegant = $declaration->delegation?->autorite;
     $piecesVisibles ??= null;

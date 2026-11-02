@@ -164,6 +164,43 @@ test('panne reseau et erreur 5xx : la declaration reste en attente, inchangee', 
     }
 });
 
+test('apres une panne, le passage automatique respecte le delai de 30 s ; le passage manuel l\'ignore', async () => {
+    let panne = true;
+    const { file, api, sync } = installer({
+        reponses: (m) => {
+            if (m === 'HEAD') return { status: 200, corps: null };
+            if (m === 'POST') return panne ? { status: 503, corps: null } : { status: 201, corps: { declaration: { id: 40, statut: 'retenue', verification_identite: 'verifiee_code', contestation: 'aucune', anomalies: [] } } };
+        },
+    });
+    await file.ajouter(declaration());
+    await sync.cycle();
+    assert.equal((await file.lister())[0].statut, STATUTS.EN_ATTENTE);
+    assert.ok((await file.lister())[0].pas_avant, 'le delai de reessai est pose');
+    const envois = () => api.appels.filter((a) => a.methode === 'POST').length;
+    assert.equal(envois(), 1);
+
+    // Le réseau revient : l'automatique n'envoie rien avant 30 s.
+    panne = false;
+    await sync.cycle();
+    assert.equal(envois(), 1, 'automatique : delai respecte');
+    assert.equal((await file.lister())[0].statut, STATUTS.EN_ATTENTE);
+
+    // Le bouton « Synchroniser » envoie tout de suite.
+    await sync.cycle({ manuel: true });
+    assert.equal(envois(), 2, 'manuel : delai ignore');
+    assert.equal((await file.lister())[0].statut, STATUTS.SYNCHRONISE);
+});
+
+test('passage manuel : un element en echec n\'est tente qu\'une fois par passage', async () => {
+    const { file, api, sync } = installer({ reponses: (m) => (m === 'HEAD' ? { status: 200, corps: null } : { status: 503, corps: null }) });
+    await file.ajouter(declaration());
+
+    await sync.cycle({ manuel: true });
+    await sync.cycle({ manuel: true });
+
+    assert.equal(api.appels.filter((a) => a.methode === 'POST').length, 2, 'un essai par passage manuel');
+});
+
 test('panne reseau pendant la verification d\'une piece : on n\'insiste pas, rien n\'est envoye', async () => {
     const { file, api, sync } = installer({ reponses: () => ({ status: 0, corps: null }) });
     await file.ajouter(declaration());

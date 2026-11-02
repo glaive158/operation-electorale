@@ -114,7 +114,7 @@ class DonneesDecharge
     {
         $remises = Remise::where('decharge_id', $decharge->id)->whereNotIn('statut', ['annulee', 'a_arbitrer'])->orderBy('id')->get();
         $declarations = Declaration::whereIn('remise_id', $remises->pluck('id'))
-            ->whereIn('statut', ['retenue', 'concordante'])->with('lignes.materiel')->orderBy('id')->get();
+            ->whereIn('statut', ['retenue', 'concordante'])->with(['lignes.materiel', 'signataireUser', 'delegation.autorite'])->orderBy('id')->get();
         $retenues = $declarations->where('statut', 'retenue')->keyBy('remise_id');
 
         $utilisateurs = User::whereIn('id', $remises->flatMap(fn (Remise $r) => [
@@ -157,6 +157,13 @@ class DonneesDecharge
                 'statut_libelle' => Declaration::STATUTS[$d->statut],
                 'signataire_nom' => $d->signataire_nom,
                 'signataire_qualite' => $d->signataire_qualite,
+                // Qui a réellement signé et comment son identité a été établie : une identité non établie ne s'imprime jamais comme confirmée.
+                'signataire_compte' => $d->signataireUser?->nom_complet,
+                'delegant' => $d->delegation?->autorite?->nom_complet,
+                'verification_identite' => $d->verification_identite ?? 'non_verifiee',
+                'verification_libelle' => $d->libelleVerification(),
+                'identite_etablie' => $d->identiteEtablie(),
+                'contestation_libelle' => in_array($d->contestation, ['contestee', 'levee'], true) ? Declaration::CONTESTATIONS[$d->contestation] : null,
                 'horodatage_terminal' => $d->horodatage_terminal?->format('Y-m-d H:i:s'),
                 'horodatage_serveur' => $d->created_at->format('Y-m-d H:i:s'),
                 'lignes' => $d->lignes->map(fn ($l) => [

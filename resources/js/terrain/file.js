@@ -179,10 +179,11 @@ export function creerFile({ stockage, horloge = () => Date.now(), delaiReessaiMs
          * Le prochain élément à envoyer (copie), ou null : file suspendue, rien en attente, ou tout est bloqué.
          *
          * L'appelant (sync.js) doit être « single-flight » : un seul envoi à la fois, il attend marquer() avant de
-         * redemander prochain(). Aucun marqueur « en cours » n'est tenu ici : deux envois simultanés du même élément
+         * redemander prochain(). Un envoi manuel passe `ignorerPasAvant` (le délai de réessai ne retient que les
+         * passages automatiques) et `exclure` les éléments déjà tentés dans ce passage. Aucun marqueur « en cours » n'est tenu ici : deux envois simultanés du même élément
          * seraient absorbés par l'idempotence du serveur (même clé, même bloc, même contenu), mais on les évite.
          */
-        async prochain() {
+        async prochain({ ignorerPasAvant = false, exclure = null } = {}) {
             if (suspendue) return null;
             const maintenant = horloge();
             const tous = await stockage.list();
@@ -191,7 +192,8 @@ export function creerFile({ stockage, horloge = () => Date.now(), delaiReessaiMs
             const redistributions = new Set(enAttente.filter((e) => e.type === 'redistribution').map((e) => e.decharge_id));
 
             const envoyable = (e) => {
-                if (e.pas_avant !== undefined && e.pas_avant > maintenant) return false;
+                if (exclure?.has(e.id)) return false;
+                if (!ignorerPasAvant && e.pas_avant !== undefined && e.pas_avant > maintenant) return false;
                 if (e.type === 'declaration') return !e.pieces.some((p) => piecesEnAttente.has(p.empreinte));
                 if (e.type === 'liberation') return !redistributions.has(e.decharge_id);
 

@@ -50,6 +50,7 @@ const RETENTABLE = (status) => status === 0 || status === 401 || status === 408 
 export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = () => true, surSessionExpiree = () => {}, surChangement = () => {} }) {
     let enCours = null;
     let redemande = false;
+    let manuelDemande = false;
 
     async function poster(empreinte, blob) {
         const donnees = new FormData();
@@ -136,11 +137,14 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         }
     }
 
-    async function envoyerFile() {
+    async function envoyerFile(manuel = false) {
         let envoyes = 0;
+        // Passage manuel : le délai de réessai est ignoré, mais un élément n'est tenté qu'une fois par passage.
+        const tentes = new Set();
         for (;;) {
-            const element = await file.prochain();
+            const element = await file.prochain(manuel ? { ignorerPasAvant: true, exclure: tentes } : undefined);
             if (!element) return { envoyes, session: true };
+            tentes.add(element.id);
             const issue = await envoyerElement(element);
             const marque = await file.marquer(element.id, issue);
             if (issue.status === 401) return { envoyes, session: false };
@@ -154,13 +158,13 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         }
     }
 
-    async function passage() {
+    async function passage(manuel = false) {
         if (!estEnLigne()) {
             surChangement({ hors_ligne: true });
 
             return { hors_ligne: true };
         }
-        const envoi = await envoyerFile();
+        const envoi = await envoyerFile(manuel);
         let session = envoi.session;
         if (session && !envoi.reseau && telecharger) {
             const telechargement = await telecharger();
@@ -172,8 +176,12 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         return { ...envoi, session };
     }
 
-    /** Un seul passage à la fois : un appel pendant un passage en demande un second, sans le doubler. */
-    function cycle() {
+    /**
+     * Un seul passage à la fois : un appel pendant un passage en demande un second, sans le doubler.
+     * `manuel` (bouton « Synchroniser ») ignore le délai de réessai des éléments ; les passages automatiques le respectent.
+     */
+    function cycle({ manuel = false } = {}) {
+        if (manuel) manuelDemande = true;
         if (enCours) {
             redemande = true;
 
@@ -184,10 +192,13 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
             try {
                 do {
                     redemande = false;
-                    dernier = await passage();
+                    const manuelCePassage = manuelDemande;
+                    manuelDemande = false;
+                    dernier = await passage(manuelCePassage);
                 } while (redemande && dernier.session && !dernier.hors_ligne && !dernier.reseau);
             } finally {
                 enCours = null;
+                manuelDemande = false;
             }
 
             return dernier;

@@ -15,6 +15,7 @@ use App\Models\NotificationOp;
 use App\Models\User;
 use App\Services\Logistique\AvisReceptionService;
 use App\Services\Logistique\CodeReceptionService;
+use App\Services\Logistique\DechargePdfService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
@@ -404,5 +405,92 @@ class EcransIdentiteTest extends TestCase
         $this->get($this->fiche())->assertSee('name="_token"', false);
         $this->get(route('logistique.appareils.index'))->assertSee('name="_token"', false);
         $this->get(route('logistique.utilisateurs.codes'))->assertSee('name="_token"', false);
+    }
+
+    private function badge(Declaration $declaration): string
+    {
+        $html = view('logistique.declarations._preuve', [
+            'declaration' => $declaration, 'routePiece' => 'logistique.pieces.show', 'piecesVisibles' => null, 'peutLever' => false,
+        ])->render();
+        $this->assertSame(1, preg_match('#<span class="px-2 py-0\.5 rounded-full text-xs font-medium ([^"]+)">'.preg_quote(e($declaration->libelleVerification()), '#').'</span>#u', $html, $m), 'badge de vérification absent');
+
+        return $m[1];
+    }
+
+    public function test_couleur_du_badge_d_identite(): void
+    {
+        foreach (self::LIBELLES as $etat => $libelle) {
+            $declaration = $this->poser(['verification_identite' => $etat, 'contestation' => 'aucune', 'signataire_user_id' => $this->prefet->id]);
+            $classe = $this->badge($declaration);
+            if (in_array($etat, self::CONFIRMEES, true)) {
+                $this->assertSame('bg-green-100 text-green-700', $classe, $etat);
+            } else {
+                $this->assertStringNotContainsString('green', $classe, $etat);
+            }
+        }
+        $this->assertStringContainsString('red', $this->badge($this->poser(['verification_identite' => 'echec'])));
+
+        // Une contestation ouverte retire le vert, même sur une identité établie ; levée, il revient.
+        $this->assertStringNotContainsString('green', $this->badge($this->poser(['verification_identite' => 'verifiee_code', 'contestation' => 'contestee'])));
+        $this->assertSame('bg-green-100 text-green-700', $this->badge($this->poser(['verification_identite' => 'verifiee_code', 'contestation' => 'levee'])));
+
+        // Une valeur absente se lit « Non vérifiée », en ambre, jamais en vert.
+        $sans = (new Declaration)->forceFill(['verification_identite' => null]);
+        $classe = $this->badge($sans);
+        $this->assertStringNotContainsString('green', $classe);
+        $html = view('logistique.declarations._preuve', ['declaration' => $sans, 'routePiece' => 'logistique.pieces.show', 'piecesVisibles' => null, 'peutLever' => false])->render();
+        $this->assertStringContainsString('Non vérifiée', $html);
+    }
+
+    public function test_pieces_et_avis_d_une_autre_decharge_invisibles(): void
+    {
+        $empreintes = $this->joindrePieces();
+        $this->poser(['signataire_user_id' => $this->prefet->id]);
+
+        // Un agent affecté à une autre décharge ne voit ni la page, ni les liens, ni les fichiers.
+        $autre = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 5]);
+        $this->actingAs($autre->agent);
+        $this->get(route('terrain.decharges.show', $autre))->assertOk()->assertDontSee($empreintes['signature'])->assertDontSee($empreintes['photo']);
+        $this->get($this->ficheTerrain())->assertNotFound();
+        $this->get(route('terrain.pieces.show', $empreintes['signature']))->assertNotFound();
+        $this->get(route('terrain.pieces.show', $empreintes['photo']))->assertNotFound();
+
+        // L'avis reçu pour une autre décharge n'est pas montré sur celle-ci.
+        NotificationOp::create([
+            'user_id' => $this->prefet->id, 'titre' => 'Réception confirmée', 'type' => 'logistique_reception',
+            'message' => 'Vous avez confirmé la réception de la décharge n° ZZ-999 le 01/01/2026 à 10:00 (1 articles). Si ce n\'est pas vous, contestez.',
+        ]);
+        $this->actingAs($this->prefet);
+        $this->get($this->ficheTerrain())->assertOk()->assertDontSee('Avis de réception');
+    }
+
+    public function test_decharge_pdf_affiche_l_etat_d_identite(): void
+    {
+        $service = app(DechargePdfService::class);
+        $delegue = User::factory()->create(['role' => 'sous_prefet', 'name' => 'Ndiaye', 'prenom' => 'Moussa']);
+        $delegation = Delegation::create([
+            'destinataire_id' => $this->prefecture->id, 'autorite_user_id' => $this->prefet->id, 'delegue_user_id' => $delegue->id,
+            'du' => now()->subDay(), 'motif' => 'Déplacement', 'cree_par' => $this->prefet->id,
+        ]);
+        $texte = fn (string $html) => trim(preg_replace('/\s+/u', ' ', html_entity_decode(strip_tags(preg_replace('#<(style|title)\b.*?</\1>#si', '', $html)), ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+
+        // Retenue mais identité en échec : jamais imprimée comme confirmée.
+        $this->poser(['statut' => 'retenue', 'verification_identite' => 'echec', 'signataire_user_id' => $this->prefet->id]);
+        $imprime = $texte($service->html($this->decharge->refresh(), 'reception'));
+        $this->assertStringContainsString('Échec du code', $imprime);
+        $this->assertStringContainsString('identité non établie', $imprime);
+        $this->assertStringContainsString($this->prefet->nom_complet, $imprime);
+        $this->assertStringNotContainsString('Vérifiée par code', $imprime);
+
+        // Identité établie, signée par un délégué.
+        $this->poser(['verification_identite' => 'verifiee_code', 'signataire_user_id' => $delegue->id, 'delegation_id' => $delegation->id]);
+        $imprime = $texte($service->html($this->decharge->refresh(), 'reception'));
+        $this->assertStringContainsString('Vérifiée par code', $imprime);
+        $this->assertStringContainsString($delegue->nom_complet.', par délégation de '.$this->prefet->nom_complet, $imprime);
+        $this->assertStringNotContainsString('identité non établie', $imprime);
+        $this->assertStringNotContainsString('Échec du code', $imprime);
+
+        // Le PDF reste produit (dompdf) .
+        $this->assertStringStartsWith('%PDF', $service->pdf($service->html($this->decharge->refresh(), 'reception')));
     }
 }
