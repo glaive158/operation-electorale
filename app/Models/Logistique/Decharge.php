@@ -61,6 +61,11 @@ class Decharge extends Model
         return $this->hasMany(DechargeLigne::class);
     }
 
+    public function documents(): HasMany
+    {
+        return $this->hasMany(DechargeDocument::class);
+    }
+
     public function cycle(): BelongsTo
     {
         return $this->belongsTo(Cycle::class);
@@ -88,7 +93,7 @@ class Decharge extends Model
 
     public function remplacante(): HasOne
     {
-        return $this->hasOne(self::class, 'decharge_remplacee_id');
+        return $this->hasOne(self::class, 'decharge_remplacee_id')->latestOfMany();
     }
 
     public function preparePar(): BelongsTo

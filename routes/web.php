@@ -10,13 +10,16 @@ use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
 use App\Http\Controllers\Logistique\BesoinController;
+use App\Http\Controllers\Logistique\CircuitController;
 use App\Http\Controllers\Logistique\CleController;
 use App\Http\Controllers\Logistique\CommandeController;
 use App\Http\Controllers\Logistique\CommissionController;
 use App\Http\Controllers\Logistique\CorrespondanceController;
 use App\Http\Controllers\Logistique\CycleController;
 use App\Http\Controllers\Logistique\DechargeController;
+use App\Http\Controllers\Logistique\EcartController;
 use App\Http\Controllers\Logistique\EntiteController;
+use App\Http\Controllers\Logistique\ExpeditionController;
 use App\Http\Controllers\Logistique\GeographieController;
 use App\Http\Controllers\Logistique\InstantaneController;
 use App\Http\Controllers\Logistique\MaterielController;
@@ -145,7 +148,24 @@ Route::middleware(['auth'])->group(function () {
         Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
 
         Route::get('d/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
+
+        Route::get('cycles/{cycle}/circuit', [CircuitController::class, 'show'])->name('circuit.show');
+        Route::get('cycles/{cycle}/expeditions', [ExpeditionController::class, 'index'])->name('expeditions.index');
+        Route::get('cycles/{cycle}/ecarts', [EcartController::class, 'index'])->name('ecarts.index');
+
+        Route::get('cycles/{cycle}/decharges', [DechargeController::class, 'index'])->name('decharges.index');
+        Route::post('cycles/{cycle}/decharges', [DechargeController::class, 'store'])->name('decharges.store');
+        Route::post('cycles/{cycle}/decharges/lot', [DechargeController::class, 'lot'])->name('decharges.lot');
+        Route::get('cycles/{cycle}/decharges/lot.zip', [DechargeController::class, 'lotPdf'])->name('decharges.lot-pdf');
         Route::get('decharges/{decharge}', [DechargeController::class, 'show'])->name('decharges.show');
+        Route::put('decharge-lignes/{ligne}', [DechargeController::class, 'modifierLigne'])->name('decharge-lignes.update');
+        Route::post('decharges/{decharge}/actualisation', [DechargeController::class, 'actualiser'])->name('decharges.actualiser');
+        Route::delete('decharges/{decharge}', [DechargeController::class, 'destroy'])->name('decharges.destroy');
+        Route::post('decharges/{decharge}/validation', [DechargeController::class, 'valider'])->name('decharges.valider');
+        Route::post('decharges/{decharge}/remplacement', [DechargeController::class, 'remplacer'])->name('decharges.remplacer');
+        Route::post('decharges/{decharge}/emission', [DechargeController::class, 'emettre'])->name('decharges.emettre');
+        Route::get('decharges/{decharge}/apercu', [DechargeController::class, 'apercu'])->name('decharges.apercu');
+        Route::get('decharges/{decharge}/pdf/{exemplaire}', [DechargeController::class, 'pdf'])->name('decharges.pdf');
 
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
@@ -183,6 +203,9 @@ Route::middleware(['auth'])->group(function () {
             Route::post('plans/{plan}/approbation', [PlanDotationController::class, 'approuver'])->name('plans.approuver');
 
             Route::post('cycles/{cycle}/besoin/commande', [BesoinController::class, 'commander'])->name('besoin.commander');
+
+            Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
+            Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

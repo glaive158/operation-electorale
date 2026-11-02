@@ -24,4 +24,16 @@ trait ExecuteAction
 
         return back()->with('success', $succes instanceof Closure ? $succes($resultat) : $succes);
     }
+
+    /** Comme executer(), mais mène à la page choisie en cas de succès ; $destination reçoit le résultat de l'action. */
+    private function executerVers(callable $action, Closure $destination, string|Closure $succes): RedirectResponse
+    {
+        try {
+            $resultat = $action();
+        } catch (RegleLogistique|InvalidArgumentException $e) {
+            return back()->withInput()->with('error', $e->getMessage());
+        }
+
+        return redirect($destination($resultat))->with('success', $succes instanceof Closure ? $succes($resultat) : $succes);
+    }
 }

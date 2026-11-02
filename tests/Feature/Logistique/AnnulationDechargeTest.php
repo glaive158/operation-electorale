@@ -288,6 +288,7 @@ class AnnulationDechargeTest extends TestCase
         $seconde = $this->service()->remplacer($decharge->fresh());
         $this->assertSame($decharge->id, (int) $seconde->decharge_remplacee_id);
         $this->assertSame(2, Decharge::where('decharge_remplacee_id', $decharge->id)->count());
+        $this->assertSame($seconde->id, $decharge->fresh()->remplacante->id);
     }
 
     public function test_remplacement_regles_d_acces_et_de_statut(): void

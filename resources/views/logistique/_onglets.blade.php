@@ -16,6 +16,10 @@
             ['Instantanés', 'logistique.instantanes.index', $cycleOnglet, 'logistique.instantanes.*'],
             ['Plans', 'logistique.plans.index', $cycleOnglet, 'logistique.plans.*'],
             ['Besoin', 'logistique.besoin.show', $cycleOnglet, 'logistique.besoin.*'],
+            ['Circuit', 'logistique.circuit.show', $cycleOnglet, 'logistique.circuit.*'],
+            ['Expéditions', 'logistique.expeditions.index', $cycleOnglet, 'logistique.expeditions.*'],
+            ['Décharges', 'logistique.decharges.index', $cycleOnglet, 'logistique.decharges.*'],
+            ['Écarts', 'logistique.ecarts.index', $cycleOnglet, 'logistique.ecarts.*'],
         ]);
     }
 @endphp
