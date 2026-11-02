@@ -14,12 +14,15 @@ use InvalidArgumentException;
  * Destinataire D (préfecture, sous-préfecture, poste) :
  *   reçu retenu (défectueux compris) sur les remises qui lui sont adressées
  *   − redistributions émises par D (ni annulées ni à arbitrer)
- *   − retours déjà déclarés par ses restitutions du cycle.
+ *   − attendu de ses restitutions contrôlées du cycle.
  *
  * Agent A (transport) :
  *   matériel chargé à son nom
  *   − reçu retenu sur ses livraisons (le manque déclaré par le destinataire reste attendu de l'agent)
- *   − retours déjà déclarés par ses restitutions du cycle.
+ *   − attendu de ses restitutions contrôlées du cycle.
+ *
+ * Une restitution contrôlée solde tout son attendu : le non restitué reste un écart à justifier. Seul du matériel
+ * reçu après son contrôle fait un nouveau solde.
  *
  * Cinq requêtes agrégées au plus, groupées par détenteur et article, quel que soit le volume.
  */
@@ -30,7 +33,7 @@ class SoldeDetenteurService
      * puis article. Un solde nul ou négatif n'est jamais renvoyé.
      *
      * @param  ?string  $detenteurType  limite le calcul à ce détenteur ; avec `$detenteurId`, les deux ou aucun
-     * @param  ?int  $sauf  restitution dont les propres retours déclarés ne se déduisent pas (son recalcul)
+     * @param  ?int  $sauf  restitution dont l'attendu ne se déduit pas (son recalcul)
      * @return Collection<int, array{detenteur_type: string, detenteur_id: int, materiel_id: int, solde: int}>
      *
      * @throws InvalidArgumentException si un seul des deux est donné, ou si le type est inconnu
@@ -81,14 +84,15 @@ class SoldeDetenteurService
             ->selectRaw("'agent' as detenteur_type, remises.de_id as detenteur_id, declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu) as quantite")
             ->groupBy('remises.de_id', 'declaration_lignes.materiel_id'), 'remises.de_id', 'agent', $detenteurType, $detenteurId)->get(), -1);
 
-        // Retours déjà déclarés par les restitutions du cycle.
+        // Restitutions contrôlées du cycle : chacune solde son attendu (P6-R40). Ce qui n'est pas revenu est un écart à
+        // justifier (RestitutionService::ecarts), jamais une nouvelle restitution.
         $retours = DB::table('restitution_lignes')
             ->join('restitutions', 'restitutions.id', '=', 'restitution_lignes.restitution_id')
             ->join('materiels', 'materiels.id', '=', 'restitution_lignes.materiel_id')
-            ->where('restitutions.cycle_id', $cycle->id)->where('materiels.reutilisable', true)
+            ->where('restitutions.cycle_id', $cycle->id)->where('restitutions.statut', 'controlee')->where('materiels.reutilisable', true)
             ->when($sauf !== null, fn (Builder $q) => $q->where('restitutions.id', '!=', $sauf))
             ->when($detenteurType !== null, fn (Builder $q) => $q->where('restitutions.detenteur_type', $detenteurType)->where('restitutions.detenteur_id', $detenteurId))
-            ->selectRaw('restitutions.detenteur_type as detenteur_type, restitutions.detenteur_id as detenteur_id, restitution_lignes.materiel_id as materiel_id, SUM(restitution_lignes.declare_restitue) as quantite')
+            ->selectRaw('restitutions.detenteur_type as detenteur_type, restitutions.detenteur_id as detenteur_id, restitution_lignes.materiel_id as materiel_id, SUM(restitution_lignes.attendu) as quantite')
             ->groupBy('restitutions.detenteur_type', 'restitutions.detenteur_id', 'restitution_lignes.materiel_id')
             ->get();
         $ajouter($retours, -1);

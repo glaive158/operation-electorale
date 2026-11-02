@@ -67,7 +67,8 @@ class RestitutionService
     /**
      * Ouvre une restitution « à préparer » pour chaque détenteur qui a un solde et aucune restitution ouverte
      * (non contrôlée) sur le cycle ; ses lignes portent l'attendu, égal au solde. Idempotente : un détenteur qui
-     * a déjà une restitution ouverte est laissé tel quel. Renvoie le nombre de restitutions créées et le nombre
+     * a déjà une restitution ouverte est laissé tel quel, et une restitution contrôlée solde son attendu (le non
+     * restitué est un écart, pas une nouvelle restitution). Renvoie le nombre de restitutions créées et le nombre
      * de détenteurs laissés inchangés. Une écriture de journal par restitution créée.
      *
      * Le verrou du cycle est exclusif : l'unicité d'une restitution ouverte par détenteur ne repose sur aucune
@@ -135,8 +136,8 @@ class RestitutionService
     /**
      * Remet les attendus d'une restitution « à préparer » au solde courant de son détenteur : une ligne est
      * ajoutée pour un article nouveau, mise à jour pour un article existant, et supprimée lorsque son solde est
-     * tombé à zéro, sauf si un retour y a déjà été déclaré (elle reste alors, attendu à zéro). Les retours
-     * déclarés par les autres restitutions du détenteur se déduisent, pas les siens.
+     * tombé à zéro, sauf si un retour y a déjà été déclaré (elle reste alors, attendu à zéro). Les attendus des
+     * restitutions contrôlées du détenteur se déduisent, pas le sien.
      */
     public function recalculer(Restitution $restitution): void
     {
@@ -573,13 +574,13 @@ class RestitutionService
 
     /**
      * Écarts de restitution du cycle : une ligne par (détenteur, article), en cinq requêtes au plus quel que soit
-     * le volume. `non_restitue` (attendu − retour déclaré, jamais négatif) n'existe qu'une fois une déclaration
-     * retenue (tant que la dernière restitution n'en a pas, c'est le reliquat des précédentes, null s'il n'y en a aucune) ; `perdu_en_retour` (retour déclaré − reçu au central, jamais négatif) seulement pour une restitution
-     * reçue au central ou contrôlée : avant la réception, un reçu à zéro ferait passer tout le retour pour perdu.
-     * Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante n'attend que le reliquat de la
-     * précédente) est cumulé : le retour déclaré et le reçu s'additionnent, l'attendu est ce qui avait déjà été
-     * déclaré avant la dernière restitution plus l'attendu de celle-ci. `ligne_id` est la ligne de la dernière
-     * restitution (celle qu'on justifie) ; la justification est la dernière écrite.
+     * le volume. Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante ne porte que du matériel reçu
+     * après le contrôle de la précédente, P6-R40) est cumulé : attendus, retours déclarés et reçus s'additionnent.
+     * `non_restitue` (Σ attendu − Σ retour déclaré, jamais négatif) ne compte que les restitutions qui ont une
+     * déclaration retenue (null s'il n'y en a aucune) ; `perdu_en_retour` (retour déclaré − reçu au central, jamais
+     * négatif) seulement les restitutions reçues au central ou contrôlées : avant la réception, un reçu à zéro ferait
+     * passer tout le retour pour perdu. `ligne_id` est la ligne de la dernière restitution (celle qu'on justifie) ;
+     * la justification est la dernière écrite.
      *
      * @return Collection<int, array{detenteur_type: string, detenteur_id: int, detenteur_nom: string, materiel_id: int, materiel_libelle: string, restitution_id: int, ligne_id: int, attendu: int, declare_restitue: int, recu_central: int, non_restitue: ?int, perdu_en_retour: ?int, justification: ?string}>
      */
@@ -606,14 +607,19 @@ class RestitutionService
         $materiels = Materiel::whereIn('id', $lignes->pluck('materiel_id')->unique()->all())->get()->keyBy('id');
 
         $ecarts = [];
+        // Attendu et retour déclaré des seules restitutions qui ont une déclaration retenue, par (détenteur, article).
+        $retenus = [];
         foreach ($lignes as $l) {
             $cle = $l->detenteur_type.':'.$l->detenteur_id.':'.$l->materiel_id;
+            $attendu = (int) $l->attendu;
             $declare = (int) $l->declare_restitue;
             $recu = (int) $l->recu_central;
             $recue = in_array($l->statut, ['recue_central', 'controlee'], true);
+            if ($retenues->has($l->restitution_id)) {
+                $retenus[$cle] = [($retenus[$cle][0] ?? 0) + $attendu, ($retenus[$cle][1] ?? 0) + $declare];
+            }
 
             $precedent = $ecarts[$cle] ?? null;
-            $avant = $precedent['declare_restitue'] ?? 0;
             $detenteur = $l->detenteur_type === 'agent'
                 ? (($agents->get($l->detenteur_id)?->nom_complet) ?: 'Agent')
                 : (string) $destinataires->get($l->detenteur_id, 'Destinataire');
@@ -626,11 +632,11 @@ class RestitutionService
                 'materiel_libelle' => $materiels->get($l->materiel_id)?->libelle ?? '',
                 'restitution_id' => (int) $l->restitution_id,
                 'ligne_id' => (int) $l->ligne_id,
-                'attendu' => $avant + (int) $l->attendu,
-                'declare_restitue' => $avant + $declare,
+                'attendu' => ($precedent['attendu'] ?? 0) + $attendu,
+                'declare_restitue' => ($precedent['declare_restitue'] ?? 0) + $declare,
                 'recu_central' => ($precedent['recu_central'] ?? 0) + $recu,
-                // Sans déclaration retenue sur la dernière restitution, le reliquat des précédentes reste dû.
-                'non_restitue' => $retenues->has($l->restitution_id) ? max(0, (int) $l->attendu - $declare) : ($precedent['non_restitue'] ?? null),
+                // Une restitution sans déclaration retenue ne compte pas encore : le reliquat des autres reste dû.
+                'non_restitue' => isset($retenus[$cle]) ? max(0, $retenus[$cle][0] - $retenus[$cle][1]) : null,
                 'perdu_en_retour' => $recue ? ($precedent['perdu_en_retour'] ?? 0) + max(0, $declare - $recu) : ($precedent['perdu_en_retour'] ?? null),
                 'justification' => $l->justification ?? ($precedent['justification'] ?? null),
             ];

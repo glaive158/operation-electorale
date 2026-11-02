@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\RemiseService;
+use App\Services\Logistique\RestitutionService;
 use App\Services\Logistique\SoldeDetenteurService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -142,24 +143,56 @@ class SoldeDetenteurTest extends TestCase
         $this->assertSame(100, $this->solde('destinataire', $this->prefecture->id));
     }
 
-    public function test_retours_deja_declares_sont_deduits_et_jamais_negatifs(): void
+    public function test_attendu_des_restitutions_controlees_deduit_et_jamais_negatif(): void
     {
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
         $this->deposerRecue($decharge, [$this->urnes->id => 100]);
         $restitution = (new Restitution(['cycle_id' => $this->cycle->id, 'detenteur_type' => 'destinataire', 'detenteur_id' => $this->prefecture->id]))
-            ->forceFill(['ouverte_par' => $this->responsable->id]);
+            ->forceFill(['ouverte_par' => $this->responsable->id, 'statut' => 'en_retour']);
         $restitution->save();
-        $ligne = RestitutionLigne::create(['restitution_id' => $restitution->id, 'materiel_id' => $this->urnes->id, 'attendu' => 100]);
-
+        $ligne = RestitutionLigne::create(['restitution_id' => $restitution->id, 'materiel_id' => $this->urnes->id, 'attendu' => 60]);
         $ligne->forceFill(['declare_restitue' => 30])->save();
-        $this->assertSame(70, $this->solde('destinataire', $this->prefecture->id));
 
-        $ligne->forceFill(['declare_restitue' => 100])->save();
+        // Tant qu'elle n'est pas contrôlée, la restitution ne solde rien (elle reste ouverte pour son détenteur).
+        $this->assertSame(100, $this->solde('destinataire', $this->prefecture->id));
+
+        // Contrôlée, elle solde son attendu, quel que soit le retour déclaré : l'écart est à justifier, pas à rouvrir.
+        $restitution->forceFill(['statut' => 'controlee'])->save();
+        $this->assertSame(40, $this->solde('destinataire', $this->prefecture->id));
+
+        $ligne->forceFill(['attendu' => 100])->save();
         $this->assertSame(0, $this->solde('destinataire', $this->prefecture->id));
         $this->assertSame([], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
 
-        $ligne->forceFill(['declare_restitue' => 130])->save();
+        $ligne->forceFill(['attendu' => 130])->save();
         $this->assertSame(0, $this->solde('destinataire', $this->prefecture->id));
+    }
+
+    public function test_restitution_controlee_avec_non_restitue_ne_rouvre_rien(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $service = app(RestitutionService::class);
+        $this->assertSame(['creees' => 1, 'inchangees' => 0], $service->ouvrir($this->cycle));
+        $restitution = Restitution::sole();
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $service->affecterAgent($restitution, $agent);
+
+        // Le préfet n'en rend que 90 sur 100 : le retour est pris en charge, reçu et contrôlé.
+        $this->en($this->autoriteFictive($this->prefecture), fn () => $service->declarer(
+            $restitution, 'compte', ['nom' => 'Awa Fall', 'qualite' => 'Préfet'], [$this->urnes->id => ['restitue' => 90]], (string) Str::uuid(),
+        ));
+        $this->en($agent, fn () => $service->prendreEnCharge($restitution, $agent));
+        $service->receptionner($restitution, [$this->urnes->id => 90]);
+        $service->controler($restitution, [$this->urnes->id => ['bon' => 90, 'a_reparer' => 0, 'reforme' => 0]]);
+        $this->assertSame('controlee', $restitution->fresh()->statut);
+
+        // Les dix manquantes sont un écart à justifier, pas une nouvelle restitution.
+        $this->assertSame(0, $this->solde('destinataire', $this->prefecture->id));
+        $this->assertSame(['creees' => 0, 'inchangees' => 0], $service->ouvrir($this->cycle));
+        $this->assertSame(1, Restitution::count());
+        $ecart = $service->ecarts($this->cycle)->sole();
+        $this->assertSame([100, 90, 90, 10, 0], [$ecart['attendu'], $ecart['declare_restitue'], $ecart['recu_central'], $ecart['non_restitue'], $ecart['perdu_en_retour']]);
     }
 
     public function test_cycles_independants(): void

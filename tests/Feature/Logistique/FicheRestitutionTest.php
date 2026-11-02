@@ -373,14 +373,15 @@ class FicheRestitutionTest extends TestCase
         $this->assertSame('controlee', $r1->fresh()->statut);
         $this->service()->justifier($this->ligne($r1, $this->urnes->id), 'Cinq urnes détruites.');
 
+        // La seconde porte du matériel reçu après le contrôle de la première (P6-R40) : les attendus s'additionnent.
         $r2 = $this->restitution([$this->urnes->id => [10, 4]], 'a_preparer');
 
         $this->assertCount(1, $this->service()->ecarts($this->cycle));
         $ecart = $this->ecart($r2, $this->urnes->id);
-        $this->assertSame(100, $ecart['attendu']);
+        $this->assertSame(110, $ecart['attendu']);
         $this->assertSame(94, $ecart['declare_restitue']);
         $this->assertSame(85, $ecart['recu_central']);
-        $this->assertSame(6, $ecart['non_restitue']);
+        $this->assertSame(16, $ecart['non_restitue']);
         $this->assertSame(5, $ecart['perdu_en_retour'], 'Le perdu de la première restitution est conservé tant que la seconde n\'est pas reçue.');
         $this->assertSame('Cinq urnes détruites.', $ecart['justification'], 'Sans justification sur la ligne récente, celle de la plus ancienne.');
         $this->assertSame($this->ligne($r2, $this->urnes->id)->id, $ecart['ligne_id']);
