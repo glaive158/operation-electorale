@@ -3,6 +3,7 @@
 namespace Tests\Support;
 
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\InstantaneEffectifs;
 use App\Models\Logistique\InstantaneLigne;
@@ -12,6 +13,8 @@ use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\PlanDotationLigne;
 use App\Models\Logistique\PosteEtranger;
 use App\Models\User;
+use App\Services\Logistique\DechargeService;
+use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\StockService;
 
 /**
@@ -120,6 +123,31 @@ trait PlanApprouveFictif
         if ($attribue > 0) {
             $stock->attribuer($this->cycle, $article, $attribue, 'Attribution de test');
         }
+    }
+
+    /**
+     * Décharge chargée : prépare la catégorie du premier article, fixe les quantités, valide,
+     * affecte l'agent (un agent de transport actif est créé à défaut) puis charge.
+     *
+     * @param  array<int, int>  $quantites  quantité à expédier par identifiant d'article
+     */
+    protected function deposerChargee(Destinataire $destinataire, array $quantites, ?User $agent = null): Decharge
+    {
+        $service = app(DechargeService::class);
+        $categorie = Materiel::findOrFail(array_key_first($quantites))->categorie;
+
+        $decharge = $service->preparer($this->cycle, $destinataire, $categorie);
+        foreach ($decharge->lignes as $ligne) {
+            $service->modifierLigne($ligne, $quantites[$ligne->materiel_id] ?? 0, null);
+        }
+        $service->valider($decharge);
+
+        $agent ??= User::factory()->create(['role' => 'agent_transport']);
+        $service->affecterAgent($decharge, $agent, 'Agent de test');
+
+        app(RemiseService::class)->charger($decharge);
+
+        return $decharge->refresh();
     }
 
     /**
