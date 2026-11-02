@@ -98,7 +98,7 @@ class PerimetreTerrain
         }
 
         return $prefectures
-            ->merge(Destinataire::whereIn('prefecture_id', $prefectures->all())->pluck('id')->map(fn ($id) => (int) $id))
+            ->merge(Destinataire::where('type', 'sous_prefecture')->whereIn('prefecture_id', $prefectures->all())->pluck('id')->map(fn ($id) => (int) $id))
             ->unique()->values();
     }
 }

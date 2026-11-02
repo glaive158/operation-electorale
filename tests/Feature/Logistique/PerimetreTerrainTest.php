@@ -88,6 +88,17 @@ class PerimetreTerrainTest extends TestCase
         $this->assertFalse($this->perimetre->estAutoriteDe($prefet, $autre));
     }
 
+    public function test_un_poste_rattache_a_une_prefecture_nentre_pas_dans_le_perimetre_du_prefet(): void
+    {
+        $prefet = $this->utilisateur('prefet');
+        $this->prefecture->update(['autorite_user_id' => $prefet->id]);
+        $poste = Destinataire::create([
+            'type' => 'poste', 'libelle' => 'Poste rattaché par erreur', 'prefecture_id' => $this->prefecture->id,
+        ]);
+
+        $this->assertNotContains($poste->id, $this->perimetre->destinataireIds($prefet)->all());
+    }
+
     public function test_sous_prefet_ne_voit_que_les_siens(): void
     {
         $sousPrefet = $this->utilisateur('sous_prefet');
