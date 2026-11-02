@@ -263,18 +263,25 @@ class ArbitrageDeclarationTest extends TestCase
         $this->assertSame('a_verifier', $compte->refresh()->statut);
     }
 
-    public function test_cycle_cloture_refuse_l_arbitrage(): void
+    public function test_arbitrage_et_declaration_restent_possibles_apres_la_cloture_du_cycle(): void
     {
         [, $remise, , $compte] = $this->divergentes();
+        $aRejeter = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 20]);
+        $excedent = $this->declarer($this->autoriteFictive($this->prefecture), $this->livraison($aRejeter), 'compte', 30);
+        $nonDeclaree = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 50]);
         Cycle::whereKey($this->cycle->id)->update(['statut' => 'clos']);
 
-        try {
-            app(ArbitrageService::class)->retenir($compte, 'Trop tard.');
-            $this->fail('Un cycle clôturé refuse l\'arbitrage.');
-        } catch (RegleLogistique $e) {
-            $this->assertSame('Cycle clôturé : arbitrage impossible.', $e->getMessage());
-        }
-        $this->assertSame('a_verifier', $compte->refresh()->statut);
-        $this->assertSame(0, Arbitrage::count());
+        // L'arbitrage ne touche à aucun stock central : retenir et rejeter passent après la clôture.
+        app(ArbitrageService::class)->retenir($compte, 'Le compte du préfet fait foi.');
+        $this->assertSame('retenue', $compte->refresh()->statut);
+        $this->assertSame('recue', $remise->refresh()->statut);
+        app(ArbitrageService::class)->rejeter($excedent, 'Quantité impossible.');
+        $this->assertSame('ecartee', $excedent->refresh()->statut);
+        $this->assertSame(2, Arbitrage::count());
+
+        // Une livraison non déclarée au moment de la clôture reste déclarable.
+        $declaration = $this->declarer($this->autoriteFictive($this->prefecture), $this->livraison($nonDeclaree), 'compte', 50);
+        $this->assertSame('retenue', $declaration->statut);
+        $this->assertSame('recue_intermediaire', $nonDeclaree->refresh()->statut_acheminement);
     }
 }

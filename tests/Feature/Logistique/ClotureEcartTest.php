@@ -7,6 +7,7 @@ use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\JournalEntree;
 use App\Models\Logistique\Materiel;
@@ -214,46 +215,37 @@ class ClotureEcartTest extends TestCase
         $this->assertSame(70, $besoins->approvisionnementRestant($this->cycle, $this->isoloirs));
     }
 
-    public function test_cloture_du_cycle_refusee_tant_qu_une_remise_attend(): void
+    public function test_le_cycle_se_cloture_avec_une_livraison_en_attente(): void
     {
         $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 80]);
-        $stock = app(StockService::class);
-        $message = 'Des remises sont encore en attente de réception ou à vérifier : déclarez, arbitrez ou clôturez avec écart avant de clôturer le cycle.';
-
-        // Livraison en attente.
-        $this->refus(fn () => $stock->cloturerCycle($this->cycle, 'Fin'), $message);
-        $this->assertTrue($this->cycle->refresh()->estOuvert());
-
-        // Même avec un écart accepté : la remise de livraison attend toujours sa déclaration.
-        $this->cloturer(0, 20);
-        $this->refus(fn () => $stock->cloturerCycle($this->cycle, 'Fin'), $message);
-
-        // Livraison à vérifier (excédent).
-        $this->deposerRecue($decharge, [$this->urnes->id => 90]);
-        $this->assertSame('a_verifier', Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->value('statut'));
-        $this->refus(fn () => $stock->cloturerCycle($this->cycle, 'Fin'), $message);
-        $this->assertTrue($this->cycle->refresh()->estOuvert());
-    }
-
-    public function test_cloture_du_cycle_acceptee_quand_les_remises_sont_recues(): void
-    {
-        $decharge = $this->recue(80, 80);
-        $this->cloturer(20, 20);
-        $this->assertSame(['recue', 'recue'], Remise::where('decharge_id', $decharge->id)->orderBy('id')->pluck('statut')->all());
+        $this->assertSame('en_attente', Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->value('statut'));
 
         app(StockService::class)->cloturerCycle($this->cycle, 'Fin du scrutin');
 
         $this->assertFalse($this->cycle->refresh()->estOuvert());
+        $this->assertSame('en_attente', Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->value('statut'));
     }
 
-    public function test_une_remise_annulee_ne_bloque_pas_la_cloture(): void
+    public function test_abandon_refuse_tant_qu_une_reception_est_a_verifier(): void
     {
         $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 80]);
-        $this->deposerRecue($decharge, [$this->urnes->id => 80]);
-        Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->update(['statut' => 'annulee']);
+        $this->deposerRecue($decharge, [$this->urnes->id => 90]);
+        $this->assertSame('a_verifier', Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->value('statut'));
+        $message = 'Une réception est à vérifier pour Urnes : arbitrez-la avant d\'accepter un écart.';
 
-        app(StockService::class)->cloturerCycle($this->cycle, 'Fin');
+        $this->refus(fn () => $this->cloturer(10, 0), $message);
+        $this->refus(fn () => $this->cloturer(10, 20), $message);
+        $this->assertSame(0, Arbitrage::count());
 
-        $this->assertFalse($this->cycle->refresh()->estOuvert());
+        // Une expédition annulée seule ne dépend pas du reçu : elle reste permise.
+        $this->cloturer(0, 20);
+        // Un autre article n'est pas concerné par la réception à vérifier.
+        $this->cloturer(10, 0, $this->isoloirs);
+
+        // Une fois la réception arbitrée, l'abandon est de nouveau accepté.
+        $declaration = Declaration::where('decharge_id', $decharge->id)->sole();
+        app(ArbitrageService::class)->rejeter($declaration, 'Excédent impossible.');
+        $this->cloturer(10, 0);
+        $this->assertSame(3, Arbitrage::where('objet', 'cloture_ecart')->count());
     }
 }

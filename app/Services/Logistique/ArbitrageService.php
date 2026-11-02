@@ -82,6 +82,10 @@ class ArbitrageService
                 throw new RegleLogistique("Expédition annulée supérieure au non engagé pour {$materiel->libelle} : non engagé {$nonEngage}. Annulez d'abord la décharge validée non partie.");
             }
 
+            if ($abandonReception > 0 && $this->receptionAVerifier($actuel, $destinataire, $materiel)) {
+                throw new RegleLogistique("Une réception est à vérifier pour {$materiel->libelle} : arbitrez-la avant d'accepter un écart.");
+            }
+
             $reste = max(0, $this->objectifReception($actuel, $destinataire, $materiel) - $this->recuUtilisableRetenu($actuel, $destinataire, $materiel));
             if ($abandonReception > $reste) {
                 throw new RegleLogistique("Abandon supérieur au reste à réceptionner pour {$materiel->libelle} : reste {$reste}.");
@@ -101,6 +105,17 @@ class ArbitrageService
 
             return $arbitrage;
         }, attempts: 3);
+    }
+
+    /** Une remise non annulée vers le destinataire, portant l'article, attend un arbitrage (reçu non établi). */
+    private function receptionAVerifier(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): bool
+    {
+        return Remise::query()
+            ->whereIn('decharge_id', Decharge::where('cycle_id', $cycle->id)->select('id'))
+            ->where('a_type', 'destinataire')->where('a_id', $destinataire->id)
+            ->where('statut', 'a_verifier')
+            ->whereHas('lignes', fn ($q) => $q->where('materiel_id', $materiel->id))
+            ->exists();
     }
 
     /**
@@ -159,8 +174,10 @@ class ArbitrageService
 
         DB::transaction(function () use ($declaration, $motif, $retenir, $cycleId) {
             $cycle = Cycle::whereKey($cycleId)->lockForUpdate()->first();
-            if ($cycle === null || ! $cycle->estOuvert()) {
-                throw new RegleLogistique('Cycle clôturé : arbitrage impossible.');
+            // Pas de refus de cycle clos : l'arbitrage ne touche à aucun stock central et une réception non
+            // arbitrée doit pouvoir l'être après la clôture.
+            if ($cycle === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
             }
             $decharge = Decharge::whereKey($declaration->decharge_id)->lockForUpdate()->firstOrFail();
             $remise = Remise::whereKey($declaration->remise_id)->lockForUpdate()->firstOrFail();

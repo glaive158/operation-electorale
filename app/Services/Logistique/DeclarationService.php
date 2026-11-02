@@ -82,8 +82,10 @@ class DeclarationService
                 return [$existante, true];
             }
 
-            if ($cycle === null || ! $cycle->estOuvert()) {
-                throw new RegleLogistique('Cycle clôturé : déclaration impossible.');
+            // Une déclaration de réception ne touche à aucun stock central : elle reste possible après la clôture
+            // du cycle (une livraison non déclarée doit pouvoir l'être). Le verrou du cycle suffit à l'ordonner.
+            if ($cycle === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
             }
             $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
             $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
