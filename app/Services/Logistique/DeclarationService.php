@@ -179,14 +179,16 @@ class DeclarationService
                 $cible = $final !== null ? 'recue_destinataire' : ($retenues->isNotEmpty() ? 'recue_intermediaire' : 'chargee');
             }
 
-            if ($cible === $decharge->statut_acheminement) {
-                return;
+            if ($cible !== $decharge->statut_acheminement) {
+                $avant = $decharge->statut_acheminement;
+                $decharge->forceFill(['statut_acheminement' => $cible])->save();
+                Journal::noter('decharge', $decharge->id, 'acheminement_decharge', ['statut_acheminement' => $avant], [
+                    'statut_acheminement' => $cible, 'remise_id' => $remise->id,
+                ]);
             }
-            $avant = $decharge->statut_acheminement;
-            $decharge->forceFill(['statut_acheminement' => $cible])->save();
-            Journal::noter('decharge', $decharge->id, 'acheminement_decharge', ['statut_acheminement' => $avant], [
-                'statut_acheminement' => $cible, 'remise_id' => $remise->id,
-            ]);
+
+            // Service résolu à l'appel : le service des réclamations dépend lui-même de celui-ci.
+            app(ReclamationService::class)->verifierRemplacements($decharge);
         }, attempts: 3);
     }
 

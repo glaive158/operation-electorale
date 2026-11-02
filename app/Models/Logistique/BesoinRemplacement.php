@@ -14,7 +14,7 @@ class BesoinRemplacement extends Model
 {
     protected $table = 'besoins_remplacement';
 
-    protected $fillable = ['cycle_id', 'destinataire_id', 'materiel_id', 'quantite', 'motif', 'autorise_par'];
+    protected $fillable = ['cycle_id', 'destinataire_id', 'materiel_id', 'quantite', 'motif', 'autorise_par', 'reclamation_id'];
 
     protected function casts(): array
     {
@@ -24,6 +24,7 @@ class BesoinRemplacement extends Model
             'materiel_id' => 'integer',
             'quantite' => 'integer',
             'autorise_par' => 'integer',
+            'reclamation_id' => 'integer',
         ];
     }
 
@@ -40,6 +41,11 @@ class BesoinRemplacement extends Model
     public function materiel(): BelongsTo
     {
         return $this->belongsTo(Materiel::class);
+    }
+
+    public function reclamation(): BelongsTo
+    {
+        return $this->belongsTo(Reclamation::class);
     }
 
     public function autorisePar(): BelongsTo

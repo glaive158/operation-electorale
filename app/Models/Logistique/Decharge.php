@@ -32,6 +32,7 @@ class Decharge extends Model
     // Les statuts, le numéro, le circuit et la validation ne sont pas assignables en masse : ils passent par DechargeService.
     protected $fillable = [
         'cycle_id', 'destinataire_id', 'categorie', 'nature', 'decharge_remplacee_id', 'plan_dotation_id', 'prepare_par',
+        'besoin_remplacement_id',
     ];
 
     protected $attributes = [
@@ -94,6 +95,16 @@ class Decharge extends Model
     public function remplacante(): HasOne
     {
         return $this->hasOne(self::class, 'decharge_remplacee_id')->latestOfMany();
+    }
+
+    public function besoinRemplacement(): BelongsTo
+    {
+        return $this->belongsTo(BesoinRemplacement::class, 'besoin_remplacement_id');
+    }
+
+    public function reclamations(): HasMany
+    {
+        return $this->hasMany(Reclamation::class);
     }
 
     public function preparePar(): BelongsTo
