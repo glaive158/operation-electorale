@@ -34,6 +34,12 @@ return [
     */
     'jeton_jours' => (int) env('LOGISTIQUE_JETON_JOURS', 30),
 
+    /*
+    | Clé privée RSA (PEM) qui déchiffre le bloc de preuve des tablettes. Fichier hors dépôt, hors de public/,
+    | créé par « php artisan logistique:cle-preuve ». La clé publique en est déduite et publiée aux tablettes.
+    */
+    'cle_preuve_privee' => env('LOGISTIQUE_CLE_PREUVE_PRIVEE', storage_path('app/private/preuve.pem')),
+
     'nb_decharge' => 'NB : la présente décharge doit être retournée signée à la Division Logistique et de la Planification.',
 
 ];

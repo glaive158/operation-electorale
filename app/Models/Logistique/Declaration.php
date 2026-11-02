@@ -30,6 +30,23 @@ class Declaration extends Model
         'remplacee' => 'Remplacée',
     ];
 
+    /** Vérification de l'identité du signataire (le code personnel de réception, ou la connexion au compte). */
+    public const VERIFICATIONS = [
+        'en_attente' => 'En attente',
+        'verifiee_code' => 'Vérifiée par le code',
+        'verifiee_appareil' => 'Vérifiée par l\'appareil',
+        'non_verifiee' => 'Non vérifiée',
+        'a_verifier' => 'À vérifier',
+        'echec' => 'Échec',
+        'compte' => 'Connexion au compte',
+    ];
+
+    public const CONTESTATIONS = [
+        'aucune' => 'Aucune',
+        'contestee' => 'Contestée',
+        'levee' => 'Levée',
+    ];
+
     public const ANOMALIES = [
         'excedent' => 'Quantité reçue supérieure à la remise',
         'version_annulee' => 'Décharge annulée depuis',
@@ -55,6 +72,7 @@ class Declaration extends Model
             'decharge_id' => 'integer',
             'signataire_user_id' => 'integer',
             'delegation_id' => 'integer',
+            'gps_precision' => 'integer',
             'horodatage_terminal' => 'datetime',
             'anomalies' => 'array',
         ];

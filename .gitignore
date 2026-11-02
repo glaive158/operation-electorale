@@ -8,3 +8,6 @@ storage/framework/cache/data/
 storage/framework/sessions/
 storage/framework/views/
 .DS_Store
+
+# Clé privée de preuve (jamais versionnée)
+/storage/app/private/preuve.pem
