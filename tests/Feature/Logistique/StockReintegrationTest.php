@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Logistique\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use InvalidArgumentException;
+use LogicException;
 use Tests\TestCase;
 
 class StockReintegrationTest extends TestCase
@@ -109,6 +110,7 @@ class StockReintegrationTest extends TestCase
         $this->assertSame(108, $this->stock->physique($this->urne));
         $this->assertSame(108, $this->stock->libre($this->urne));
         $this->assertSame(1, JournalEntree::where('action', 'reclassement')->count());
+        $this->assertDatabaseHas('journal_logistique', ['objet_type' => 'mouvement_stock', 'objet_id' => $sortie->id, 'action' => 'reclassement']);
     }
 
     public function test_reclassement_depuis_a_reparer_limite_au_disponible(): void
@@ -187,6 +189,7 @@ class StockReintegrationTest extends TestCase
         $this->assertSame(-5, $m->quantite);
         $this->assertSame(95, $this->stock->physique($this->urne));
         $this->assertSame(1, JournalEntree::where('action', 'reforme')->count());
+        $this->assertDatabaseHas('journal_logistique', ['objet_type' => 'mouvement_stock', 'objet_id' => $m->id, 'action' => 'reforme']);
     }
 
     public function test_reforme_a_reparer_et_respect_de_l_engage(): void
@@ -207,6 +210,77 @@ class StockReintegrationTest extends TestCase
                 $this->stock->reformer($this->urne, $q, 'bon', $motif);
                 $this->fail('Une InvalidArgumentException était attendue.');
             } catch (InvalidArgumentException) {
+                $this->assertTrue(true);
+            }
+        }
+        $this->assertSame(1, MouvementStock::count());
+    }
+
+    public function test_reclassement_reserve_a_qui_gere_le_magasin(): void
+    {
+        $this->stock->reintegrer($this->urne, 10, 'a_reparer', $this->ligne, 'Retour abîmé');
+        $this->actingAs(User::factory()->create(['role' => 'prefet']));
+
+        try {
+            $this->stock->reclasser($this->urne, 4, 'a_reparer', 'bon', 'Réparées');
+            $this->fail('Une RegleLogistique était attendue.');
+        } catch (RegleLogistique $e) {
+            $this->assertStringContainsString('droit', $e->getMessage());
+        }
+        $this->assertSame(10, $this->stock->physique($this->urne, 'a_reparer'));
+
+        $this->actingAs(User::factory()->create(['role' => 'logistique_gestionnaire']));
+        $this->stock->reclasser($this->urne, 4, 'a_reparer', 'bon', 'Réparées');
+        $this->assertSame(104, $this->stock->physique($this->urne));
+    }
+
+    public function test_l_attribue_protege_le_bon_de_la_reforme_et_du_reclassement(): void
+    {
+        $this->stock->attribuer($this->cycle, $this->urne, 95, 'Dotation');
+        $this->assertSame(100, $this->stock->libre($this->urne));
+
+        foreach ([
+            fn () => $this->stock->reformer($this->urne, 6, 'bon', 'Hors d\'usage'),
+            fn () => $this->stock->reclasser($this->urne, 6, 'bon', 'a_reparer', 'Casse constatée'),
+        ] as $mouvement) {
+            try {
+                $mouvement();
+                $this->fail('Une RegleLogistique était attendue.');
+            } catch (RegleLogistique) {
+                $this->assertTrue(true);
+            }
+        }
+        $this->assertSame(100, $this->stock->physique($this->urne));
+        $this->assertSame(0, $this->stock->physique($this->urne, 'a_reparer'));
+
+        $this->stock->reformer($this->urne, 5, 'bon', 'Hors d\'usage');
+        $this->assertSame(95, $this->stock->physique($this->urne));
+    }
+
+    public function test_reforme_permise_a_l_administrateur(): void
+    {
+        $this->actingAs(User::factory()->create(['role' => 'admin']));
+
+        $this->stock->reformer($this->urne, 3, 'bon', 'Hors d\'usage');
+
+        $this->assertSame(97, $this->stock->physique($this->urne));
+    }
+
+    public function test_mouvements_sans_auteur_refuses(): void
+    {
+        auth()->forgetGuards();
+        $this->app['auth']->shouldUse('web');
+        $this->assertNull(auth()->id());
+
+        foreach ([
+            fn () => $this->stock->reintegrer($this->urne, 3, 'bon', $this->ligne, 'Retour'),
+            fn () => $this->stock->reclasser($this->urne, 3, 'bon', 'a_reparer', 'Casse'),
+            fn () => $this->stock->reformer($this->urne, 3, 'bon', 'Hors d\'usage'),
+        ] as $mouvement) {
+            try {
+                $mouvement();
+                $this->fail('Une LogicException était attendue.');
+            } catch (LogicException) {
                 $this->assertTrue(true);
             }
         }

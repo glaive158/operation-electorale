@@ -366,7 +366,8 @@ class StockService
 
     /**
      * Change l'état de matériel déjà au magasin (réparation : à réparer vers bon ; casse constatée : bon
-     * vers à réparer). Deux mouvements dans une transaction. Usage interne : le droit est contrôlé par l'appelant.
+     * vers à réparer). Deux mouvements dans une transaction. Le droit de gérer le magasin est reverifié ici :
+     * remettre du matériel à réparer en bon crée du stock libre.
      *
      * @return array{0: MouvementStock, 1: MouvementStock} la sortie de l'état d'origine, puis l'entrée dans l'état d'arrivée
      */
@@ -382,6 +383,9 @@ class StockService
         }
         $motif = $this->exigerMotif($motif, 'un reclassement');
         $this->exigerAuteur();
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique('Vous n\'avez pas le droit de reclasser du matériel.');
+        }
 
         return DB::transaction(function () use ($materiel, $quantite, $de, $vers, $motif) {
             $verrouille = Materiel::whereKey($materiel->id)->lockForUpdate()->firstOrFail();
@@ -391,9 +395,9 @@ class StockService
             $entree = $this->ecrire($verrouille, 'reclassement', $quantite, null, $motif, $vers, null);
 
             Journal::noter(
-                'materiel', $verrouille->id, 'reclassement',
+                'mouvement_stock', $sortie->id, 'reclassement',
                 null,
-                ['quantite' => $quantite, 'de' => $de, 'vers' => $vers, 'mouvements' => [$sortie->id, $entree->id]],
+                ['quantite' => $quantite, 'de' => $de, 'vers' => $vers, 'entree_id' => $entree->id],
                 $motif,
             );
 
@@ -423,9 +427,9 @@ class StockService
             $mouvement = $this->ecrire($verrouille, 'reforme', -$quantite, null, $motif, $etat, null);
 
             Journal::noter(
-                'materiel', $verrouille->id, 'reforme',
+                'mouvement_stock', $mouvement->id, 'reforme',
                 null,
-                ['quantite' => $quantite, 'etat' => $etat, 'mouvement_id' => $mouvement->id],
+                ['quantite' => $quantite, 'etat' => $etat],
                 $motif,
             );
 
