@@ -5,6 +5,7 @@ namespace App\Services\Logistique;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\DeclarationPiece;
 use App\Models\Logistique\PieceJointe;
+use App\Models\Logistique\RestitutionDeclarationPiece;
 use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\UploadedFile;
@@ -119,24 +120,27 @@ class PieceJointeService
     }
 
     /**
-     * Rattache à leur fichier les pièces de déclaration qui l'attendaient (les empreintes données, ou toutes) :
-     * seulement si l'auteur de la déclaration a lui-même envoyé ces octets (ou prouvé les posséder).
+     * Rattache à leur fichier les pièces de déclaration (de réception ou de restitution) qui l'attendaient (les
+     * empreintes données, ou toutes) : seulement si l'auteur de la déclaration a lui-même envoyé ces octets (ou
+     * prouvé les posséder).
      *
      * @param  list<string>|null  $empreintes
      */
     public function rattacherEnAttente(?array $empreintes = null): void
     {
-        $attendues = DeclarationPiece::whereNull('piece_jointe_id')
-            ->when($empreintes !== null, fn ($q) => $q->whereIn('empreinte', $empreintes))
-            ->with('declaration:id,user_id')->get();
-        foreach ($attendues as $attendue) {
-            $id = DB::table('pieces_jointes')
-                ->join('piece_possessions', 'piece_possessions.piece_jointe_id', '=', 'pieces_jointes.id')
-                ->where('pieces_jointes.empreinte', $attendue->empreinte)
-                ->where('piece_possessions.user_id', $attendue->declaration->user_id)
-                ->value('pieces_jointes.id');
-            if ($id !== null) {
-                DeclarationPiece::whereKey($attendue->id)->whereNull('piece_jointe_id')->update(['piece_jointe_id' => $id]);
+        foreach ([DeclarationPiece::class, RestitutionDeclarationPiece::class] as $modele) {
+            $attendues = $modele::whereNull('piece_jointe_id')
+                ->when($empreintes !== null, fn ($q) => $q->whereIn('empreinte', $empreintes))
+                ->with('declaration:id,user_id')->get();
+            foreach ($attendues as $attendue) {
+                $id = DB::table('pieces_jointes')
+                    ->join('piece_possessions', 'piece_possessions.piece_jointe_id', '=', 'pieces_jointes.id')
+                    ->where('pieces_jointes.empreinte', $attendue->empreinte)
+                    ->where('piece_possessions.user_id', $attendue->declaration->user_id)
+                    ->value('pieces_jointes.id');
+                if ($id !== null) {
+                    $modele::whereKey($attendue->id)->whereNull('piece_jointe_id')->update(['piece_jointe_id' => $id]);
+                }
             }
         }
     }
@@ -170,7 +174,8 @@ class PieceJointeService
 
     /**
      * La pièce d'une déclaration d'une décharge que l'utilisateur de terrain a le droit de voir
-     * (son périmètre, ou ses affectations pour un agent) ; null sinon, y compris pour une pièce orpheline.
+     * (son périmètre, ou ses affectations pour un agent), ou d'une déclaration de restitution qu'il peut voir
+     * (restitutionVisible) ; null sinon, y compris pour une pièce orpheline.
      */
     public function visiblePar(User $utilisateur, string $empreinte): ?PieceJointe
     {
@@ -183,7 +188,31 @@ class PieceJointeService
             ->whereHas('declaration', fn ($q) => $q->whereIn('decharge_id', $this->perimetre->decharges($utilisateur)->select('decharges.id')))
             ->exists();
 
-        return $visible ? $piece : null;
+        return $visible || $this->restitutionVisible($utilisateur, $piece) ? $piece : null;
+    }
+
+    /**
+     * La pièce porte une déclaration de restitution que l'utilisateur peut voir : celle de son propre retour
+     * (destinataire de son périmètre, ou l'agent détenteur lui-même), celle dont il est l'agent de retour désigné,
+     * ou n'importe laquelle pour le gestionnaire central.
+     */
+    private function restitutionVisible(User $utilisateur, PieceJointe $piece): bool
+    {
+        $pieces = RestitutionDeclarationPiece::where('piece_jointe_id', $piece->id);
+        if (Gate::forUser($utilisateur)->allows('logistique-gerer')) {
+            return $pieces->exists();
+        }
+        if (! $utilisateur->actif) {
+            return false;
+        }
+
+        $destinataires = $this->perimetre->destinataireIds($utilisateur)->all();
+
+        return $pieces->whereHas('declaration.restitution', fn ($q) => $q
+            ->where('agent_id', $utilisateur->id)
+            ->orWhere(fn ($q) => $q->where('detenteur_type', 'agent')->where('detenteur_id', $utilisateur->id))
+            ->orWhere(fn ($q) => $q->where('detenteur_type', 'destinataire')->whereIn('detenteur_id', $destinataires))
+        )->exists();
     }
 
     /** Sert le fichier, avec le type enregistré et sans que le navigateur puisse en deviner un autre. */

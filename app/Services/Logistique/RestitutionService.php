@@ -2,24 +2,60 @@
 
 namespace App\Services\Logistique;
 
+use App\Exceptions\Logistique\DeclarationEnCours;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Declaration;
+use App\Models\Logistique\Delegation;
+use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Restitution;
+use App\Models\Logistique\RestitutionDeclaration;
+use App\Models\Logistique\RestitutionDeclarationLigne;
+use App\Models\Logistique\RestitutionDeclarationPiece;
 use App\Models\Logistique\RestitutionLigne;
+use App\Models\User;
+use App\Support\Canonique;
+use Carbon\Carbon;
+use Carbon\CarbonInterface;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use InvalidArgumentException;
 use LogicException;
 
 /**
  * Restitution du matériel réutilisable à l'issue d'un cycle : ouverture d'une restitution par détenteur
- * (agent ou destinataire) d'après son solde (SoldeDetenteurService), puis recalcul tant qu'elle est à préparer.
+ * (agent ou destinataire) d'après son solde (SoldeDetenteurService), recalcul tant qu'elle est à préparer,
+ * désignation de l'agent de retour, déclaration du détenteur (compte, ou tablette de l'agent avec le code
+ * personnel du détenteur), arbitrage des déclarations divergentes et prise en charge par l'agent.
  *
- * Ordre des verrous : cycle, restitution(s). La restitution se tient aussi sur un cycle clos (spec §9.3) : aucune
- * écriture ici ne refuse un cycle clos.
+ * Ordre des verrous : cycle (partagé, sauf l'ouverture), restitution, déclarations. La restitution se tient aussi
+ * sur un cycle clos (spec §9.3) : aucune écriture ici ne refuse un cycle clos.
  */
 class RestitutionService
 {
-    public function __construct(private readonly SoldeDetenteurService $soldes) {}
+    private const HORS_PERIMETRE = 'Restitution hors de votre périmètre.';
+
+    private const MAX_QUANTITE = 10_000_000;
+
+    private const MAX_TEXTE = 500;
+
+    private const REFUS_CLE_REUTILISEE = "Clé d'idempotence déjà utilisée pour un autre contenu.";
+
+    private const REFUS_BLOC_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
+
+    private const DEJA_PRISE_EN_CHARGE = 'Ce retour est déjà pris en charge.';
+
+    public function __construct(
+        private readonly SoldeDetenteurService $soldes,
+        private readonly PerimetreTerrain $perimetre,
+        private readonly DelegationService $delegations,
+        private readonly PreuveService $preuves,
+        private readonly PieceJointeService $pieceJointes,
+    ) {}
 
     /**
      * Ouvre une restitution « à préparer » pour chaque détenteur qui a un solde et aucune restitution ouverte
@@ -134,6 +170,758 @@ class RestitutionService
 
             Journal::noter('restitution', $actuelle->id, 'recalcul_restitution', ['attendus' => $avant], ['attendus' => $apres]);
         }, attempts: 3);
+    }
+
+    /**
+     * Désigne l'agent de transport qui rapportera le retour (P6-R3), tant que le retour n'est pas pris en charge.
+     * Seul l'agent désigné déclare à la tablette et prend en charge.
+     */
+    public function affecterAgent(Restitution $restitution, User $agent): void
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique("Seul un gestionnaire logistique peut désigner l'agent de retour.");
+        }
+
+        DB::transaction(function () use ($restitution, $agent) {
+            $this->verrouillerCycle($restitution);
+            $actuelle = Restitution::whereKey($restitution->id)->lockForUpdate()->firstOrFail();
+            if (! $this->estAgentActif($agent)) {
+                throw new RegleLogistique('Seul un agent de transport actif peut être désigné pour le retour.');
+            }
+            if ($actuelle->statut !== 'a_preparer') {
+                throw new RegleLogistique(self::DEJA_PRISE_EN_CHARGE." L'agent ne change plus.");
+            }
+            if ($actuelle->agent_id !== null && (int) $actuelle->agent_id === (int) $agent->id) {
+                return;
+            }
+
+            $avant = $actuelle->agent_id;
+            $actuelle->forceFill(['agent_id' => $agent->id])->save();
+            Journal::noter('restitution', $actuelle->id, 'affectation_agent_restitution', ['agent_id' => $avant], ['agent_id' => (int) $agent->id]);
+        }, attempts: 3);
+
+        $restitution->refresh();
+    }
+
+    /**
+     * Déclaration de ce que le détenteur rend.
+     *
+     * - `compte` : l'auteur est le détenteur, l'autorité du destinataire (titulaire ou délégué actif) ou l'agent
+     *   détenteur lui-même ; il signe par sa connexion.
+     * - `tablette` : l'auteur est l'agent de retour désigné, le signataire est le détenteur, qui atteste par son code
+     *   personnel (bloc de preuve, vérifié comme pour une remise) ; sans bloc (repli), l'identité n'est pas vérifiée.
+     *   Hors de son périmètre, la restitution n'existe pas pour l'agent (ModelNotFoundException, 404).
+     *
+     * Chaque ligne de la restitution est déclarée une fois ; un retour supérieur à l'attendu est accepté mais à
+     * vérifier (excédent). Idempotence : même clé et même envoi ⇒ la déclaration enregistrée, sans rien refaire ;
+     * même clé pour autre chose ⇒ refus. Rapprochement comme pour une remise : la première déclaration saine est
+     * retenue et fixe le retour déclaré des lignes ; une seconde identique la confirme ; une seconde divergente
+     * les met toutes deux à vérifier, jusqu'à l'arbitrage du responsable (retenirDeclaration). Une restitution prise
+     * en charge n'accepte plus de déclaration.
+     *
+     * L'horodatage de la tablette est obligatoire en mode tablette : un texte ISO 8601 avec décalage (celui que la
+     * tablette atteste), ou un instant dont le décalage est celui de la tablette.
+     *
+     * @param  array{nom?: string, qualite?: string}  $signataire
+     * @param  array<int|string, array<string, mixed>>  $lignes  liste portant `materiel_id`, ou par identifiant d'article : {restitue, observation?}
+     * @param  array<string, string>  $pieces  rôle (signature, photo) par empreinte de pièce annoncée
+     */
+    public function declarer(
+        Restitution $r,
+        string $mode,
+        array $signataire,
+        array $lignes,
+        string $cle,
+        CarbonInterface|string|null $horodatageTerminal = null,
+        ?string $blocPreuve = null,
+        ?int $signataireUserId = null,
+        array $pieces = [],
+    ): RestitutionDeclaration {
+        $this->exigerAuteur();
+        $auteur = auth()->user();
+
+        if (! array_key_exists($mode, Declaration::MODES)) {
+            throw new InvalidArgumentException('Mode de déclaration inconnu.');
+        }
+        if (preg_match('/^[A-Za-z0-9-]{16,64}$/', $cle) !== 1) {
+            throw new InvalidArgumentException("La clé d'idempotence doit compter de 16 à 64 caractères (lettres, chiffres, tirets).");
+        }
+        $signataire = $this->signataire($signataire);
+        $lignes = $this->normaliser($lignes);
+        $pieces = $this->pieces($pieces);
+        $empreinte = self::empreinte((int) $r->id, $mode, $signataire, $lignes);
+
+        if ($mode === 'compte') {
+            if ($blocPreuve !== null || $signataireUserId !== null) {
+                throw new InvalidArgumentException('La preuve ne concerne que les déclarations de tablette.');
+            }
+            $instant = $horodatageTerminal === null ? null : $this->horodatage($horodatageTerminal)['instant'];
+
+            return $this->enregistrerOuRejouer($r, 'compte', $signataire, $lignes, $cle, $instant, null, $pieces, $empreinte, $auteur);
+        }
+
+        if ($horodatageTerminal === null) {
+            throw new InvalidArgumentException("L'horodatage de la tablette est obligatoire.");
+        }
+        ['texte' => $texte, 'instant' => $instant] = $this->horodatage($horodatageTerminal);
+        $bloc = PreuveService::empreinteBloc($blocPreuve);
+
+        // Hors du périmètre de l'agent, la restitution n'existe pas : 404, avant même de prendre le verrou.
+        $this->exigerAgentDesigne($auteur, $r);
+
+        // Toute la séquence (rejeu, contrôles, vérification du code, enregistrement) est sérialisée par restitution :
+        // deux envois simultanés de la même clé ne comptent pas deux fois un mauvais code.
+        $verrou = Cache::lock('logistique:restitution-tablette:'.$r->id, 30);
+        try {
+            return $verrou->block(
+                (int) config('logistique.declaration_attente_verrou', 10),
+                fn () => $this->sequenceTablette($r, $signataire, $lignes, $cle, $texte, $instant, $signataireUserId, $blocPreuve, $bloc, $pieces, $empreinte, $auteur),
+            );
+        } catch (LockTimeoutException) {
+            throw new DeclarationEnCours;
+        }
+    }
+
+    /**
+     * Le responsable retient une déclaration à vérifier (divergence, excédent, identité non établie) : les autres
+     * déclarations actives de la restitution sont écartées et le retour déclaré des lignes devient le sien.
+     */
+    public function retenirDeclaration(RestitutionDeclaration $d, string $motif): void
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut arbitrer une déclaration de restitution.');
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+        $restitution = Restitution::findOrFail(RestitutionDeclaration::whereKey($d->id)->value('restitution_id'));
+
+        DB::transaction(function () use ($restitution, $d, $motif) {
+            $this->verrouillerCycle($restitution);
+            $actuelle = Restitution::whereKey($restitution->id)->lockForUpdate()->firstOrFail();
+            $declarations = RestitutionDeclaration::where('restitution_id', $actuelle->id)->orderBy('id')->lockForUpdate()->get();
+            $retenue = $declarations->firstWhere('id', $d->id);
+
+            if ($actuelle->statut !== 'a_preparer') {
+                throw new RegleLogistique(self::DEJA_PRISE_EN_CHARGE.' La déclaration retenue ne change plus.');
+            }
+            if ($retenue === null || ! in_array($retenue->statut, ['a_verifier', 'valide'], true)) {
+                throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
+            }
+
+            $ecartees = [];
+            foreach ($declarations as $autre) {
+                if ($autre->id !== $retenue->id && ! in_array($autre->statut, ['ecartee', 'remplacee'], true)) {
+                    $autre->forceFill(['statut' => 'ecartee'])->save();
+                    $ecartees[] = $autre->id;
+                }
+            }
+            $avant = $retenue->statut;
+            $retenue->forceFill(['statut' => 'retenue'])->save();
+            $declares = $this->appliquerRetenue($actuelle);
+
+            Journal::noter('restitution_declaration', $retenue->id, 'arbitrage_restitution', ['statut' => $avant], [
+                'statut' => 'retenue', 'restitution_id' => $actuelle->id, 'ecartees' => $ecartees, 'declare_restitue' => $declares,
+            ], $motif);
+        }, attempts: 3);
+
+        $d->refresh();
+    }
+
+    /**
+     * L'agent prend en charge le retour : lui-même, ou un gestionnaire en son nom. L'agent est l'agent désigné ;
+     * sans agent désigné, seul l'agent détenteur prend en charge son propre retour (il devient l'agent du retour).
+     * Une déclaration retenue est requise ; la restitution passe « en retour ».
+     */
+    public function prendreEnCharge(Restitution $r, User $agent): void
+    {
+        $this->exigerAuteur();
+        $gerer = Gate::allows('logistique-gerer');
+        // Un compte de terrain n'agit que pour lui-même : pour lui, la restitution d'un autre n'existe pas.
+        if (! $gerer && (int) auth()->id() !== (int) $agent->id) {
+            throw (new ModelNotFoundException)->setModel(Restitution::class, [$r->id]);
+        }
+
+        DB::transaction(function () use ($r, $agent, $gerer) {
+            $this->verrouillerCycle($r);
+            $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
+
+            $detenteur = $actuelle->detenteur_type === 'agent' && (int) $actuelle->detenteur_id === (int) $agent->id;
+            $designe = $actuelle->agent_id !== null ? (int) $actuelle->agent_id === (int) $agent->id : $detenteur;
+            if (! $designe) {
+                if (! $gerer) {
+                    throw (new ModelNotFoundException)->setModel(Restitution::class, [$r->id]);
+                }
+                throw new RegleLogistique($actuelle->agent_id === null
+                    ? "Aucun agent n'est désigné pour ce retour."
+                    : "Cet agent n'est pas l'agent désigné pour ce retour.");
+            }
+            if (! $this->estAgentActif($agent)) {
+                throw new RegleLogistique('Seul un agent de transport actif peut prendre en charge le retour.');
+            }
+            if ($actuelle->statut !== 'a_preparer') {
+                throw new RegleLogistique(self::DEJA_PRISE_EN_CHARGE);
+            }
+            $retenue = RestitutionDeclaration::where('restitution_id', $actuelle->id)->where('statut', 'retenue')->lockForUpdate()->first();
+            if ($retenue === null) {
+                throw new RegleLogistique('Aucune déclaration retenue : le retour ne peut pas être pris en charge.');
+            }
+
+            $avant = ['statut' => $actuelle->statut, 'agent_id' => $actuelle->agent_id];
+            $actuelle->forceFill(['statut' => 'en_retour', 'agent_id' => $agent->id])->save();
+            Journal::noter('restitution', $actuelle->id, 'prise_en_charge_restitution', $avant, [
+                'statut' => 'en_retour', 'agent_id' => (int) $agent->id, 'declaration_id' => $retenue->id,
+                'declare_restitue' => RestitutionLigne::where('restitution_id', $actuelle->id)->orderBy('materiel_id')
+                    ->pluck('declare_restitue', 'materiel_id')->map(fn ($q) => (int) $q)->all(),
+            ]);
+        }, attempts: 3);
+
+        $r->refresh();
+    }
+
+    /**
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     */
+    private function sequenceTablette(Restitution $r, array $signataire, array $lignes, string $cle, string $texte, CarbonInterface $instant, ?int $signataireUserId, ?string $blocPreuve, ?string $bloc, array $pieces, string $empreinte, User $auteur): RestitutionDeclaration
+    {
+        // Le verrou tenu, ce qu'un envoi concurrent vient d'enregistrer est visible : on rejoue avant tout.
+        $rejeu = $this->rejeu($cle, $r, 'tablette', $empreinte, $bloc, $auteur);
+        if ($rejeu !== null) {
+            return $rejeu;
+        }
+
+        $actuelle = Restitution::findOrFail($r->id);
+        $this->exigerAgentDesigne($auteur, $actuelle);
+        $this->controlerStatut($actuelle, 'tablette');
+        // Les lignes avant le code : une déclaration incohérente n'est jamais l'occasion de compter un échec de code.
+        $this->controlerLignes($actuelle, $lignes);
+
+        // Hors de toute transaction : le journal et le compteur d'échecs survivent à un refus de l'enregistrement.
+        $preuve = $this->verifierIdentite($actuelle, $signataire, $lignes, $cle, $texte, $instant, $signataireUserId, $blocPreuve, $bloc);
+
+        return $this->enregistrerOuRejouer($actuelle, 'tablette', $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur);
+    }
+
+    /**
+     * Enregistre ; si une écriture concurrente de la même clé a gagné, la retrouve (ou refuse si elle diffère).
+     *
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     * @param  array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null  $preuve
+     */
+    private function enregistrerOuRejouer(Restitution $r, string $mode, array $signataire, array $lignes, string $cle, ?CarbonInterface $instant, ?array $preuve, array $pieces, string $empreinte, User $auteur): RestitutionDeclaration
+    {
+        try {
+            $declaration = $this->enregistrer($r, $mode, $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur);
+        } catch (UniqueConstraintViolationException $e) {
+            $rejeu = str_contains($e->getMessage(), 'cle_idempotence') ? $this->rejeu($cle, $r, $mode, $empreinte, $preuve['bloc_empreinte'] ?? null, $auteur) : null;
+            if ($rejeu === null) {
+                throw $e;
+            }
+
+            return $rejeu;
+        }
+
+        // Les pièces envoyées pendant l'enregistrement ont pu manquer le rattachement : on le refait.
+        if ($pieces !== [] && $declaration->wasRecentlyCreated) {
+            $this->pieceJointes->rattacherEnAttente(array_keys($pieces));
+        }
+
+        return $declaration->load('lignes');
+    }
+
+    /**
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     * @param  array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null  $preuve
+     * @param  array<string, string>  $pieces
+     */
+    private function enregistrer(Restitution $r, string $mode, array $signataire, array $lignes, string $cle, ?CarbonInterface $instant, ?array $preuve, array $pieces, string $empreinte, User $auteur): RestitutionDeclaration
+    {
+        try {
+            [$declaration, $conflit] = DB::transaction(function () use ($r, $mode, $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur) {
+                $this->verrouillerCycle($r);
+
+                // Rejeu : avant tout autre contrôle.
+                $existante = RestitutionDeclaration::where('cle_idempotence', $cle)->first();
+                if ($existante !== null) {
+                    if ($this->memeEnvoi($existante, $mode, $empreinte, $preuve['bloc_empreinte'] ?? null, $auteur)) {
+                        return [$existante, false];
+                    }
+                    $this->noterAnomalieIdempotence($existante, $cle, $r, $mode, $empreinte);
+
+                    return [$existante, true];
+                }
+
+                $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
+                $delegation = $this->controlerDroit($auteur, $actuelle, $mode);
+                $this->controlerStatut($actuelle, $mode);
+                $anomalies = $this->controlerLignes($actuelle, $lignes);
+                if ($preuve !== null && ! in_array($preuve['verification'], Declaration::VERIFICATIONS_ETABLIES, true)) {
+                    $anomalies[] = 'identite';
+                }
+                $anomalies = array_values(array_unique($anomalies));
+
+                $declaration = new RestitutionDeclaration([
+                    'restitution_id' => $actuelle->id, 'mode' => $mode,
+                    'signataire_nom' => $signataire['nom'], 'signataire_qualite' => $signataire['qualite'],
+                    'user_id' => $auteur->id, 'horodatage_terminal' => $instant,
+                    'cle_idempotence' => $cle, 'empreinte_contenu' => $empreinte,
+                ]);
+                $declaration->forceFill([
+                    'statut' => $anomalies === [] ? 'valide' : 'a_verifier',
+                    'anomalies' => $anomalies === [] ? null : $anomalies,
+                    // Au compte, le signataire est celui qui est connecté (et sa délégation) ; à la tablette, le compte
+                    // nommé par l'envoi, vérifié avant l'enregistrement.
+                    'signataire_user_id' => $mode === 'compte' ? $auteur->id : $preuve['signataire_user_id'],
+                    'delegation_id' => $mode === 'compte' ? $delegation?->id : $preuve['delegation_id'],
+                    'verification_identite' => $mode === 'compte' ? 'compte' : $preuve['verification'],
+                    'bloc_empreinte' => $preuve['bloc_empreinte'] ?? null,
+                ])->save();
+                foreach ($lignes as $ligne) {
+                    RestitutionDeclarationLigne::create(['restitution_declaration_id' => $declaration->id] + $ligne);
+                }
+                foreach ($pieces as $empreintePiece => $role) {
+                    RestitutionDeclarationPiece::create([
+                        'restitution_declaration_id' => $declaration->id, 'empreinte' => $empreintePiece, 'role' => $role,
+                        // Liée seulement si l'auteur a lui-même envoyé (ou prouvé posséder) ces octets.
+                        'piece_jointe_id' => $this->pieceJointes->pieceDe($auteur, $empreintePiece)?->id,
+                    ]);
+                }
+
+                ['changements' => $changements, 'declare_restitue' => $declares] = $this->rapprocher($actuelle);
+                $declaration->refresh();
+
+                Journal::noter('restitution_declaration', $declaration->id, 'declaration_restitution', null, [
+                    'restitution_id' => $actuelle->id, 'mode' => $mode,
+                    'statut' => $declaration->statut, 'anomalies' => $declaration->anomalies ?? [],
+                    'signataire_user_id' => $declaration->signataire_user_id, 'delegation_id' => $declaration->delegation_id,
+                    'verification_identite' => $declaration->verification_identite, 'bloc_empreinte' => $declaration->bloc_empreinte,
+                    'cle' => $cle, 'empreinte' => $empreinte, 'signataire' => $signataire, 'lignes' => $lignes, 'pieces' => $pieces,
+                    'horodatage_terminal' => $instant?->toIso8601String(),
+                    'rapprochement' => $changements, 'declare_restitue' => $declares,
+                ]);
+
+                return [$declaration, false];
+            }, attempts: 3);
+        } catch (UniqueConstraintViolationException $e) {
+            // Filet de concurrence : le même bloc de preuve ne sert qu'à une seule déclaration.
+            if (str_contains($e->getMessage(), 'bloc_empreinte')) {
+                $porteur = RestitutionDeclaration::where('bloc_empreinte', $preuve['bloc_empreinte'] ?? '')->value('id');
+                if ($porteur !== null) {
+                    Journal::noter('restitution_declaration', (int) $porteur, 'anomalie_preuve', null, [
+                        'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
+                    ], self::REFUS_BLOC_REUTILISE);
+                }
+
+                throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
+            }
+
+            throw $e;
+        }
+
+        if ($conflit) {
+            throw new RegleLogistique(self::REFUS_CLE_REUTILISEE);
+        }
+
+        return $declaration;
+    }
+
+    /**
+     * La déclaration déjà enregistrée sous cette clé, si l'envoi est le même ; null si la clé est libre ; refus si
+     * elle a servi à autre chose.
+     */
+    private function rejeu(string $cle, Restitution $r, string $mode, string $empreinte, ?string $bloc, User $auteur): ?RestitutionDeclaration
+    {
+        $existante = RestitutionDeclaration::where('cle_idempotence', $cle)->first();
+        if ($existante === null) {
+            return null;
+        }
+        if ($this->memeEnvoi($existante, $mode, $empreinte, $bloc, $auteur)) {
+            return $existante->load('lignes');
+        }
+
+        $this->noterAnomalieIdempotence($existante, $cle, $r, $mode, $empreinte);
+
+        throw new RegleLogistique(self::REFUS_CLE_REUTILISEE);
+    }
+
+    private function noterAnomalieIdempotence(RestitutionDeclaration $existante, string $cle, Restitution $r, string $mode, string $empreinte): void
+    {
+        Journal::noter('restitution_declaration', $existante->id, 'anomalie_idempotence', null, [
+            'cle' => $cle, 'restitution_id' => $r->id, 'mode' => $mode, 'empreinte_recue' => $empreinte,
+        ], "Clé d'idempotence réutilisée pour un autre contenu.");
+    }
+
+    /**
+     * Même contenu ; pour une tablette, même bloc de preuve (ou aucun des deux) et même compte connecté (une clé
+     * ne se rejoue pas depuis un autre appareil).
+     */
+    private function memeEnvoi(RestitutionDeclaration $existante, string $mode, string $empreinte, ?string $bloc, User $auteur): bool
+    {
+        if (! hash_equals((string) $existante->empreinte_contenu, $empreinte)) {
+            return false;
+        }
+        if ($mode === 'compte') {
+            return true;
+        }
+
+        return ($existante->bloc_empreinte === null && $bloc === null
+                || $existante->bloc_empreinte !== null && $bloc !== null && hash_equals($existante->bloc_empreinte, $bloc))
+            && (int) $existante->user_id === (int) $auteur->id;
+    }
+
+    /**
+     * Résultat de la vérification d'identité d'une déclaration de tablette. Sans bloc (repli : code oublié ou
+     * verrouillé), l'identité n'est pas vérifiée, et un compte ne reste rattaché que s'il est le détenteur attendu
+     * (titulaire ou délégué à l'instant de la signature, ou l'agent détenteur) ; signataire inconnu, elle est en échec.
+     *
+     * @param  array{nom: string, qualite: string}  $signataire
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     * @return array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}
+     */
+    private function verifierIdentite(Restitution $r, array $signataire, array $lignes, string $cle, string $texte, CarbonInterface $instant, ?int $signataireUserId, ?string $blocPreuve, ?string $bloc): array
+    {
+        $utilisateur = $signataireUserId === null ? null : User::find($signataireUserId);
+        $base = ['bloc_empreinte' => $bloc, 'signataire_user_id' => $utilisateur?->id, 'delegation_id' => null];
+        $destinataire = $r->detenteur_type === 'destinataire' ? Destinataire::find($r->detenteur_id) : null;
+
+        if ($blocPreuve === null || $blocPreuve === '') {
+            if ($utilisateur !== null) {
+                $delegation = null;
+                if ($destinataire !== null) {
+                    $titulaire = $this->perimetre->estTitulaireDe($utilisateur, $destinataire);
+                    $delegation = $titulaire ? null : $this->delegations->activeA($destinataire, $utilisateur, $instant);
+                    $attendu = $titulaire || $delegation !== null;
+                } else {
+                    $attendu = (bool) $utilisateur->actif && (int) $r->detenteur_id === (int) $utilisateur->id;
+                }
+                $base['signataire_user_id'] = $attendu ? $utilisateur->id : null;
+                $base['delegation_id'] = $delegation?->id;
+            }
+
+            return ['verification' => 'non_verifiee'] + $base;
+        }
+        if ($utilisateur === null) {
+            return ['verification' => 'echec'] + $base;
+        }
+
+        // Un délégué signe au titre de la délégation en vigueur à l'instant de sa signature, pas de celle d'aujourd'hui.
+        $delegation = null;
+        if ($destinataire !== null && ! $this->perimetre->estTitulaireDe($utilisateur, $destinataire)) {
+            $delegation = $this->delegations->activeA($destinataire, $utilisateur, $instant);
+        }
+
+        $contenu = $this->preuves->contenuPreuveRestitution($r, $signataire, $utilisateur->id, $lignes, $cle, $texte);
+        $resultat = $this->preuves->verifierDans(ContextePreuve::restitution($r), $contenu, $cle, $blocPreuve, $utilisateur, $instant, $delegation);
+
+        return ['verification' => $resultat['verification'], 'bloc_empreinte' => $resultat['bloc_empreinte'], 'delegation_id' => $delegation?->id] + $base;
+    }
+
+    /**
+     * Qui déclare : au compte, le détenteur (l'autorité titulaire du destinataire ou son délégué actif, dont la
+     * délégation est rapportée ; l'agent détenteur lui-même) ; à la tablette, l'agent de retour désigné.
+     */
+    private function controlerDroit(User $auteur, Restitution $r, string $mode): ?Delegation
+    {
+        if (! Gate::forUser($auteur)->allows('logistique-terrain')) {
+            throw new RegleLogistique(self::HORS_PERIMETRE);
+        }
+
+        if ($mode === 'tablette' || $r->detenteur_type === 'agent') {
+            $attendu = $mode === 'tablette' ? $r->agent_id : $r->detenteur_id;
+            if ($auteur->role !== 'agent_transport' || $attendu === null || (int) $attendu !== (int) $auteur->id) {
+                throw new RegleLogistique(self::HORS_PERIMETRE);
+            }
+
+            return null;
+        }
+
+        $destinataire = Destinataire::find($r->detenteur_id);
+        // Un seul instant pour les deux contrôles : une délégation qui prend fin entre les deux ne passe pas.
+        $maintenant = now();
+        if ($destinataire === null || ! $this->perimetre->estAutoriteDe($auteur, $destinataire, $maintenant)) {
+            throw new RegleLogistique(self::HORS_PERIMETRE);
+        }
+        if ($this->perimetre->estTitulaireDe($auteur, $destinataire)) {
+            return null;
+        }
+        $delegation = $this->delegations->activeA($destinataire, $auteur, $maintenant);
+        if ($delegation === null) {
+            throw new RegleLogistique(self::HORS_PERIMETRE);
+        }
+
+        return $delegation;
+    }
+
+    /** Une restitution dont l'agent n'est pas l'agent de retour désigné est, pour lui, inconnue (404). */
+    private function exigerAgentDesigne(User $auteur, Restitution $r): void
+    {
+        $actuelle = Restitution::findOrFail($r->id);
+        try {
+            $this->controlerDroit($auteur, $actuelle, 'tablette');
+        } catch (RegleLogistique) {
+            throw (new ModelNotFoundException)->setModel(Restitution::class, [$r->id]);
+        }
+    }
+
+    private function controlerStatut(Restitution $r, string $mode): void
+    {
+        if ($r->statut !== 'a_preparer') {
+            throw new RegleLogistique("Cette restitution n'attend plus de déclaration.");
+        }
+        $dejaFaite = RestitutionDeclaration::where('restitution_id', $r->id)->where('mode', $mode)
+            ->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
+        if ($dejaFaite) {
+            throw new RegleLogistique('Une déclaration '.mb_strtolower(Declaration::MODES[$mode]).' existe déjà pour cette restitution.');
+        }
+    }
+
+    /**
+     * Chaque ligne de la restitution, et elle seule, est déclarée ; anomalie « excedent » pour un retour supérieur
+     * à l'attendu.
+     *
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     * @return list<string>
+     */
+    private function controlerLignes(Restitution $r, array $lignes): array
+    {
+        $attendus = RestitutionLigne::where('restitution_id', $r->id)->pluck('attendu', 'materiel_id')
+            ->map(fn ($attendu) => (int) $attendu)->all();
+
+        $anomalies = [];
+        foreach ($lignes as $ligne) {
+            if (! array_key_exists($ligne['materiel_id'], $attendus)) {
+                throw new InvalidArgumentException('Article hors de cette restitution.');
+            }
+            if ($ligne['restitue'] > $attendus[$ligne['materiel_id']]) {
+                $anomalies[] = 'excedent';
+            }
+        }
+        if (count($lignes) !== count($attendus)) {
+            throw new InvalidArgumentException('Chaque ligne de la restitution doit être déclarée.');
+        }
+
+        return array_values(array_unique($anomalies));
+    }
+
+    /**
+     * Rapproche les déclarations actives (ni écartées ni remplacées) : une seule saine est retenue ; deux saines et
+     * identiques se confirment (la plus ancienne est retenue, l'autre concordante) ; deux divergentes sont toutes
+     * deux à vérifier, et rien n'est compté jusqu'à l'arbitrage. Le retour déclaré des lignes suit la retenue.
+     * L'appelant tient les verrous du cycle et de la restitution.
+     *
+     * @return array{changements: array<int, array{avant: string, apres: string}>, declare_restitue: array<int, int>}
+     */
+    private function rapprocher(Restitution $r): array
+    {
+        $actives = RestitutionDeclaration::where('restitution_id', $r->id)->whereNotIn('statut', ['ecartee', 'remplacee'])
+            ->orderBy('id')->lockForUpdate()->with('lignes')->get()->values();
+        if ($actives->count() > 2) {
+            throw new LogicException('Plus de deux déclarations actives sur une restitution : invariant rompu.');
+        }
+
+        $divergence = false;
+        $cibles = [];
+        if ($actives->count() === 1) {
+            $cibles[$actives[0]->id] = $this->saine($actives[0]) ? 'retenue' : 'a_verifier';
+        } elseif ($actives->count() === 2) {
+            [$premiere, $seconde] = [$actives[0], $actives[1]];
+            if ($this->contenu($premiere) !== $this->contenu($seconde)) {
+                $divergence = true;
+                $cibles = [$premiere->id => 'a_verifier', $seconde->id => 'a_verifier'];
+            } elseif ($this->saine($premiere) && $this->saine($seconde)) {
+                $cibles = [$premiere->id => 'retenue', $seconde->id => 'concordante'];
+            } else {
+                $cibles = [$premiere->id => 'a_verifier', $seconde->id => 'a_verifier'];
+            }
+        }
+
+        $changements = [];
+        foreach ($actives as $declaration) {
+            $anomalies = $declaration->anomalies ?? [];
+            if ($divergence && ! in_array('divergence', $anomalies, true)) {
+                $anomalies[] = 'divergence';
+            }
+            $cible = $cibles[$declaration->id];
+            if ($cible === $declaration->statut && $anomalies === ($declaration->anomalies ?? [])) {
+                continue;
+            }
+            $changements[$declaration->id] = ['avant' => $declaration->statut, 'apres' => $cible];
+            $declaration->forceFill(['statut' => $cible, 'anomalies' => $anomalies === [] ? null : $anomalies])->save();
+        }
+
+        return ['changements' => $changements, 'declare_restitue' => $this->appliquerRetenue($r)];
+    }
+
+    /**
+     * Le retour déclaré de chaque ligne est celui de la déclaration retenue, zéro sans déclaration retenue.
+     *
+     * @return array<int, int> retour déclaré par article
+     */
+    private function appliquerRetenue(Restitution $r): array
+    {
+        $retenue = RestitutionDeclaration::where('restitution_id', $r->id)->where('statut', 'retenue')->with('lignes')->first();
+        $declares = $retenue?->lignes->mapWithKeys(fn (RestitutionDeclarationLigne $l) => [$l->materiel_id => $l->restitue])->all() ?? [];
+
+        $resultat = [];
+        foreach (RestitutionLigne::where('restitution_id', $r->id)->orderBy('materiel_id')->get() as $ligne) {
+            $quantite = (int) ($declares[$ligne->materiel_id] ?? 0);
+            if ($ligne->declare_restitue !== $quantite) {
+                $ligne->forceFill(['declare_restitue' => $quantite])->save();
+            }
+            $resultat[$ligne->materiel_id] = $quantite;
+        }
+
+        return $resultat;
+    }
+
+    /** Saine : aucune anomalie propre (une divergence passée ne compte plus, le contenu étant figé). */
+    private function saine(RestitutionDeclaration $declaration): bool
+    {
+        return array_diff($declaration->anomalies ?? [], ['divergence']) === [];
+    }
+
+    /** @return list<array{0: int, 1: int}> */
+    private function contenu(RestitutionDeclaration $declaration): array
+    {
+        return $declaration->lignes->sortBy('materiel_id')
+            ->map(fn (RestitutionDeclarationLigne $l) => [(int) $l->materiel_id, (int) $l->restitue])->values()->all();
+    }
+
+    /** @return array{nom: string, qualite: string} */
+    private function signataire(array $signataire): array
+    {
+        $retenu = [];
+        foreach (['nom', 'qualite'] as $champ) {
+            $valeur = $signataire[$champ] ?? null;
+            $valeur = is_string($valeur) ? trim($valeur) : '';
+            if ($valeur === '' || mb_strlen($valeur) > 150) {
+                throw new InvalidArgumentException('Le nom et la qualité du signataire sont obligatoires (150 caractères au plus).');
+            }
+            $retenu[$champ] = $valeur;
+        }
+
+        return $retenu;
+    }
+
+    /**
+     * Lignes normalisées (entiers, triées par article), chaque article une seule fois ; les bornes sont vérifiées ici.
+     *
+     * @return list<array{materiel_id: int, restitue: int, observation: ?string}>
+     */
+    private function normaliser(array $lignes): array
+    {
+        $parArticle = [];
+        foreach ($lignes as $position => $ligne) {
+            if (! is_array($ligne)) {
+                throw new InvalidArgumentException('Chaque ligne de la restitution doit être déclarée.');
+            }
+            $materielId = $ligne['materiel_id'] ?? $position;
+            if (! is_int($materielId) && ! (is_string($materielId) && preg_match('/^\d{1,12}$/', $materielId) === 1)) {
+                throw new InvalidArgumentException('Chaque ligne de la restitution doit être déclarée.');
+            }
+            $materielId = (int) $materielId;
+            if (isset($parArticle[$materielId])) {
+                throw new InvalidArgumentException('Un article ne peut être déclaré qu\'une fois.');
+            }
+
+            $observation = $ligne['observation'] ?? null;
+            if ($observation !== null && ! is_string($observation)) {
+                throw new InvalidArgumentException("L'observation doit être un texte.");
+            }
+            $observation = $observation === null ? null : trim($observation);
+            $observation = $observation === '' ? null : $observation;
+            if ($observation !== null && mb_strlen($observation) > self::MAX_TEXTE) {
+                throw new InvalidArgumentException("L'observation est limitée à 500 caractères.");
+            }
+
+            $parArticle[$materielId] = [
+                'materiel_id' => $materielId,
+                'restitue' => $this->quantite($ligne['restitue'] ?? null),
+                'observation' => $observation,
+            ];
+        }
+        ksort($parArticle);
+
+        return array_values($parArticle);
+    }
+
+    private function quantite(mixed $valeur): int
+    {
+        if (is_string($valeur) && preg_match('/^-?\d{1,12}$/', $valeur) === 1) {
+            $valeur = (int) $valeur;
+        }
+        if (! is_int($valeur) || $valeur < 0 || $valeur > self::MAX_QUANTITE) {
+            throw new InvalidArgumentException('Les quantités restituées doivent être des entiers de 0 à 10 000 000.');
+        }
+
+        return $valeur;
+    }
+
+    /**
+     * @param  array<string, string>  $pieces
+     * @return array<string, string>
+     */
+    private function pieces(array $pieces): array
+    {
+        $retenues = [];
+        foreach ($pieces as $empreinte => $role) {
+            $empreinte = (string) $empreinte;
+            if (preg_match('/^[0-9a-f]{64}$/', $empreinte) !== 1 || ! is_string($role) || ! array_key_exists($role, RestitutionDeclarationPiece::ROLES)) {
+                throw new InvalidArgumentException('Pièce annoncée invalide : empreinte SHA-256 et rôle (signature ou photo) attendus.');
+            }
+            $retenues[$empreinte] = $role;
+        }
+
+        return $retenues;
+    }
+
+    /**
+     * Le texte attesté par la tablette (ISO 8601 avec décalage, tel quel) et l'instant ramené au fuseau de
+     * l'application, pour les comparaisons en base et le stockage.
+     *
+     * @return array{texte: string, instant: Carbon}
+     */
+    private function horodatage(CarbonInterface|string $valeur): array
+    {
+        if ($valeur instanceof CarbonInterface) {
+            return ['texte' => $valeur->format('Y-m-d\TH:i:sP'), 'instant' => Carbon::instance($valeur)->setTimezone((string) config('app.timezone'))];
+        }
+
+        $instant = Carbon::createFromFormat('Y-m-d\TH:i:sP', $valeur);
+        if ($instant === false || $instant->format('Y-m-d\TH:i:sP') !== $valeur) {
+            throw new InvalidArgumentException("L'horodatage doit être au format ISO 8601 avec décalage, par exemple 2026-11-05T10:00:00+00:00.");
+        }
+
+        return ['texte' => $valeur, 'instant' => $instant->setTimezone((string) config('app.timezone'))];
+    }
+
+    /**
+     * Empreinte du contenu : SHA-256 du JSON canonique {restitution, mode, signataire, lignes triées par article}.
+     *
+     * @param  array{nom: string, qualite: string}  $signataire
+     * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
+     */
+    private static function empreinte(int $restitutionId, string $mode, array $signataire, array $lignes): string
+    {
+        return Canonique::empreinte(['restitution_id' => $restitutionId, 'mode' => $mode, 'signataire' => $signataire, 'lignes' => $lignes]);
+    }
+
+    /** Verrou partagé du cycle, d'abord : la restitution ne refuse pas un cycle clos (spec §9.3). */
+    private function verrouillerCycle(Restitution $r): void
+    {
+        if (Cycle::whereKey($r->cycle_id)->sharedLock()->first() === null) {
+            throw new LogicException('Cycle introuvable : invariant rompu.');
+        }
+    }
+
+    private function estAgentActif(User $agent): bool
+    {
+        $compte = User::find($agent->id);
+
+        return $compte !== null && (bool) $compte->actif && $compte->role === 'agent_transport';
     }
 
     private function exigerAuteur(): void
