@@ -195,7 +195,6 @@ class DechargeService
                 'valide_par' => auth()->id(),
                 'valide_le' => now(),
             ]);
-            $actuelle->setRelation('plan', $plan);
             $actuelle->forceFill(['donnees_gelees' => DonneesDecharge::construire($actuelle)])->save();
 
             Journal::noter('decharge', $actuelle->id, 'validation_decharge', ['statut_document' => 'brouillon'], [
@@ -232,11 +231,15 @@ class DechargeService
                 throw new RegleLogistique('Décharge déjà partie : annulation impossible ; seule une réintégration physique remet du matériel en stock.');
             }
 
+            // Même ordre que valider() (matériel croissant) pour les verrous de stock ; l'invariant est
+            // vérifié sur toutes les lignes avant de libérer quoi que ce soit.
+            $lignes = DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('materiel_id')->get();
+            if ($lignes->contains(fn (DechargeLigne $l) => $l->reservation_id === null)) {
+                throw new LogicException('Ligne validée sans réservation : invariant rompu.');
+            }
+
             $liberees = [];
-            foreach (DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('id')->get() as $ligne) {
-                if ($ligne->reservation_id === null) {
-                    continue;
-                }
+            foreach ($lignes as $ligne) {
                 $this->stock->liberer(ReservationStock::findOrFail($ligne->reservation_id), $motif, $versStockCommun);
                 $liberees[] = [
                     'materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite, 'reservation_id' => $ligne->reservation_id,

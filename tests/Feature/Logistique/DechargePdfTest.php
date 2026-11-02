@@ -273,4 +273,97 @@ class DechargePdfTest extends TestCase
         $this->get(route('logistique.decharges.qr', $decharge->identifiant))->assertRedirect(route('logistique.decharges.show', $decharge));
         $this->get(route('logistique.decharges.qr', 'inconnu'))->assertNotFound();
     }
+
+    public function test_url_du_qr_vient_de_la_configuration_et_non_de_la_requete(): void
+    {
+        config(['app.url' => 'https://dge.example/']);
+        $decharge = $this->dechargeValidee();
+
+        $this->withServerVariables(['HTTP_HOST' => 'autre-hote.test'])->get(route('logistique.decharges.show', $decharge))->assertOk();
+        $url = $this->pdf()->urlQr($decharge);
+
+        $this->assertSame('https://dge.example/logistique/d/'.$decharge->identifiant, $url);
+    }
+
+    public function test_remplacement_mentionne_sur_le_document(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 500);
+        $origine = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $this->service()->valider($origine);
+        $origine = $origine->fresh();
+        $this->assertNull($origine->donnees_gelees['remplace']);
+        $this->assertStringNotContainsString('Remplace la décharge', $this->texte($this->pdf()->html($origine, 'initial')));
+        $this->service()->annuler($origine, 'Erreur');
+
+        $remplacante = $this->service()->remplacer($origine->fresh());
+        $apercu = $this->texte($this->pdf()->html($remplacante, 'initial', true));
+        $this->service()->valider($remplacante);
+        $remplacante = $remplacante->fresh();
+
+        $this->assertSame($origine->numero, $remplacante->donnees_gelees['remplace']['numero']);
+        $this->assertStringContainsString('Remplace la décharge n° '.$origine->numero, $apercu);
+        $this->assertDansLOrdre(
+            ['DÉCHARGE DE MATÉRIEL ÉLECTORAL', 'Remplace la décharge n° '.$origine->numero, 'Destinataire', 'Nomenclature'],
+            $this->texte($this->pdf()->html($remplacante, 'initial')),
+        );
+    }
+
+    public function test_exemplaire_d_annulation_porte_la_date_et_le_motif(): void
+    {
+        $decharge = $this->dechargeValidee();
+        $this->service()->annuler($decharge, 'Erreur de saisie');
+        $decharge = $decharge->fresh();
+
+        $annulation = $this->texte($this->pdf()->html($decharge, 'annulation'));
+        $initial = $this->texte($this->pdf()->html($decharge, 'initial'));
+
+        $this->assertStringContainsString('Annulée le '.$decharge->annule_le->format('d/m/Y').' — motif : Erreur de saisie', $annulation);
+        $this->assertStringNotContainsString('Annulée le', $initial);
+        $this->assertStringNotContainsString('Erreur de saisie', $initial);
+    }
+
+    public function test_emission_retire_le_fichier_si_l_enregistrement_echoue(): void
+    {
+        $decharge = $this->dechargeValidee();
+        DechargeDocument::creating(fn () => throw new \RuntimeException('base indisponible'));
+
+        try {
+            $this->pdf()->emettre($decharge, 'initial');
+            $this->fail('L\'enregistrement du document devait échouer.');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('base indisponible', $e->getMessage());
+        }
+
+        $this->assertSame([], Storage::disk(config('logistique.disque_decharges'))->allFiles());
+        $this->assertSame(0, DechargeDocument::count());
+    }
+
+    public function test_contenu_refuse_sans_droit(): void
+    {
+        $document = $this->pdf()->emettre($this->dechargeValidee(), 'initial');
+        $this->actingAs(User::factory()->create(['role' => 'prefet']));
+
+        $this->expectException(RegleLogistique::class);
+        $this->expectExceptionMessage('Seul le personnel logistique peut télécharger les décharges.');
+        $this->pdf()->contenu($document);
+    }
+
+    public function test_lignes_triees_par_ordre_puis_libelle_accentue(): void
+    {
+        $ziploc = Materiel::create(['libelle' => 'Ziploc', 'categorie' => 'materiel_lourd', 'unite_stock' => 'pièce', 'ordre' => 9]);
+        $etiquettes = Materiel::create(['libelle' => 'Étiquettes', 'categorie' => 'materiel_lourd', 'unite_stock' => 'pièce', 'ordre' => 9]);
+        $this->approuverPlanFictif([
+            [$this->prefecture, $this->urnes, 10], [$this->prefecture, $ziploc, 10], [$this->prefecture, $etiquettes, 10],
+        ]);
+        $this->stockerFictif($this->urnes, 500);
+        $this->stockerFictif($ziploc, 500);
+        $this->stockerFictif($etiquettes, 500);
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $this->service()->valider($decharge);
+
+        $libelles = array_column($decharge->fresh()->donnees_gelees['lignes'], 'libelle');
+
+        $this->assertSame(['Urnes', 'Étiquettes', 'Ziploc'], $libelles);
+    }
 }

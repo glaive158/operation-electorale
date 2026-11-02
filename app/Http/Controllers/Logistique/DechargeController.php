@@ -204,6 +204,11 @@ class DechargeController extends Controller
             $octets = $this->pdf->pdf($this->pdf->html($decharge, 'initial', apercu: true));
         } catch (RegleLogistique|InvalidArgumentException $e) {
             return back()->with('error', $e->getMessage());
+        } catch (Throwable $e) {
+            report($e);
+
+            return redirect()->route('logistique.decharges.show', $decharge)
+                ->with('error', 'Aperçu impossible : '.$e->getMessage());
         }
 
         return $this->reponsePdf($octets, "apercu-{$decharge->id}.pdf");
@@ -218,7 +223,7 @@ class DechargeController extends Controller
         try {
             $octets = $this->pdf->contenu($document);
         } catch (RegleLogistique $e) {
-            return back()->with('error', $e->getMessage());
+            return redirect()->route('logistique.decharges.show', $decharge)->with('error', $e->getMessage());
         }
 
         return $this->reponsePdf($octets, "{$decharge->numero}-{$exemplaire}.pdf");

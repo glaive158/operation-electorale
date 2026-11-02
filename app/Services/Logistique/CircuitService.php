@@ -64,7 +64,7 @@ class CircuitService
             }
 
             $apres = ['circuit' => $circuit ?? $actuel->circuit_defaut, 'derogation' => $circuit !== null];
-            Journal::noter('circuit_departement', $prefecture->id, 'definition_circuit', $avant + [
+            Journal::noter('cycle', $actuel->id, 'definition_circuit', $avant + [
                 'cycle_id' => $actuel->id, 'departement_id' => $departementId,
             ], $apres + [
                 'cycle_id' => $actuel->id, 'departement_id' => $departementId,

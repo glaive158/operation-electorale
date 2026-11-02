@@ -35,8 +35,9 @@ class DonneesDecharge
             ->whereIn('materiel_id', $lignes->pluck('materiel_id'))->pluck('nom', 'materiel_id');
 
         $lignes = $lignes
-            ->sort(fn (DechargeLigne $a, DechargeLigne $b) => [$a->materiel->ordre, $a->materiel->libelle, $a->id]
-                <=> [$b->materiel->ordre, $b->materiel->libelle, $b->id])
+            ->sort(fn (DechargeLigne $a, DechargeLigne $b) => $a->materiel->ordre <=> $b->materiel->ordre
+                ?: TriLibelles::comparer($a->materiel->libelle, $b->materiel->libelle)
+                ?: $a->id <=> $b->id)
             ->values()
             ->map(function (DechargeLigne $ligne) use ($annexes, $entites) {
                 $annexe = $annexes->get($ligne->materiel_id);
@@ -69,6 +70,9 @@ class DonneesDecharge
             'categorie' => $decharge->categorie,
             'nature' => $decharge->nature,
             'numero' => $decharge->numero,
+            'remplace' => $decharge->decharge_remplacee_id === null ? null : [
+                'numero' => Decharge::whereKey($decharge->decharge_remplacee_id)->value('numero'),
+            ],
             'cycle' => [
                 'libelle' => $cycle->libelle,
                 'type' => $cycle->type,

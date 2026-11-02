@@ -127,11 +127,10 @@
                             @else
                                 <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ $n($l->quantite) }}</td>
                                 <td class="px-5 py-3 text-slate-600">{{ $l->observations }}</td>
-                                @if($brouillon) <td></td> @endif
                             @endif
                         </tr>
                     @empty
-                        <tr><td colspan="6" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
+                        <tr><td colspan="{{ $brouillon && $ouvert ? 6 : 5 }}" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
                     @endforelse
                 </tbody>
             </table>

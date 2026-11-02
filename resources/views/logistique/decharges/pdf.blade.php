@@ -25,6 +25,8 @@
     .meta { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
     .meta td { padding: 2px 0; vertical-align: top; }
     .meta td.k { width: 26%; font-weight: bold; }
+    .remplace { text-align: center; margin: -4px 0 8px 0; font-style: italic; }
+    .annulation { text-align: center; margin: -4px 0 8px 0; font-weight: bold; }
     .effectifs { margin: 8px 0; font-weight: bold; text-align: center; }
     table.nomenclature, table.annexe { width: 100%; border-collapse: collapse; }
     table.nomenclature th, table.nomenclature td, table.annexe th, table.annexe td { border: 0.6pt solid #333; padding: 4px 5px; vertical-align: top; }
@@ -55,6 +57,12 @@
 </div>
 
 <h1>{{ $d['titre'] }}</h1>
+@if(! empty($d['remplace']['numero']))
+    <p class="remplace">Remplace la décharge n° {{ $d['remplace']['numero'] }}</p>
+@endif
+@if(! empty($annulation))
+    <p class="annulation">Annulée le {{ $annulation['le'] }} — motif : {{ $annulation['motif'] }}</p>
+@endif
 
 <table class="meta">
     <tr><td class="k">N°</td><td>{{ $d['numero'] ?? '—' }}</td></tr>

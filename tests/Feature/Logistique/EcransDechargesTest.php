@@ -457,4 +457,72 @@ class EcransDechargesTest extends TestCase
             $this->assertSame(collect($ecritures)->first(fn ($e) => app('router')->getRoutes()->match(Request::create($e[1], $e[0]))->getName() === $route->getName())[3], $droit, $route->getName());
         }
     }
+
+    public function test_pdf_altere_ramene_a_la_fiche_avec_l_erreur(): void
+    {
+        $this->preparerPlan();
+        $decharge = $this->dechargeValidee();
+        $document = app(DechargePdfService::class)->emettre($decharge, 'initial');
+        Storage::disk(config('logistique.disque_decharges'))->put($document->chemin, '%PDF-falsifie');
+        $this->actingAs($this->gestionnaire);
+
+        $this->get(route('logistique.decharges.pdf', [$decharge, 'initial']))
+            ->assertRedirect(route('logistique.decharges.show', $decharge))
+            ->assertSessionHas('error', 'Fichier archivé altéré ou absent : réimpression refusée.');
+    }
+
+    public function test_apercu_en_echec_ramene_a_la_fiche_sans_erreur_500(): void
+    {
+        $this->preparerPlan();
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $this->partialMock(DechargePdfService::class, function ($mock) {
+            $mock->shouldReceive('pdf')->andThrow(new RuntimeException('moteur PDF indisponible'));
+        });
+        $this->actingAs($this->gestionnaire);
+
+        $this->get(route('logistique.decharges.apercu', $decharge))
+            ->assertRedirect(route('logistique.decharges.show', $decharge))
+            ->assertSessionHas('error', 'Aperçu impossible : moteur PDF indisponible');
+    }
+
+    /** Nombre de cellules d'en-tête et de la première ligne du tableau des lignes de la fiche. */
+    private function colonnesFiche(string $html): array
+    {
+        preg_match('#<table.*?</table>#s', $html, $table);
+        preg_match('#<thead>(.*?)</thead>#s', $table[0], $tete);
+        preg_match('#<tbody[^>]*>(.*?)</tbody>#s', $table[0], $corps);
+        preg_match('#<tr[^>]*>(.*?)</tr>#s', $corps[1], $ligne);
+
+        return [preg_match_all('#<th\b#', $tete[1]), preg_match_all('#<td\b#', $ligne[1]), $ligne[1]];
+    }
+
+    public function test_fiche_d_un_brouillon_sur_cycle_clos_garde_des_colonnes_alignees(): void
+    {
+        $this->preparerPlan();
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $this->cycle->forceFill(['statut' => 'clos'])->save();
+        $this->actingAs($this->gestionnaire);
+
+        $html = $this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent();
+        [$entetes, $cellules] = $this->colonnesFiche($html);
+        $this->assertSame($entetes, $cellules);
+        $this->assertSame(5, $entetes);
+
+        $decharge->lignes()->delete();
+        $html = $this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent();
+        [, , $vide] = $this->colonnesFiche($html);
+        $this->assertStringContainsString('colspan="5"', $vide);
+    }
+
+    public function test_fiche_d_un_brouillon_sur_cycle_ouvert_garde_des_colonnes_alignees(): void
+    {
+        $this->preparerPlan();
+        $decharge = $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        $this->actingAs($this->gestionnaire);
+
+        [$entetes, $cellules] = $this->colonnesFiche($this->get(route('logistique.decharges.show', $decharge))->assertOk()->getContent());
+
+        $this->assertSame(6, $entetes);
+        $this->assertSame(6, $cellules);
+    }
 }

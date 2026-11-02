@@ -87,7 +87,7 @@ class EcartVersionService
                 'engage' => $b['engage'],
             ] + $ecart, $b['ecarts']))
             ->sortBy([
-                fn ($a, $b) => strcmp($a['destinataire']->libelle, $b['destinataire']->libelle),
+                fn ($a, $b) => TriLibelles::comparer($a['destinataire']->libelle, $b['destinataire']->libelle),
                 fn ($a, $b) => $a['materiel']->ordre <=> $b['materiel']->ordre,
                 fn ($a, $b) => $a['materiel']->id <=> $b['materiel']->id,
             ])

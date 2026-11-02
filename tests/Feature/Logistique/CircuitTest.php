@@ -63,6 +63,10 @@ class CircuitTest extends TestCase
 
         $entree = JournalEntree::where('action', 'definition_circuit')->firstOrFail();
         $this->assertSame('route coupée', $entree->motif);
+        $this->assertSame('cycle', $entree->objet_type);
+        $this->assertSame($cycle->id, (int) $entree->objet_id);
+        $this->assertSame(10, (int) $entree->avant['departement_id']);
+        $this->assertSame(10, (int) $entree->apres['departement_id']);
         $this->assertSame('via_prefet', $entree->avant['circuit']);
         $this->assertFalse($entree->avant['derogation']);
         $this->assertSame('direct', $entree->apres['circuit']);

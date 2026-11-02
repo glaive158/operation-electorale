@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use LogicException;
+use Throwable;
 use ZipArchive;
 
 /**
@@ -51,9 +52,17 @@ class DechargePdfService
             $filigrane = $exemplaire === 'annulation' ? 'ANNULÉE' : null;
         }
 
+        // Date et motif d'annulation viennent de la ligne de la décharge (écrits une seule fois, à
+        // l'annulation) : ils ne figurent pas dans les données figées à la validation.
+        $annulation = $exemplaire === 'annulation' && $decharge->statut_document === 'annulee' ? [
+            'le' => $decharge->annule_le?->format('d/m/Y'),
+            'motif' => $decharge->motif_annulation,
+        ] : null;
+
         return view('logistique.decharges.pdf', [
             'd' => $donnees,
             'filigrane' => $filigrane,
+            'annulation' => $annulation,
             'identifiant' => $decharge->identifiant,
             'qr' => $this->qr($decharge),
         ])->render();
@@ -74,6 +83,15 @@ class DechargePdfService
         return $dompdf->output();
     }
 
+    /**
+     * URL absolue de vérification : l'hôte vient de la configuration (APP_URL), jamais de la requête,
+     * car l'URL est imprimée sur un document officiel.
+     */
+    public function urlQr(Decharge $decharge): string
+    {
+        return rtrim((string) config('app.url'), '/').route('logistique.decharges.qr', $decharge->identifiant, false);
+    }
+
     /** QR code (data URI PNG) de l'URL absolue de vérification de la décharge. */
     public function qr(Decharge $decharge): string
     {
@@ -84,12 +102,13 @@ class DechargePdfService
             'quietzoneSize' => 1,
         ]);
 
-        return (new QRCode($options))->render(route('logistique.decharges.qr', $decharge->identifiant));
+        return (new QRCode($options))->render($this->urlQr($decharge));
     }
 
     /**
      * Émet l'exemplaire : le PDF est rendu une seule fois, archivé et empreint. Idempotent — un exemplaire
-     * déjà émis est renvoyé tel quel, y compris pour deux appels simultanés (contrainte d'unicité).
+     * déjà émis est renvoyé tel quel, y compris pour deux appels simultanés (le verrou de la ligne de
+     * la décharge les sérialise).
      */
     public function emettre(Decharge $decharge, string $exemplaire): DechargeDocument
     {
@@ -118,19 +137,27 @@ class DechargePdfService
                 throw new RegleLogistique("Archivage du document impossible : {$chemin}.");
             }
 
-            $document = DechargeDocument::create([
-                'decharge_id' => $actuelle->id,
-                'exemplaire' => $exemplaire,
-                'chemin' => $chemin,
-                'empreinte' => hash('sha256', $octets),
-                'taille' => strlen($octets),
-                'emis_par' => auth()->id(),
-                'emis_le' => now(),
-            ]);
+            // Le fichier est écrit hors transaction de base : si la suite échoue, on le retire pour ne
+            // laisser aucun archivé sans ligne ni journal.
+            try {
+                $document = DechargeDocument::create([
+                    'decharge_id' => $actuelle->id,
+                    'exemplaire' => $exemplaire,
+                    'chemin' => $chemin,
+                    'empreinte' => hash('sha256', $octets),
+                    'taille' => strlen($octets),
+                    'emis_par' => auth()->id(),
+                    'emis_le' => now(),
+                ]);
 
-            Journal::noter('decharge', $actuelle->id, 'emission_pdf', null, [
-                'exemplaire' => $exemplaire, 'chemin' => $chemin, 'empreinte' => $document->empreinte, 'taille' => $document->taille,
-            ]);
+                Journal::noter('decharge', $actuelle->id, 'emission_pdf', null, [
+                    'exemplaire' => $exemplaire, 'chemin' => $chemin, 'empreinte' => $document->empreinte, 'taille' => $document->taille,
+                ]);
+            } catch (Throwable $e) {
+                $this->disque()->delete($chemin);
+
+                throw $e;
+            }
 
             return $document;
         }, attempts: 3);
@@ -139,6 +166,10 @@ class DechargePdfService
     /** Octets du fichier archivé, après contrôle de son empreinte. */
     public function contenu(DechargeDocument $document): string
     {
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique('Seul le personnel logistique peut télécharger les décharges.');
+        }
+
         $disque = $this->disque();
         $octets = $disque->exists($document->chemin) ? $disque->get($document->chemin) : null;
 
@@ -197,12 +228,21 @@ class DechargePdfService
         if ($zip->open($chemin, ZipArchive::CREATE | ZipArchive::EXCL) !== true) {
             throw new RegleLogistique('Création de l\'archive ZIP impossible.');
         }
-        foreach ($entrees as $nom => $octets) {
-            $zip->addFromString($nom, $octets);
-        }
-        if (! $zip->close()) {
+
+        try {
+            foreach ($entrees as $nom => $octets) {
+                if (! $zip->addFromString($nom, $octets)) {
+                    $zip->close();
+                    throw new RegleLogistique('Archive ZIP incomplète : téléchargement annulé.');
+                }
+            }
+            if (! $zip->close()) {
+                throw new RegleLogistique('Écriture de l\'archive ZIP impossible.');
+            }
+        } catch (Throwable $e) {
             @unlink($chemin);
-            throw new RegleLogistique('Écriture de l\'archive ZIP impossible.');
+
+            throw $e;
         }
 
         return $chemin;

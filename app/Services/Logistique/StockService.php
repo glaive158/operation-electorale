@@ -7,6 +7,7 @@ use App\Exceptions\Logistique\StockInsuffisant;
 use App\Models\Logistique\AttributionStock;
 use App\Models\Logistique\CommandeLigne;
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
 use App\Models\Logistique\ReservationStock;
@@ -242,6 +243,14 @@ class StockService
             $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->firstOrFail();
             if (! $actuel->estOuvert()) {
                 throw new RegleLogistique('Ce cycle est déjà clos.');
+            }
+
+            // Une décharge validée qui n'est pas partie garde des réservations que la clôture libérerait
+            // sous elle : on l'annule (ou on la charge) d'abord. Un brouillon ne réserve rien.
+            $nonParties = Decharge::where('cycle_id', $actuel->id)
+                ->where('statut_document', 'validee')->where('statut_acheminement', 'a_preparer')->count();
+            if ($nonParties > 0) {
+                throw new RegleLogistique("Clôture impossible : {$nonParties} décharge(s) validée(s) non partie(s) — annulez-les ou chargez-les d'abord.");
             }
 
             // Le cycle tenu en exclusif bloque toute écriture sur ses réservations et

@@ -233,4 +233,20 @@ class EcartVersionTest extends TestCase
             $ecarts->map(fn ($e) => [$e['destinataire']->libelle, $e['materiel']->libelle, $e['type']])->all(),
         );
     }
+
+    public function test_tri_des_destinataires_accentues(): void
+    {
+        $this->sousPrefecture2->forceFill(['libelle' => 'Éthiopie'])->save();
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->sousPrefecture2, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 1000, 1000);
+        foreach ([$this->prefecture, $this->sousPrefecture2] as $d) {
+            $this->service()->valider($this->service()->preparer($this->cycle, $d, 'materiel_lourd'));
+        }
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 120], [$this->sousPrefecture2, $this->urnes, 120]]);
+
+        $this->assertSame(
+            ['Éthiopie', 'Préfecture de Thiès'],
+            $this->ecarts()->map(fn ($e) => $e['destinataire']->libelle)->all(),
+        );
+    }
 }

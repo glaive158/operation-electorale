@@ -127,6 +127,62 @@ class AnnulationDechargeTest extends TestCase
         $this->assertSame(60, $this->stock->reserve($this->urnes, $this->cycle));
     }
 
+    public function test_cloture_refusee_avec_une_decharge_validee_non_partie(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 500, 100);
+        $decharge = $this->dechargeValidee(60);
+
+        try {
+            $this->stock->cloturerCycle($this->cycle, 'Fin');
+            $this->fail('Une décharge validée non partie bloque la clôture.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame(
+                "Clôture impossible : 1 décharge(s) validée(s) non partie(s) — annulez-les ou chargez-les d'abord.",
+                $e->getMessage(),
+            );
+        }
+        $this->assertTrue($this->cycle->fresh()->estOuvert());
+        $this->assertSame(60, $this->stock->reserve($this->urnes, $this->cycle));
+
+        $this->service()->annuler($decharge, 'Erreur');
+        $this->stock->cloturerCycle($this->cycle, 'Fin');
+
+        $this->assertFalse($this->cycle->fresh()->estOuvert());
+    }
+
+    public function test_cloture_permise_avec_brouillon_ou_decharge_partie(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 500);
+        $partie = $this->dechargeValidee(60);
+        $partie->forceFill(['statut_acheminement' => 'chargee'])->save();
+        $this->service()->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+
+        $this->stock->cloturerCycle($this->cycle, 'Fin');
+
+        $this->assertFalse($this->cycle->fresh()->estOuvert());
+    }
+
+    public function test_annulation_refuse_une_ligne_validee_sans_reservation(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 500);
+        $decharge = $this->dechargeValidee(60);
+        $decharge->lignes()->update(['reservation_id' => null]);
+
+        try {
+            $this->service()->annuler($decharge, 'Erreur');
+            $this->fail('Une ligne validée sans réservation rompt un invariant.');
+        } catch (\LogicException $e) {
+            $this->assertSame('Ligne validée sans réservation : invariant rompu.', $e->getMessage());
+        }
+
+        $this->assertSame('validee', $decharge->fresh()->statut_document);
+        $this->assertSame(60, $this->stock->reserve($this->urnes, $this->cycle));
+        $this->assertSame(0, JournalEntree::where('action', 'annulation_decharge')->count());
+    }
+
     public function test_seule_une_decharge_validee_s_annule(): void
     {
         $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
