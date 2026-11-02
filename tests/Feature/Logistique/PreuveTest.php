@@ -3,10 +3,12 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\JournalEntree;
 use App\Models\Logistique\Remise;
+use App\Models\NotificationOp;
 use App\Models\User;
 use App\Services\Logistique\CodeReceptionService;
 use App\Services\Logistique\DelegationService;
@@ -19,6 +21,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use LogicException;
 use Tests\Support\PlanApprouveFictif;
 use Tests\TestCase;
 
@@ -37,6 +40,10 @@ class PreuveTest extends TestCase
 
     private User $prefet;
 
+    private Remise $remise;
+
+    private Decharge $chargee;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -46,12 +53,17 @@ class PreuveTest extends TestCase
         file_put_contents($this->chemin, self::$pem);
         config(['logistique.cle_preuve_privee' => $this->chemin]);
 
+        // La remise date d'il y a deux jours : l'horodatage d'une signature hors ligne peut la suivre de près.
+        Carbon::setTestNow(now()->subDays(2));
         $this->creerDecorFictif();
         $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 300]]);
         $this->stockerFictif($this->urnes, 1000, 400);
         $this->prefet = $this->autoriteFictive($this->prefecture);
         $this->definirCode($this->prefet, self::CODE);
         $this->actingAs($this->responsable);
+        $this->chargee = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
+        $this->remise = Remise::where('decharge_id', $this->chargee->id)->where('etape', 'livraison')->firstOrFail();
+        Carbon::setTestNow();
     }
 
     protected function tearDown(): void
@@ -90,11 +102,11 @@ class PreuveTest extends TestCase
         return array_replace([
             'decharge_id' => 12,
             'decharge_identifiant' => 'DCH-2026-0012',
-            'remise_id' => 34,
+            'remise_id' => $this->remise->id,
             'cle' => self::CLE,
             'signataire' => ['user_id' => ($signataire ?? $this->prefet)->id, 'nom' => 'Awa Diop', 'qualite' => 'Préfète'],
             'lignes' => [['materiel_id' => 1, 'recu' => 10, 'defectueux' => 1, 'observation' => 'Caisse écrasée']],
-            'horodatage_terminal' => '2026-11-05T10:00:00+00:00',
+            'horodatage_terminal' => now()->toIso8601String(),
         ], $surcharge);
     }
 
@@ -107,9 +119,10 @@ class PreuveTest extends TestCase
         return base64_encode($chiffre);
     }
 
+    /** L'instant transmis est celui du contenu, comme le fera l'API. */
     private function verifier(array $contenu, string $bloc, ?User $signataire = null, ?CarbonInterface $quand = null, ?Delegation $delegation = null, string $cle = self::CLE): array
     {
-        return $this->service()->verifier($contenu, $cle, $bloc, $signataire ?? $this->prefet, $quand ?? now(), $delegation);
+        return $this->service()->verifier($contenu, $cle, $bloc, $signataire ?? $this->prefet, $quand ?? Carbon::parse($contenu['horodatage_terminal']), $delegation);
     }
 
     public function test_bon_code_verifiee_code(): void
@@ -219,16 +232,16 @@ class PreuveTest extends TestCase
 
     public function test_code_reinitialise_pendant_le_hors_ligne_a_verifier(): void
     {
-        $contenu = $this->contenu();
-        $bloc = $this->bloc($contenu);
         $signeA = now()->addMinutes(10);
+        $contenu = $this->contenu(null, ['horodatage_terminal' => $signeA->toIso8601String()]);
+        $bloc = $this->bloc($contenu);
 
         // Signature hors ligne avec l'ancien code ; avant le dépôt, le responsable réinitialise et l'autorité en choisit un autre.
         Carbon::setTestNow(now()->addHour());
         app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
         $this->definirCode($this->prefet, '246813');
 
-        $resultat = $this->verifier($contenu, $bloc, null, $signeA);
+        $resultat = $this->verifier($contenu, $bloc);
 
         $this->assertSame('a_verifier', $resultat['verification']);
         $this->assertSame(0, $this->prefet->fresh()->code_echecs);
@@ -236,24 +249,24 @@ class PreuveTest extends TestCase
 
     public function test_code_reinitialise_pas_encore_rechoisi_echec_sans_compter(): void
     {
-        $contenu = $this->contenu();
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(30)->toIso8601String()]);
         $bloc = $this->bloc($contenu);
         Carbon::setTestNow(now()->addHour());
         app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
 
-        $this->assertSame('echec', $this->verifier($contenu, $bloc, null, now()->subMinutes(30))['verification']);
+        $this->assertSame('echec', $this->verifier($contenu, $bloc)['verification']);
         $this->assertSame(0, $this->prefet->fresh()->code_echecs);
     }
 
     public function test_code_faux_apres_changement_reste_un_echec(): void
     {
-        $contenu = $this->contenu();
         $signeA = now()->addMinutes(10);
+        $contenu = $this->contenu(null, ['horodatage_terminal' => $signeA->toIso8601String()]);
         Carbon::setTestNow(now()->addHour());
         app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
         $this->definirCode($this->prefet, '246813');
 
-        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '999000'), null, $signeA)['verification']);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '999000'))['verification']);
         $this->assertSame(1, $this->prefet->fresh()->code_echecs);
     }
 
@@ -263,6 +276,90 @@ class PreuveTest extends TestCase
         $contenu = $this->contenu($agent);
 
         $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu), $agent)['verification']);
+    }
+
+    private function autreAutorite(string $code = '135792'): User
+    {
+        $autre = $this->autoriteFictive($this->sousPrefecture1);
+        $this->definirCode($autre, $code);
+
+        return $autre;
+    }
+
+    public function test_code_juste_d_une_autre_autorite_echec_sans_compter(): void
+    {
+        $autre = $this->autreAutorite();
+        $contenu = $this->contenu($autre);
+
+        // Sans délégation, seul le titulaire du destinataire de la remise peut signer, même avec son bon code.
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '135792'), $autre)['verification']);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '000111'), $autre)['verification']);
+        $this->assertSame(0, $autre->fresh()->code_echecs);
+    }
+
+    public function test_delegation_d_un_autre_destinataire_echec(): void
+    {
+        $autre = $this->autreAutorite();
+        $adjoint = User::factory()->create(['role' => 'sous_prefet']);
+        $this->definirCode($adjoint, '864209');
+        $this->actingAs($autre);
+        $delegation = app(DelegationService::class)->deleguer($this->sousPrefecture1, $adjoint, now(), null, 'Mission');
+        $this->actingAs($this->responsable);
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => now()->addMinute()->toIso8601String()]);
+
+        // Une délégation valide, mais sur un autre destinataire que celui de la remise.
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, null, $delegation)['verification']);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '000111'), $adjoint, null, $delegation)['verification']);
+        $this->assertSame(0, $adjoint->fresh()->code_echecs);
+    }
+
+    public function test_remise_inconnue_ou_hors_destinataire_echec(): void
+    {
+        $contenu = $this->contenu(null, ['remise_id' => 999999]);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu))['verification']);
+
+        $autre = Remise::where('a_type', '!=', 'destinataire')->first() ?? tap($this->remise->replicate(), function (Remise $r) {
+            $r->a_type = 'agent';
+            $r->save();
+        });
+        $contenu = $this->contenu(null, ['remise_id' => $autre->id]);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu))['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_horodatage_dans_le_futur_echec_sans_compter(): void
+    {
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(11)->toIso8601String()]);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '000111'))['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(9)->toIso8601String()]);
+        $this->assertSame('verifiee_code', $this->verifier($contenu, $this->bloc($contenu))['verification']);
+    }
+
+    public function test_horodatage_avant_la_remise_echec_sans_compter(): void
+    {
+        $avant = Carbon::instance($this->remise->created_at);
+        $contenu = $this->contenu(null, ['horodatage_terminal' => $avant->copy()->subMinutes(11)->toIso8601String()]);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '000111'))['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+
+        $contenu = $this->contenu(null, ['horodatage_terminal' => $avant->copy()->subMinutes(9)->toIso8601String()]);
+        $this->assertSame('verifiee_code', $this->verifier($contenu, $this->bloc($contenu))['verification']);
+    }
+
+    public function test_horodatage_different_de_celui_du_contenu_rejete(): void
+    {
+        $contenu = $this->contenu();
+        $bloc = $this->bloc($contenu);
+
+        try {
+            $this->verifier($contenu, $bloc, null, now()->subMinutes(3));
+            $this->fail('Un horodatage différent de celui du contenu devait être rejeté.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Preuve ne correspondant pas au contenu de la déclaration.', $e->getMessage());
+        }
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
     }
 
     private function deleguer(Carbon $du, ?Carbon $au = null): array
@@ -279,9 +376,9 @@ class PreuveTest extends TestCase
     public function test_delegation_en_vigueur_verifiee_code(): void
     {
         [$adjoint, $delegation] = $this->deleguer(now());
-        $contenu = $this->contenu($adjoint);
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => now()->addMinute()->toIso8601String()]);
 
-        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, now()->addMinute(), $delegation);
+        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, null, $delegation);
 
         $this->assertSame('verifiee_code', $resultat['verification']);
     }
@@ -290,7 +387,7 @@ class PreuveTest extends TestCase
     {
         $debut = now()->startOfSecond();
         [$adjoint, $delegation] = $this->deleguer($debut);
-        $contenu = $this->contenu($adjoint);
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => $debut->copy()->addHour()->toIso8601String()]);
         $bloc = $this->bloc($contenu, '864209');
 
         Carbon::setTestNow($debut->copy()->addHours(2));
@@ -298,7 +395,7 @@ class PreuveTest extends TestCase
         app(DelegationService::class)->revoquer($delegation, 'Retour de mission');
         $this->actingAs($this->responsable);
 
-        $resultat = $this->verifier($contenu, $bloc, $adjoint, $debut->copy()->addHour(), $delegation->fresh());
+        $resultat = $this->verifier($contenu, $bloc, $adjoint, null, $delegation->fresh());
 
         $this->assertSame('a_verifier', $resultat['verification']);
     }
@@ -307,9 +404,9 @@ class PreuveTest extends TestCase
     {
         $debut = now()->startOfSecond();
         [$adjoint, $delegation] = $this->deleguer($debut);
-        $contenu = $this->contenu($adjoint);
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => $debut->copy()->subDay()->toIso8601String()]);
 
-        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, $debut->copy()->subDay(), $delegation);
+        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, null, $delegation);
 
         $this->assertSame('echec', $resultat['verification']);
         // Le code était bon : pas de compteur.
@@ -319,9 +416,9 @@ class PreuveTest extends TestCase
     public function test_delegation_et_mauvais_code_le_pire_l_emporte(): void
     {
         [$adjoint, $delegation] = $this->deleguer(now());
-        $contenu = $this->contenu($adjoint);
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => now()->addMinute()->toIso8601String()]);
 
-        $resultat = $this->verifier($contenu, $this->bloc($contenu, '111999'), $adjoint, now()->addMinute(), $delegation);
+        $resultat = $this->verifier($contenu, $this->bloc($contenu, '111999'), $adjoint, null, $delegation);
 
         $this->assertSame('echec', $resultat['verification']);
         $this->assertSame(1, $adjoint->fresh()->code_echecs);
@@ -330,9 +427,9 @@ class PreuveTest extends TestCase
     public function test_delegation_d_un_autre_delegue_echec(): void
     {
         [, $delegation] = $this->deleguer(now());
-        $contenu = $this->contenu();
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinute()->toIso8601String()]);
 
-        $resultat = $this->verifier($contenu, $this->bloc($contenu), $this->prefet, now()->addMinute(), $delegation);
+        $resultat = $this->verifier($contenu, $this->bloc($contenu), $this->prefet, null, $delegation);
 
         $this->assertSame('echec', $resultat['verification']);
     }
@@ -344,10 +441,34 @@ class PreuveTest extends TestCase
         $details = openssl_pkey_get_details($autre);
         openssl_public_encrypt(json_encode(['code' => self::CODE, 'cle' => self::CLE, 'empreinte' => Canonique::empreinte($contenu)]), $chiffre, $details['key'], OPENSSL_PKCS1_OAEP_PADDING);
 
-        foreach ([base64_encode($chiffre), 'pas du base64 !!', '', base64_encode('trop court')] as $bloc) {
+        foreach ([base64_encode($chiffre), base64_encode('trop court')] as $bloc) {
             $resultat = $this->verifier($contenu, $bloc);
             $this->assertSame('echec', $resultat['verification']);
             $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $resultat['bloc_empreinte']);
+        }
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_bloc_vide_ou_pas_du_base64_echec_sans_empreinte(): void
+    {
+        $contenu = $this->contenu();
+
+        foreach (['', 'pas du base64 !!', 'QUJD===', ' '] as $bloc) {
+            $this->assertSame(['verification' => 'echec', 'bloc_empreinte' => null], $this->verifier($contenu, $bloc));
+        }
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_longueur_differente_du_module_echec(): void
+    {
+        $contenu = $this->contenu();
+        $chiffre = base64_decode($this->bloc($contenu));
+        $this->assertSame(256, strlen($chiffre));
+
+        foreach ([substr($chiffre, 0, 255), $chiffre.'x', substr($chiffre, 0, 128)] as $variante) {
+            $resultat = $this->verifier($contenu, base64_encode($variante));
+            $this->assertSame('echec', $resultat['verification']);
+            $this->assertSame(hash('sha256', $variante), $resultat['bloc_empreinte']);
         }
         $this->assertSame(0, $this->prefet->fresh()->code_echecs);
     }
@@ -388,40 +509,109 @@ class PreuveTest extends TestCase
             ->assertExactJson(['message' => 'Clé de preuve non configurée sur le serveur.']);
     }
 
-    public function test_code_absent_des_journaux(): void
+    public function test_code_absent_des_journaux_des_logs_des_notifications_et_des_traces(): void
     {
         Log::spy();
         $contenu = $this->contenu();
+        $faux = ['777888', '777889', '777890', '777891'];
 
-        // Code juste, faux, bloc rejeté (contenu, réutilisation), bloc indéchiffrable, verrouillage.
-        $this->verifier($contenu, $this->bloc($contenu, '777888'));
-        $this->verifier($contenu, $this->bloc($contenu, '777889'));
+        // Code juste, faux (jusqu'au verrouillage et à l'alerte), bloc rejeté (contenu, réutilisation).
+        $this->verifier($contenu, $this->bloc($contenu, $faux[0]));
+        $this->verifier($contenu, $this->bloc($contenu, $faux[1]));
         $juste = $this->bloc($contenu);
         $this->verifier($contenu, $juste);
-        $this->declarationPortant($this->verifierSansEffet($juste));
+        $this->declarationPortant(hash('sha256', base64_decode($juste)));
         $messages = [];
-        foreach ([fn () => $this->verifier($contenu, $juste), fn () => $this->verifier($this->contenu(null, ['remise_id' => 1]), $this->bloc($contenu, '777890'))] as $appel) {
+        foreach ([
+            fn () => $this->verifier($contenu, $juste),
+            fn () => $this->verifier($this->contenu(null, ['remise_id' => 1]), $this->bloc($contenu, $faux[2])),
+        ] as $appel) {
             try {
                 $appel();
             } catch (RegleLogistique $e) {
-                $messages[] = $e->getMessage();
+                $messages[] = $e->getMessage().$e->getTraceAsString();
             }
         }
-        $this->verifier($contenu, $this->bloc($contenu, '777891'));
+        $this->verifier($contenu, $this->bloc($contenu, $faux[3]));
+        $this->verifier($contenu, $this->bloc($contenu, '777892'));
+        $this->verifier($contenu, $this->bloc($contenu, '777894'));
+        $this->assertNotNull($this->prefet->fresh()->code_verrouille_le);
 
-        $tout = json_encode(JournalEntree::all()->toArray()).implode('|', $messages);
-        foreach (['777888', '777889', '777890', '777891', self::CODE] as $code) {
+        $tout = json_encode(JournalEntree::all()->toArray()).json_encode(NotificationOp::all()->toArray()).implode('|', $messages);
+        $this->assertGreaterThan(0, NotificationOp::where('type', 'logistique_alerte_code')->count());
+        foreach ([...$faux, '777892', '777894', self::CODE] as $code) {
             $this->assertStringNotContainsString($code, $tout);
         }
         $this->assertGreaterThan(0, JournalEntree::where('action', 'anomalie_preuve')->count());
-        Log::shouldNotHaveReceived('error');
-        Log::shouldNotHaveReceived('warning');
+
+        // Aucun message de log, à aucun niveau.
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $niveau) {
+            Log::shouldNotHaveReceived($niveau);
+        }
+    }
+
+    public function test_code_absent_de_la_trace_d_une_exception(): void
+    {
+        $contenu = $this->contenu();
+        $bloc = $this->bloc($contenu, '777893');
+        // Sans utilisateur connecté, l'enregistrement de l'échec lève une exception sous verifierCode().
+        $this->app['auth']->guard('web')->forgetUser();
+
+        try {
+            $this->verifier($contenu, $bloc);
+            $this->fail('Une exception était attendue.');
+        } catch (LogicException $e) {
+            $trace = $e->getTraceAsString();
+            $this->assertStringContainsString('verifierCode', $trace);
+            $this->assertStringNotContainsString('777893', $trace);
+            $this->assertStringNotContainsString('777893', json_encode(array_map(fn ($t) => $t['args'] ?? [], $e->getTrace()), JSON_PARTIAL_OUTPUT_ON_ERROR));
+        }
+    }
+
+    public function test_choisir_n_expose_ni_code_ni_mot_de_passe_dans_la_trace(): void
+    {
+        $this->actingAs($this->prefet);
+
+        try {
+            app(CodeReceptionService::class)->choisir($this->prefet, '482916', 'SecretTresLong2026');
+            $this->fail('Une exception était attendue.');
+        } catch (RegleLogistique $e) {
+            $this->assertStringNotContainsString('482916', $e->getTraceAsString());
+            $this->assertStringNotContainsString('SecretTresLong2026', $e->getTraceAsString());
+        }
+    }
+
+    public function test_commande_refuse_un_chemin_dans_public(): void
+    {
+        $cible = public_path('preuve-test-'.getmypid().'.pem');
+        config(['logistique.cle_preuve_privee' => $cible]);
+
+        $this->artisan('logistique:cle-preuve')->assertFailed();
+        $this->assertFileDoesNotExist($cible);
+    }
+
+    public function test_commande_ne_laisse_pas_de_fichier_temporaire(): void
+    {
+        $dossier = storage_path('framework/testing/cle-'.getmypid());
+        mkdir($dossier);
+        config(['logistique.cle_preuve_privee' => $dossier.'/preuve.pem']);
+
+        try {
+            $this->artisan('logistique:cle-preuve')->assertSuccessful();
+            $this->artisan('logistique:cle-preuve', ['--force' => true])->assertSuccessful();
+            $this->assertSame(['preuve.pem'], array_values(array_diff(scandir($dossier), ['.', '..'])));
+            $this->assertSame('0600', substr(sprintf('%o', fileperms($dossier.'/preuve.pem')), -4));
+        } finally {
+            array_map('unlink', array_map(fn ($f) => $dossier.'/'.$f, array_diff(scandir($dossier), ['.', '..'])));
+            @rmdir($dossier);
+        }
     }
 
     public function test_contenu_preuve_forme_et_tri(): void
     {
-        $chargee = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
-        $remise = Remise::where('decharge_id', $chargee->id)->where('etape', 'livraison')->firstOrFail();
+        $chargee = $this->chargee;
+        $remise = $this->remise;
+        $horodatage = now()->toIso8601String();
 
         $contenu = $this->service()->contenuPreuve(
             $remise,
@@ -429,7 +619,7 @@ class PreuveTest extends TestCase
             $this->prefet->id,
             [7 => ['recu' => '3', 'defectueux' => 0, 'observation' => '  '], 2 => ['recu' => 5, 'defectueux' => 1, 'observation' => ' Fissure ']],
             self::CLE,
-            '2026-11-05T10:00:00Z',
+            $horodatage,
         );
 
         $this->assertSame([
@@ -442,7 +632,7 @@ class PreuveTest extends TestCase
                 ['materiel_id' => 2, 'recu' => 5, 'defectueux' => 1, 'observation' => 'Fissure'],
                 ['materiel_id' => 7, 'recu' => 3, 'defectueux' => 0, 'observation' => null],
             ],
-            'horodatage_terminal' => '2026-11-05T10:00:00Z',
+            'horodatage_terminal' => $horodatage,
         ], $contenu);
 
         // Le bloc produit par ce contenu passe la vérification.
@@ -455,8 +645,7 @@ class PreuveTest extends TestCase
             $this->assertTrue(Schema::hasColumn('declarations', $colonne), $colonne);
         }
 
-        $chargee = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
-        $declaration = Declaration::findOrFail($this->deposerRecue($chargee, [])->id);
+        $declaration = Declaration::findOrFail($this->deposerRecue($this->chargee, [])->id);
 
         $this->assertSame('non_verifiee', Declaration::whereKey($declaration->id)->value('verification_identite'));
         $this->assertSame('aucune', Declaration::whereKey($declaration->id)->value('contestation'));
@@ -502,8 +691,7 @@ class PreuveTest extends TestCase
     /** Une déclaration quelconque portant l'empreinte de ce bloc. */
     private function declarationPortant(string $blocEmpreinte): Declaration
     {
-        $chargee = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
-        $declaration = $this->deposerRecue($chargee, []);
+        $declaration = $this->deposerRecue($this->chargee, []);
         $declaration->forceFill(['bloc_empreinte' => $blocEmpreinte])->save();
 
         return $declaration;

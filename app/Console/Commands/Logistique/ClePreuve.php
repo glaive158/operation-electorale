@@ -20,7 +20,13 @@ class ClePreuve extends Command
 
             return self::FAILURE;
         }
-        if (file_exists($chemin) && ! $this->option('force')) {
+        if ($this->danslePublic($chemin)) {
+            $this->error('La clé privée ne doit pas être dans le dossier public.');
+
+            return self::FAILURE;
+        }
+        $force = (bool) $this->option('force');
+        if (file_exists($chemin) && ! $force) {
             $this->error("Une clé existe déjà ({$chemin}). Les déclarations en attente sur les tablettes ne seraient plus déchiffrables : relancez avec --force pour la remplacer.");
 
             return self::FAILURE;
@@ -40,14 +46,26 @@ class ClePreuve extends Command
             return self::FAILURE;
         }
 
-        // Fichier créé en 0600 avant d'y écrire la clé : elle n'est jamais lisible par un autre compte.
-        $ancien = umask(0o077);
-        try {
-            $ecrit = file_put_contents($chemin, $pem);
-        } finally {
-            umask($ancien);
+        // Écrite dans un fichier temporaire 0600 du même dossier puis publiée d'un coup : la clé n'est jamais
+        // lisible par un autre compte, et un échec en cours d'écriture laisse l'ancienne clé intacte.
+        $temporaire = tempnam($dossier, '.preuve-');
+        if ($temporaire === false) {
+            $this->error("Écriture impossible dans {$dossier}");
+
+            return self::FAILURE;
         }
-        if ($ecrit === false || ! chmod($chemin, 0600)) {
+        $publie = false;
+        try {
+            if (chmod($temporaire, 0600) && file_put_contents($temporaire, $pem) !== false) {
+                // Sans --force, link() échoue si une clé est apparue entre-temps ; avec, rename() remplace.
+                $publie = $force ? rename($temporaire, $chemin) : link($temporaire, $chemin);
+            }
+        } finally {
+            if (file_exists($temporaire)) {
+                unlink($temporaire);
+            }
+        }
+        if (! $publie) {
             $this->error("Écriture impossible : {$chemin}");
 
             return self::FAILURE;
@@ -57,5 +75,13 @@ class ClePreuve extends Command
         $this->line('Empreinte de la clé publique (SHA-256) : '.$preuve->empreinteClePublique());
 
         return self::SUCCESS;
+    }
+
+    private function danslePublic(string $chemin): bool
+    {
+        $public = realpath(public_path()) ?: public_path();
+        $dossier = realpath(dirname($chemin)) ?: dirname($chemin);
+
+        return $dossier === $public || str_starts_with($dossier.'/', rtrim($public, '/').'/');
     }
 }

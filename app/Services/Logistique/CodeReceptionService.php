@@ -35,7 +35,7 @@ class CodeReceptionService
 
     private const SANS_CODE = 'Ce compte n\'a pas de code de réception.';
 
-    public function choisir(User $u, string $code, string $motDePasse, ?string $nouveauMotDePasse = null): void
+    public function choisir(User $u, #[\SensitiveParameter] string $code, #[\SensitiveParameter] string $motDePasse, #[\SensitiveParameter] ?string $nouveauMotDePasse = null): void
     {
         $this->exigerAuteur();
         if ((int) auth()->id() !== (int) $u->id) {
@@ -177,7 +177,7 @@ class CodeReceptionService
     }
 
     /** Le code saisi est-il celui dont $hash est l'empreinte ? Seul point de comparaison d'un code. */
-    public function correspond(User $u, string $code, string $hash): bool
+    public function correspond(User $u, #[\SensitiveParameter] string $code, string $hash): bool
     {
         return Hash::check($this->empreinte($u, $code), $hash);
     }
@@ -196,6 +196,20 @@ class CodeReceptionService
     public function codeActuel(User $u): ?string
     {
         return User::whereKey($u->id)->value('code_reception_hash');
+    }
+
+    /**
+     * Un code juste remet le compteur d'échecs à zéro, sous le même verrou de compte que enregistrerEchec ;
+     * un compte verrouillé entre-temps le reste (seule la réinitialisation lève le verrou).
+     */
+    public function reinitialiserEchecs(User $u): void
+    {
+        DB::transaction(function () use ($u) {
+            $actuel = $this->verrouillerCompte($u);
+            if ((int) $actuel->code_echecs > 0 && $actuel->code_verrouille_le === null) {
+                $actuel->forceFill(['code_echecs' => 0])->save();
+            }
+        }, attempts: 3);
     }
 
     /** À la troisième erreur de code, le compte est verrouillé et chaque responsable logistique actif est alerté. */
@@ -235,12 +249,12 @@ class CodeReceptionService
     }
 
     /** Le code seul (un million de valeurs) serait trop facile à retrouver d'un haché volé : on le lie au compte et à la clé de l'application. */
-    private function empreinte(User $u, string $code): string
+    private function empreinte(User $u, #[\SensitiveParameter] string $code): string
     {
         return hash_hmac('sha256', $u->id.':'.$code, (string) config('app.key'));
     }
 
-    private function hacher(User $u, string $code): string
+    private function hacher(User $u, #[\SensitiveParameter] string $code): string
     {
         return Hash::make($this->empreinte($u, $code));
     }
