@@ -275,8 +275,10 @@ class DeclarationService
      * Rapproche les déclarations actives de la remise (ni écartées ni remplacées) : une seule saine est
      * retenue ; deux de modes différents, saines et identiques, se confirment (la plus ancienne est retenue) ;
      * deux divergentes sont toutes deux à vérifier, et rien n'est compté jusqu'à l'arbitrage.
+     *
+     * Hors de declarer() (arbitrage), l'appelant détient déjà les verrous : cycle, décharge, remise.
      */
-    private function rapprocher(Remise $remise): void
+    public function rapprocher(Remise $remise): void
     {
         $actives = Declaration::where('remise_id', $remise->id)->whereNotIn('statut', ['ecartee', 'remplacee'])
             ->orderBy('id')->lockForUpdate()->with('lignes')->get()->values();
