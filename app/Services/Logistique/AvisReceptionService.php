@@ -3,10 +3,12 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\Declaration;
+use App\Models\Logistique\Reclamation;
 use App\Models\Logistique\Remise;
 use App\Models\NotificationOp;
 use App\Models\User;
@@ -106,6 +108,11 @@ class AvisReceptionService
                 $actuelle->statut = 'a_verifier';
             }
             $actuelle->save();
+            if ($actuelle->statut !== $avant['statut']) {
+                Journal::noter('declaration', $actuelle->id, 'statut_declaration', ['statut' => $avant['statut']], [
+                    'statut' => $actuelle->statut, 'remise_id' => $remise->id, 'anomalies' => $actuelle->anomalies ?? [],
+                ], $motif);
+            }
 
             if (! $utilisee && $remise->statut !== 'a_verifier') {
                 $statutAvant = $remise->statut;
@@ -129,18 +136,31 @@ class AvisReceptionService
     }
 
     /**
-     * La réception d'une livraison est utilisée en aval quand une redistribution non annulée en est partie, ou
-     * quand l'exemplaire de réception de la décharge a été émis. Ce qui a été remis plus loin ne se défait pas
-     * d'un geste : le responsable tranche.
+     * Une réception est utilisée en aval quand :
+     * - une redistribution non annulée est partie de la décharge (réception d'une livraison au préfet) ;
+     * - l'exemplaire de réception de la décharge a été émis ;
+     * - la décharge est un remplacement dont la réception a déjà résolu la réclamation d'origine.
+     * Ce qui a été remis plus loin ou clos ne se défait pas d'un geste : le responsable tranche.
      */
     private function receptionUtilisee(Remise $remise, Decharge $decharge): bool
     {
+        // Une redistribution ne se prépare que sur une livraison retenue : toute redistribution non annulée en dépend.
         if ($remise->etape === 'livraison' && Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
-            ->where('statut', '!=', 'annulee')->where('id', '>', $remise->id)->exists()) {
+            ->where('statut', '!=', 'annulee')->exists()) {
             return true;
         }
 
-        return DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', 'reception')->exists();
+        if (DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', 'reception')->exists()) {
+            return true;
+        }
+
+        if ($decharge->besoin_remplacement_id !== null) {
+            $reclamationId = BesoinRemplacement::whereKey($decharge->besoin_remplacement_id)->value('reclamation_id');
+
+            return $reclamationId !== null && Reclamation::whereKey($reclamationId)->where('statut', 'resolue')->exists();
+        }
+
+        return false;
     }
 
     private function alerterLesResponsables(Declaration $declaration, Decharge $decharge, User $auteur, string $motif, bool $utilisee): void
@@ -148,7 +168,8 @@ class AvisReceptionService
         $nom = trim(($auteur->prenom ?? '').' '.$auteur->name);
         $message = "{$nom} conteste la réception de la décharge n° {$decharge->numero} (déclaration n° {$declaration->id}). Motif : {$motif}";
         $message .= $utilisee
-            ? ' La réception est déjà utilisée en aval (redistribution ou exemplaire de réception) : elle reste retenue en attendant votre décision.'
+            ? ' La réception est déjà utilisée en aval (redistribution, exemplaire de réception ou remplacement résolu) : elle reste '
+                .mb_strtolower(Declaration::STATUTS[$declaration->statut]).' en attendant votre décision.'
             : ' La réception est à vérifier.';
 
         foreach (User::where('role', 'logistique_responsable')->where('actif', true)->get(['id']) as $responsable) {

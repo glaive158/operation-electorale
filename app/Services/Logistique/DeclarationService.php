@@ -725,10 +725,14 @@ class DeclarationService
         }
     }
 
-    /** Une déclaration saine n'a aucune anomalie propre (une divergence passée ne compte plus : le contenu est figé). */
+    /**
+     * Une déclaration saine n'a aucune anomalie propre (une divergence passée ne compte plus : le contenu est figé)
+     * et n'est pas contestée : une déclaration contestée n'est jamais retenue d'office, seul l'arbitrage la retient.
+     * Une contestation levée redonne à la déclaration son traitement normal.
+     */
     private function saine(Declaration $declaration): bool
     {
-        return array_diff($declaration->anomalies ?? [], ['divergence']) === [];
+        return $declaration->contestation !== 'contestee' && array_diff($declaration->anomalies ?? [], ['divergence']) === [];
     }
 
     /** @return list<array{0: int, 1: int, 2: int}> */

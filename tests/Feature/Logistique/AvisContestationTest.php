@@ -14,8 +14,11 @@ use App\Services\Logistique\ArbitrageService;
 use App\Services\Logistique\AvisReceptionService;
 use App\Services\Logistique\CodeReceptionService;
 use App\Services\Logistique\DechargePdfService;
+use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\DeclarationService;
+use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\PreuveService;
+use App\Services\Logistique\ReclamationService;
 use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\StockService;
 use App\Support\Canonique;
@@ -203,17 +206,21 @@ class AvisContestationTest extends TestCase
 
     public function test_avis_dans_le_fuseau_de_l_application(): void
     {
-        config(['app.timezone' => 'Africa/Dakar']);
-        date_default_timezone_set('Africa/Dakar');
-        Carbon::setTestNow('2026-12-31 23:50:00');
         $declaration = $this->tablette();
-        $declaration->forceFill(['horodatage_terminal' => Carbon::parse('2026-12-31 23:30:00', 'UTC')])->save();
         NotificationOp::query()->delete();
 
-        app(AvisReceptionService::class)->envoyer($declaration->refresh());
+        try {
+            // L'instant stocké se lit dans le fuseau de PHP (UTC ici) : 22 h 30 UTC le 31 décembre, soit 23 h 30
+            // dans le fuseau de l'application (Paris, UTC+1 l'hiver).
+            config(['app.timezone' => 'Europe/Paris']);
+            $declaration->horodatage_terminal = Carbon::parse('2026-12-31 22:30:00', 'UTC');
+
+            app(AvisReceptionService::class)->envoyer($declaration);
+        } finally {
+            config(['app.timezone' => 'UTC']);
+        }
 
         $this->assertStringContainsString(' le 31/12/2026 à 23:30 (1 articles).', $this->avis()->firstOrFail()->message);
-        date_default_timezone_set('UTC');
     }
 
     public function test_pas_d_avis_sans_signataire_ni_hors_tablette(): void
@@ -407,8 +414,17 @@ class AvisContestationTest extends TestCase
     public function test_contester_exige_un_motif_borne_et_un_auteur(): void
     {
         $declaration = $this->tablette();
-        $this->expectException(InvalidArgumentException::class);
-        $this->contester($declaration, null, str_repeat('x', 501));
+        try {
+            $this->contester($declaration, null, str_repeat('x', 501));
+            $this->fail('Un motif de plus de 500 caractères doit être refusé.');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame('Le motif est obligatoire (500 caractères au plus).', $e->getMessage());
+        }
+
+        // Sans auteur connecté, la contestation est une erreur de programmation.
+        $this->app['auth']->forgetGuards();
+        $this->expectException(\LogicException::class);
+        app(AvisReceptionService::class)->contester($declaration, 'Ce n\'est pas moi.');
     }
 
     public function test_lever_la_contestation(): void
@@ -528,5 +544,170 @@ class AvisContestationTest extends TestCase
 
         $this->actingAs($this->prefet)->from('/retour')->post($url, ['motif' => 'Encore.'])
             ->assertRedirect('/retour')->assertSessionHas('error', 'Cette réception ne peut plus être contestée.');
+    }
+
+    /** Déclaration « compte » du préfet sur la remise de livraison. */
+    private function compte(Remise $remise, int $recu, int $defectueux = 0): Declaration
+    {
+        $lignes = [];
+        foreach ($remise->lignes as $ligne) {
+            $lignes[$ligne->materiel_id] = ['recu' => $recu, 'defectueux' => $defectueux, 'observation' => null];
+        }
+
+        return $this->en($this->prefet, fn () => app(DeclarationService::class)->declarer($remise, 'compte', self::SIGNATAIRE, $lignes, (string) Str::uuid()));
+    }
+
+    public function test_une_declaration_contestee_n_est_jamais_retenue_d_office(): void
+    {
+        $a = $this->tablette();
+        $this->contester($a);
+        $b = $this->compte($this->remise, 15);
+        $this->assertSame(['a_verifier', 'a_verifier'], [$a->refresh()->statut, $b->statut]);
+
+        // Le responsable rejette B : A, seule restante, reste à vérifier tant que sa contestation n'est pas levée.
+        app(ArbitrageService::class)->rejeter($b, 'Quantité erronée.');
+
+        $this->assertSame('a_verifier', $a->refresh()->statut);
+        $this->assertSame('contestee', $a->contestation);
+        $this->assertSame('a_verifier', $this->remise->refresh()->statut);
+        $this->assertSame('a_verifier', $this->chargee->refresh()->statut_acheminement);
+        $this->assertSame(0, app(RemiseService::class)->soldePrefet($this->chargee)->get($this->urnes->id)['recu_utilisable']);
+        $this->assertSame(0, app(IndicateurService::class)->recuUtilisable($this->cycle, $this->prefecture, $this->urnes));
+    }
+
+    public function test_une_seconde_declaration_identique_ne_retient_pas_la_contestee(): void
+    {
+        $a = $this->tablette();
+        $this->contester($a);
+
+        $b = $this->compte($this->remise, 20);
+
+        $this->assertSame(['a_verifier', 'a_verifier'], [$a->refresh()->statut, $b->statut]);
+        $this->assertSame('a_verifier', $this->remise->refresh()->statut);
+        $this->assertSame(0, app(IndicateurService::class)->recuUtilisable($this->cycle, $this->prefecture, $this->urnes));
+    }
+
+    public function test_apres_la_levee_le_responsable_retient_la_declaration(): void
+    {
+        $a = $this->tablette();
+        $this->contester($a);
+        $b = $this->compte($this->remise, 15);
+        app(ArbitrageService::class)->leverContestation($a, 'Confirmée par téléphone.');
+
+        app(ArbitrageService::class)->retenir($a, 'Réception confirmée.');
+
+        $this->assertSame(['retenue', 'ecartee'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('recue', $this->remise->refresh()->statut);
+        $this->assertSame('recue_destinataire', $this->chargee->refresh()->statut_acheminement);
+        $this->assertSame(20, app(IndicateurService::class)->recuUtilisable($this->cycle, $this->prefecture, $this->urnes));
+    }
+
+    public function test_apres_une_contestation_la_redistribution_est_refusee_et_l_exemplaire_non_emissible(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $declaration = $this->tablette($this->livraison($decharge), $this->prefet, 100);
+        $this->contester($declaration);
+
+        $this->refus(
+            fn () => $this->en($this->prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 40])),
+            'Réception du préfet à vérifier : redistribution impossible.',
+        );
+        $this->assertFalse(app(DechargePdfService::class)->receptionEmissible($decharge->refresh()));
+        $this->assertFalse(app(DechargePdfService::class)->receptionEmissible($this->chargee->refresh()));
+    }
+
+    public function test_contester_une_concordante_laisse_la_retenue(): void
+    {
+        $a = $this->tablette();
+        $b = $this->compte($this->remise, 20);
+        $this->assertSame(['retenue', 'concordante'], [$a->refresh()->statut, $b->statut]);
+
+        $this->contester($b);
+
+        $this->assertSame('a_verifier', $b->refresh()->statut);
+        $this->assertSame('contestee', $b->contestation);
+        $this->assertSame('retenue', $a->refresh()->statut);
+        $this->assertSame('a_verifier', $this->remise->refresh()->statut);
+        $this->assertTrue(JournalEntree::where('objet_id', $b->id)->where('action', 'statut_declaration')
+            ->get()->contains(fn ($e) => ($e->avant['statut'] ?? null) === 'concordante' && ($e->apres['statut'] ?? null) === 'a_verifier'));
+    }
+
+    public function test_contester_la_retenue_d_une_paire_concordante(): void
+    {
+        $a = $this->tablette();
+        $b = $this->compte($this->remise, 20);
+
+        $this->contester($a);
+
+        $this->assertSame(['a_verifier', 'concordante'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('a_verifier', $this->remise->refresh()->statut);
+
+        // Rejeter la contestée laisse la jumelle seule, saine : elle est retenue.
+        app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.');
+        $this->assertSame(['ecartee', 'retenue'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('recue', $this->remise->refresh()->statut);
+    }
+
+    public function test_alerte_nomme_le_statut_conserve(): void
+    {
+        $a = $this->tablette();
+        $b = $this->compte($this->remise, 20);
+        $this->actingAs($this->responsable);
+        app(DechargePdfService::class)->emettre($this->chargee->refresh(), 'reception');
+
+        NotificationOp::query()->delete();
+        $this->contester($b);
+        $this->assertSame('concordante', $b->refresh()->statut);
+        $this->assertStringContainsString('elle reste concordante en attendant votre décision', NotificationOp::where('type', 'logistique_contestation')->firstOrFail()->message);
+
+        NotificationOp::query()->delete();
+        $this->contester($a);
+        $this->assertSame('retenue', $a->refresh()->statut);
+        $this->assertStringContainsString('elle reste retenue en attendant votre décision', NotificationOp::where('type', 'logistique_contestation')->firstOrFail()->message);
+    }
+
+    public function test_contestation_conserve_le_statut_si_le_remplacement_a_resolu_la_reclamation(): void
+    {
+        $this->deposerRecue($this->chargee, [$this->urnes->id => ['recu' => 20, 'defectueux' => 5]]);
+        $reclamations = app(ReclamationService::class);
+        $reclamation = $this->en($this->prefet, fn () => $reclamations->ouvrir($this->chargee->refresh(), $this->urnes, 'defectueux', 5, 'Cinq urnes défectueuses.'));
+        $reclamations->resoudre($reclamation, 'remplacement_autorise', 'Urnes à remplacer.', 5);
+        $remplacement = Decharge::where('nature', 'remplacement')->sole();
+        $decharges = app(DechargeService::class);
+        $decharges->valider($remplacement);
+        $decharges->affecterAgent($remplacement, User::factory()->create(['role' => 'agent_transport']), 'Agent de test');
+        app(RemiseService::class)->charger($remplacement->refresh());
+
+        // Avant la réception du remplacement : rien n'est résolu, la contestation défait normalement la réception.
+        $declaration = $this->deposerRecue($remplacement->refresh(), [$this->urnes->id => 5]);
+        $this->assertSame('retenue', $declaration->statut);
+        $this->assertSame('resolue', $reclamation->refresh()->statut);
+
+        $this->contester($declaration);
+
+        $this->assertSame('contestee', $declaration->refresh()->contestation);
+        $this->assertSame('retenue', $declaration->statut);
+        $this->assertSame('recue', Remise::where('decharge_id', $remplacement->id)->where('etape', 'livraison')->sole()->statut);
+        $this->assertSame('resolue', $reclamation->refresh()->statut);
+    }
+
+    public function test_contestation_d_un_remplacement_non_resolu_met_a_verifier(): void
+    {
+        $this->deposerRecue($this->chargee, [$this->urnes->id => ['recu' => 20, 'defectueux' => 5]]);
+        $reclamations = app(ReclamationService::class);
+        $reclamation = $this->en($this->prefet, fn () => $reclamations->ouvrir($this->chargee->refresh(), $this->urnes, 'defectueux', 5, 'Cinq urnes défectueuses.'));
+        $reclamations->resoudre($reclamation, 'remplacement_autorise', 'Urnes à remplacer.', 5);
+        $remplacement = Decharge::where('nature', 'remplacement')->sole();
+        $decharges = app(DechargeService::class);
+        $decharges->valider($remplacement);
+        $decharges->affecterAgent($remplacement, User::factory()->create(['role' => 'agent_transport']), 'Agent de test');
+        app(RemiseService::class)->charger($remplacement->refresh());
+        // Reçu en partie défectueux : la réclamation reste en traitement.
+        $declaration = $this->deposerRecue($remplacement->refresh(), [$this->urnes->id => ['recu' => 5, 'defectueux' => 3]]);
+        $this->assertNotSame('resolue', $reclamation->refresh()->statut);
+
+        $this->contester($declaration);
+
+        $this->assertSame('a_verifier', $declaration->refresh()->statut);
     }
 }
