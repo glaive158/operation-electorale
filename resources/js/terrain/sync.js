@@ -1,0 +1,259 @@
+/**
+ * Synchronisation de la tablette : envoi de la file (pièces, déclarations, redistributions, libérations) puis
+ * téléchargement des affectations. Un seul passage à la fois (single-flight) ; déclenché au démarrage, au
+ * retour du réseau (`online`), à la demande et toutes les 60 secondes.
+ *
+ * Règles d'envoi :
+ *  - une déclaration part avec son bloc chiffré et sa clé d'origine, TELS QUELS à chaque nouvel essai (409,
+ *    réseau, 5xx) : le bloc n'est jamais refait ;
+ *  - avant une déclaration, chaque pièce est vérifiée (HEAD) : 404 => on envoie les octets (POST). Un HEAD 200
+ *    n'est vrai que si CE compte a déposé la pièce ;
+ *  - 401 => la file est conservée et suspendue, l'application demande de se reconnecter ; après une reconnexion
+ *    réussie, reconnecte() la fait reprendre.
+ */
+
+import { STATUTS } from './file.js';
+
+export const INTERVALLE_MS = 60_000;
+
+/** Corps de POST /remises/{remise}/declarations, reconstruit à l'identique d'un essai à l'autre. */
+export function corpsDeclaration(e) {
+    return {
+        mode: 'tablette',
+        cle: e.cle,
+        horodatage_terminal: e.horodatage_terminal,
+        signataire: e.signataire,
+        lignes: e.lignes,
+        bloc_preuve: e.bloc_preuve,
+        pieces: (e.pieces ?? []).map(({ empreinte, role }) => ({ empreinte, role })),
+        gps: e.gps ?? null,
+    };
+}
+
+export function corpsRedistribution(e) {
+    return { cle: e.cle, horodatage_terminal: e.horodatage_terminal, lignes: e.lignes };
+}
+
+const RETENTABLE = (status) => status === 0 || status === 401 || status === 408 || status === 429 || status >= 500;
+
+/**
+ * @param {object} options
+ * @param {object} options.file                    file d'envoi (creerFile)
+ * @param {object} options.api                     creerApi()
+ * @param {{lire: Function, supprimer?: Function}} options.pieces   octets des pièces ({empreinte, blob})
+ * @param {() => Promise<{status: number}|void>} [options.telecharger]  téléchargement des affectations
+ * @param {() => boolean} [options.estEnLigne]
+ * @param {() => void} [options.surSessionExpiree]
+ * @param {(info: object) => void} [options.surChangement]
+ */
+export function creerSync({ file, api, pieces, telecharger, estEnLigne = () => true, surSessionExpiree = () => {}, surChangement = () => {} }) {
+    let enCours = null;
+    let redemande = false;
+
+    async function poster(empreinte, blob) {
+        const donnees = new FormData();
+        donnees.append('fichier', blob, `${empreinte.slice(0, 12)}.${blob.type === 'image/png' ? 'png' : 'jpg'}`);
+        donnees.append('empreinte', empreinte);
+
+        return api.envoyer('POST', '/pieces', { formData: donnees });
+    }
+
+    /** HEAD puis POST si le serveur ne l'a pas : renvoie l'issue finale ({status, corps}). */
+    async function deposerPiece(empreinte) {
+        const tete = await api.envoyer('HEAD', `/pieces/${empreinte}`);
+        if (tete.status === 200) return tete;
+        if (RETENTABLE(tete.status)) return tete;
+        const enregistree = await pieces.lire(empreinte);
+        if (!enregistree?.blob) {
+            return { status: 422, corps: { message: 'Pièce absente de la tablette : à reprendre.' } };
+        }
+
+        return poster(empreinte, enregistree.blob);
+    }
+
+    async function envoyerDeclaration(e) {
+        // Le serveur ne garde pas une pièce qu'il n'a pas : on renvoie celles que CE compte n'a pas déposées.
+        for (const piece of e.pieces ?? []) {
+            const tete = await api.envoyer('HEAD', `/pieces/${piece.empreinte}`);
+            if (tete.status === 200) continue;
+            if (RETENTABLE(tete.status)) return tete;
+            const enregistree = await pieces.lire(piece.empreinte);
+            if (!enregistree?.blob) continue; // la déclaration part : la pièce reste « attendue » côté serveur
+            const envoi = await poster(piece.empreinte, enregistree.blob);
+            if (RETENTABLE(envoi.status)) return envoi;
+        }
+
+        return api.envoyer('POST', `/remises/${e.remise_id}/declarations`, { json: corpsDeclaration(e) });
+    }
+
+    function envoyerElement(e) {
+        switch (e.type) {
+            case 'piece':
+                return deposerPiece(e.empreinte);
+            case 'declaration':
+                return envoyerDeclaration(e);
+            case 'redistribution':
+                return api.envoyer('POST', `/decharges/${e.decharge_id}/redistributions`, { json: corpsRedistribution(e), avecAppareil: true });
+            case 'liberation':
+                return api.envoyer('DELETE', `/decharges/${e.decharge_id}/reserve`, { avecAppareil: true });
+            default:
+                return Promise.resolve({ status: 422, corps: { message: `Type d'envoi inconnu : ${e.type}.` } });
+        }
+    }
+
+    /** Libère les octets des pièces d'une déclaration enregistrée, sauf celles qui restent à vérifier. */
+    async function allegerPieces(declaration) {
+        if (typeof pieces.supprimer !== 'function') return;
+        const elements = await file.lister();
+        for (const piece of declaration.pieces ?? []) {
+            const element = elements.find((x) => x.type === 'piece' && x.empreinte === piece.empreinte);
+            const aGarder = element?.statut === STATUTS.A_VERIFIER || element?.statut === STATUTS.EN_ATTENTE;
+            const utilisee = elements.some((x) => x.type === 'declaration' && x.id !== declaration.id
+                && x.statut !== STATUTS.SYNCHRONISE && (x.pieces ?? []).some((p) => p.empreinte === piece.empreinte));
+            if (!aGarder && !utilisee) await pieces.supprimer(piece.empreinte);
+        }
+    }
+
+    async function envoyerFile() {
+        let envoyes = 0;
+        for (;;) {
+            const element = await file.prochain();
+            if (!element) return { envoyes, session: true };
+            const issue = await envoyerElement(element);
+            const marque = await file.marquer(element.id, issue);
+            if (issue.status === 401) return { envoyes, session: false };
+            if (marque.statut === STATUTS.SYNCHRONISE) {
+                envoyes += 1;
+                if (element.type === 'declaration') await allegerPieces(element);
+            }
+            // Pas de réponse du serveur ou limite atteinte : inutile d'insister dans ce passage.
+            if (issue.status === 0 || issue.status === 429) return { envoyes, session: true, reseau: issue.status === 0 };
+        }
+    }
+
+    async function passage() {
+        if (!estEnLigne()) {
+            surChangement({ hors_ligne: true });
+
+            return { hors_ligne: true };
+        }
+        const envoi = await envoyerFile();
+        let session = envoi.session;
+        if (session && !envoi.reseau && telecharger) {
+            const telechargement = await telecharger();
+            if (telechargement?.status === 401) session = false;
+        }
+        if (!session) surSessionExpiree();
+        surChangement({ envoyes: envoi.envoyes, session });
+
+        return { ...envoi, session };
+    }
+
+    /** Un seul passage à la fois : un appel pendant un passage en demande un second, sans le doubler. */
+    function cycle() {
+        if (enCours) {
+            redemande = true;
+
+            return enCours;
+        }
+        enCours = (async () => {
+            let dernier;
+            try {
+                do {
+                    redemande = false;
+                    dernier = await passage();
+                } while (redemande && dernier.session && !dernier.hors_ligne && !dernier.reseau);
+            } finally {
+                enCours = null;
+            }
+
+            return dernier;
+        })();
+
+        return enCours;
+    }
+
+    return {
+        cycle,
+        enCours: () => enCours !== null,
+
+        /** Après une reconnexion réussie : la file reprend là où elle s'était arrêtée. */
+        reconnecte() {
+            file.reprendre();
+
+            return cycle();
+        },
+
+        /**
+         * Au démarrage, au retour du réseau et toutes les minutes.
+         * @returns {() => void} arrêt
+         */
+        demarrer({ fenetre = globalThis, intervalleMs = INTERVALLE_MS, setIntervalFn = setInterval, clearIntervalFn = clearInterval } = {}) {
+            const relancer = () => { cycle().catch(() => {}); };
+            fenetre.addEventListener('online', relancer);
+            const minuteur = setIntervalFn(relancer, intervalleMs);
+            relancer();
+
+            return () => {
+                fenetre.removeEventListener('online', relancer);
+                clearIntervalFn(minuteur);
+            };
+        },
+    };
+}
+
+/** Identifiant local d'une affectation téléchargée. */
+export const idElement = (element) => (element.remise ? `remise-${element.remise.id}` : `preparation-${element.decharge.id}`);
+
+/**
+ * Télécharge les affectations, la clé de preuve et l'état de l'appareil, et les range dans la tablette.
+ * Ne supprime jamais un élément que la file attend encore. Les erreurs réseau laissent les données précédentes.
+ *
+ * @returns {Promise<{status: number, designe?: boolean}>}
+ */
+export async function telechargerDonnees({ api, elements, file, meta, maintenant = () => new Date().toISOString() }) {
+    const affectations = await api.envoyer('GET', '/affectations');
+    if (affectations.status !== 200 || !Array.isArray(affectations.corps?.elements)) {
+        return { status: affectations.status };
+    }
+
+    const recus = affectations.corps.elements.map((e) => ({ ...e, id: idElement(e), telecharge_le: maintenant() }));
+    const file_ = await file.lister();
+    const attendus = new Set();
+    for (const f of file_) {
+        if (f.statut !== STATUTS.EN_ATTENTE && f.statut !== STATUTS.A_VERIFIER) continue;
+        if (f.type === 'declaration') attendus.add(`remise-${f.remise_id}`);
+        if (f.type === 'redistribution' || f.type === 'liberation') attendus.add(`preparation-${f.decharge_id}`);
+    }
+    const nouveaux = new Set(recus.map((e) => e.id));
+    for (const ancien of await elements.list()) {
+        if (!nouveaux.has(ancien.id) && !attendus.has(ancien.id)) await elements.delete(ancien.id);
+    }
+    for (const element of recus) await elements.put(element);
+
+    const cle = await api.envoyer('GET', '/cle-preuve');
+    if (cle.status === 200 && typeof cle.corps?.pem === 'string') {
+        await meta.ecrire('cle_preuve', { pem: cle.corps.pem, empreinte: cle.corps.empreinte });
+    }
+
+    let designe = false;
+    const appareil = await api.envoyer('GET', '/appareil', { avecAppareil: true });
+    if (appareil.status === 200) {
+        designe = appareil.corps?.designe === true;
+        await meta.ecrire('appareil_designe', { designe, appareil: appareil.corps?.appareil ?? null });
+    }
+    if (designe) {
+        const connues = (await meta.lister('reserve:')).map((r) => r.decharge_id);
+        const candidates = new Set([...recus.filter((e) => !e.remise).map((e) => e.decharge.id), ...connues]);
+        for (const dechargeId of candidates) {
+            const reserve = await api.envoyer('GET', `/decharges/${dechargeId}/reserve`, { avecAppareil: true });
+            if (reserve.status === 200 && reserve.corps?.reserve) {
+                const precedente = await meta.lire(`reserve:${dechargeId}`);
+                await meta.ecrire(`reserve:${dechargeId}`, { ...precedente, ...reserve.corps.reserve, decharge_id: dechargeId });
+            }
+        }
+    }
+    await meta.ecrire('derniere_sync', maintenant());
+
+    return { status: 200, designe };
+}

@@ -34,6 +34,7 @@ use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\ReclamationController;
 use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
+use App\Http\Controllers\Terrain\AppController as TerrainAppController;
 use App\Http\Controllers\Terrain\CodeController as TerrainCodeController;
 use App\Http\Controllers\Terrain\ContestationController as TerrainContestationController;
 use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController;
@@ -54,6 +55,11 @@ use Illuminate\Support\Facades\Route;
 Route::get('login',  [AuthController::class, 'showLogin'])->name('login');
 Route::post('login', [AuthController::class, 'login']);
 Route::post('logout',[AuthController::class, 'logout'])->name('logout')->middleware('auth');
+
+/* ── Application de terrain (PWA) : script, manifeste et icône publics, sous /terrain/ pour borner l'étendue du service worker ── */
+Route::get('terrain/sw.js', [TerrainAppController::class, 'serviceWorker'])->name('pwa.terrain.sw');
+Route::get('terrain/manifest.webmanifest', [TerrainAppController::class, 'manifeste'])->name('pwa.terrain.manifeste');
+Route::get('terrain/icon.svg', [TerrainAppController::class, 'icone'])->name('pwa.terrain.icone');
 
 /* ── Protected ── */
 Route::middleware(['auth'])->group(function () {
@@ -149,6 +155,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('code', [TerrainCodeController::class, 'update'])->middleware('throttle:10,1')->name('code.update');
         });
         Route::middleware(['can:logistique-terrain', 'premier-acces'])->group(function () {
+            Route::get('app', [TerrainAppController::class, 'coquille'])->name('app');
             Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
             Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
             Route::post('declarations/{declaration}/contestation', [TerrainContestationController::class, 'store'])->whereNumber('declaration')->name('declarations.contestation');

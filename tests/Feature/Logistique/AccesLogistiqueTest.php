@@ -175,6 +175,8 @@ class AccesLogistiqueTest extends TestCase
             ->filter(fn ($r) => str_starts_with($r->getActionName(), 'App\\Http\\Controllers\\'))
             ->reject(fn ($r) => str_starts_with($r->getName(), 'logistique.'))
             ->reject(fn ($r) => in_array($r->getName(), $exclues, true) || str_starts_with($r->getName(), 'profile.'))
+            // Script, manifeste et icône de l'application de terrain : fichiers publics, pas des pages.
+            ->reject(fn ($r) => str_starts_with($r->getName(), 'pwa.'))
             ->filter(fn ($r) => $r->parameterNames() === [])
             ->values();
 

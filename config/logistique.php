@@ -52,6 +52,12 @@ return [
     */
     'cle_preuve_privee' => env('LOGISTIQUE_CLE_PREUVE_PRIVEE', storage_path('app/private/preuve.pem')),
 
+    /*
+    | Manifeste des ressources compilées (Vite) : son empreinte donne la version du service worker de la tablette,
+    | qui change donc à chaque nouveau build de l'application de terrain.
+    */
+    'pwa_manifeste_vite' => env('LOGISTIQUE_PWA_MANIFESTE_VITE', public_path('build/manifest.json')),
+
     'nb_decharge' => 'NB : la présente décharge doit être retournée signée à la Division Logistique et de la Planification.',
 
 ];
