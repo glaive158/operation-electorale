@@ -192,6 +192,40 @@ class IndicateursTest extends TestCase
         $this->assertSame(100, $this->ligne($this->prefecture)['reste_a_receptionner']);
     }
 
+    public function test_filtre_par_destinataire_n_inclut_rien_d_un_autre(): void
+    {
+        $dA = $this->deposerChargee($this->prefecture, [$this->urnes->id => 100]);
+        $this->deposerRecue($dA, [$this->urnes->id => ['recu' => 100, 'defectueux' => 10]]);
+        $dB = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($dB, [$this->urnes->id => 100]);
+        $redistribution = $this->en($this->autoriteFictive($this->prefecture), fn () => app(RemiseService::class)->preparerRedistribution($dB->refresh(), [$this->urnes->id => 80]));
+        $this->declarerRecu($this->autoriteFictive($this->sousPrefecture1), $redistribution->load('lignes'), 70);
+
+        $chiffres = ['expedie' => 100, 'recu' => 100, 'recu_utilisable' => 90, 'en_transit' => 0];
+        // B a bien des chiffres propres et différents de ceux de A.
+        $this->assertLigne(['expedie' => 100, 'recu' => 70, 'recu_utilisable' => 70, 'en_transit' => 10], $this->ligne($this->sousPrefecture1));
+
+        $this->assertLigne($chiffres, $this->ligne($this->prefecture, null, [$this->prefecture->id]));
+        $parDestinataire = $this->indicateurs()->parDestinataire($this->cycle, [$this->prefecture->id]);
+        $this->assertTrue($parDestinataire->every(fn (array $l) => $l['destinataire']->is($this->prefecture)));
+
+        $parArticle = $this->indicateurs()->parArticle($this->cycle, [$this->prefecture->id]);
+        $this->assertLigne($chiffres + ['dotation' => 100], $parArticle->first(fn (array $l) => $l['materiel']->is($this->urnes)));
+    }
+
+    public function test_deux_declarations_concordantes_comptent_une_fois(): void
+    {
+        $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 100]);
+        $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->with('lignes')->sole();
+        $this->declarerRecu($decharge->agent, $remise, 100, 0, 'tablette');
+        $this->declarerRecu($this->autoriteFictive($this->prefecture), $remise, 100);
+
+        $this->assertEqualsCanonicalizing(['retenue', 'concordante'], $remise->declarations()->pluck('statut')->all());
+        $this->assertLigne(['recu' => 100, 'recu_utilisable' => 100, 'reste_a_receptionner' => 0], $this->ligne($this->prefecture));
+        $this->assertSame(100, $this->indicateurs()->recuUtilisable($this->cycle, $this->prefecture, $this->urnes));
+        $this->assertSame(100, $this->article()['recu_utilisable']);
+    }
+
     public function test_defectueux_chez_le_prefet_ne_sont_pas_en_transit(): void
     {
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
