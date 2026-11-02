@@ -13,6 +13,7 @@ use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\RemiseLigne;
 use App\Models\User;
+use App\Support\Canonique;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -431,21 +432,7 @@ class DeclarationService
     {
         $contenu = ['remise_id' => $remiseId, 'mode' => $mode, 'signataire' => $signataire, 'lignes' => $lignes];
 
-        return hash('sha256', json_encode(self::canonique($contenu), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
-    }
-
-    /** Clés triées récursivement ; l'ordre des listes est conservé. */
-    private static function canonique(mixed $valeur): mixed
-    {
-        if (! is_array($valeur)) {
-            return $valeur;
-        }
-        $valeur = array_map(fn ($element) => self::canonique($element), $valeur);
-        if (! array_is_list($valeur)) {
-            ksort($valeur);
-        }
-
-        return $valeur;
+        return Canonique::empreinte($contenu);
     }
 
     private function exigerAuteur(): void
