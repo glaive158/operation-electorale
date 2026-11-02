@@ -7,7 +7,7 @@
     <title>Terrain — Logistique électorale</title>
     <link rel="manifest" href="{{ route('pwa.terrain.manifeste', [], false) }}">
     <link rel="icon" type="image/svg+xml" href="{{ route('pwa.terrain.icone', [], false) }}">
-    @vite(['resources/css/app.css', 'resources/js/terrain/app.js'])
+    {{ $vite(['resources/css/app.css', 'resources/js/terrain/app.js']) }}
 </head>
 <body class="bg-slate-100 font-sans antialiased min-h-screen text-slate-800">
     {{-- Coquille identique pour tous les comptes (elle est conservée par le service worker) : l'application la remplit. --}}

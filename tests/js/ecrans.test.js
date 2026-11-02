@@ -357,3 +357,50 @@ test('redistribution : hors connexion la reserve n\'est pas possible, et une red
     assert.equal(parTexte(ecran, 'button', 'Réserver').disabled, true);
     assert.match(toutLeTexte(ecran), /À arbitrer par le central : Appareil non désigné pour cette préfecture\./);
 });
+
+test('code efface : retour en arriere, controle prealable en echec, changement d\'ecran', async () => {
+    const ctx = await contexte();
+    ctx.nettoyages = [];
+    await ctx.stockage.elements.put(elementReception());
+    const racine = await ecranReception(ctx, 'remise-12');
+    await passerALAutorite(racine);
+
+    // Contrôle préalable en échec (signature manquante) : le code saisi est effacé.
+    let champ = parId(racine, 'reception-code');
+    saisir(champ, CODE);
+    await parTexte(racine, 'button', 'Valider la réception').click();
+    assert.match(toutLeTexte(racine), /signature est obligatoire/);
+    assert.equal(champ.value, '');
+
+    // Format invalide : effacé aussi.
+    saisir(champ, '12');
+    await parTexte(racine, 'button', 'Valider la réception').click();
+    assert.equal(champ.value, '');
+
+    // Retour : effacé avant de quitter l'étape.
+    saisir(champ, CODE);
+    await parTexte(racine, 'button', 'Retour').click();
+    assert.equal(champ.value, '');
+
+    // Changement d'écran : les nettoyages enregistrés effacent le champ affiché.
+    await parTexte(racine, 'button', 'Continuer').click();
+    champ = parId(racine, 'reception-code');
+    saisir(champ, CODE);
+    for (const nettoyer of ctx.nettoyages.splice(0)) nettoyer();
+    assert.equal(champ.value, '');
+});
+
+test('envois d\'un autre compte : invisibles dans la reception et la redistribution', async () => {
+    const ctx = await contexte();
+    await ctx.stockage.elements.put(elementReception());
+    await ctx.file.ajouter({
+        type: 'declaration', id: 'cle-declaration-0099', cle: 'cle-declaration-0099', remise_id: 12, decharge_id: 5, utilisateur_id: 99,
+        horodatage_terminal: '2026-11-05T10:00:00+01:00', bloc_preuve: 'QQ==', signataire: { user_id: 7, nom: 'Autre', qualite: 'B' }, lignes: [], pieces: [],
+    });
+
+    const racine = await ecranReception(ctx, 'remise-12');
+
+    assert.equal(racine.getAttribute('id'), null, 'pas le récapitulatif de l\'autre compte');
+    assert.match(toutLeTexte(racine), /Matériel reçu/);
+    assert.doesNotMatch(toutLeTexte(await ecranListe(ctx)), /En attente d'envoi/);
+});

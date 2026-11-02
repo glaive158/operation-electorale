@@ -53,6 +53,8 @@ export async function demarrer(racine) {
         appareil,
         session: (await stockage.meta.lire('session')) ?? null,
         sessionExpiree: false,
+        enregistrement: null,
+        rechargementEnAttente: false,
         enLigne: navigator.onLine !== false,
         miseAJour: null,
         message: null,
@@ -65,12 +67,22 @@ export async function demarrer(racine) {
     const pied = h('footer', { class: 'px-4 pb-6 text-xs text-slate-500 text-center' });
     remplacer(racine, enTete, ecran, pied);
 
+    /** Sur la liste, sans champ en cours de saisie : jamais pendant une saisie de données. */
+    function ecranSansSaisie() {
+        const route = location.hash.replace(/^#/, '');
+        const surListe = route === '' || route === '/';
+        const actif = document.activeElement;
+        const enSaisie = actif && ecran.contains(actif) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(actif.tagName);
+
+        return surListe && !enSaisie;
+    }
+
     async function demanderMiseAJour() {
-        // Une nouvelle version n'est activée que lorsque rien n'attend d'être envoyé.
-        if (!etat.miseAJour) return;
+        // Une nouvelle version n'est activée que lorsque rien n'attend d'être envoyé et qu'aucune saisie n'est en cours.
+        if (!etat.miseAJour || !ecranSansSaisie()) return;
         const elements = await file.lister();
         const rienAEnvoyer = !elements.some((e) => e.statut === STATUTS.EN_ATTENTE);
-        if (rienAEnvoyer) etat.miseAJour.postMessage({ type: 'activer', file_vide: true });
+        if (rienAEnvoyer && ecranSansSaisie()) etat.miseAJour.postMessage({ type: 'activer', file_vide: true });
     }
 
     async function rafraichirEntete() {
@@ -98,6 +110,8 @@ export async function demarrer(racine) {
 
     const ctx = {
         etat, stockage, file, api, coquilleEnCache,
+        nettoyages: [],
+        demanderMiseAJour,
         sync: null,
         rafraichirEntete,
         signaler(texte) { etat.message = texte; rafraichirEntete(); },
@@ -107,7 +121,8 @@ export async function demarrer(racine) {
             if (reponse.status !== 201 || !reponse.corps?.token) return { erreur: messageErreur(reponse) };
 
             // Des envois d'un autre compte attendent sur cette tablette : ils ne partiraient pas avec ce jeton.
-            const autres = (await file.lister()).filter((e) => (e.statut === STATUTS.EN_ATTENTE || e.statut === STATUTS.A_VERIFIER)
+            // Ceux « à vérifier » n'attendent que leur titulaire : ils restent cachés à ce compte, sans le bloquer.
+            const autres = (await file.lister()).filter((e) => e.statut === STATUTS.EN_ATTENTE
                 && e.utilisateur_id != null && e.utilisateur_id !== reponse.corps.utilisateur.id);
             if (autres.length) {
                 await creerApi({ jeton: () => reponse.corps.token, base: amorce.api ?? '/api/terrain' }).envoyer('DELETE', '/jetons/courant');
@@ -115,13 +130,12 @@ export async function demarrer(racine) {
                 return { erreur: 'Des envois d\'un autre compte sont en attente sur cette tablette : le compte concerné doit se reconnecter pour les envoyer.' };
             }
 
-            const changeDeCompte = etat.session?.utilisateur?.id !== reponse.corps.utilisateur.id;
             etat.session = { token: reponse.corps.token, utilisateur: reponse.corps.utilisateur, expire_le: reponse.corps.expire_le, email };
             etat.sessionExpiree = false;
             etat.message = null;
             await stockage.meta.ecrire('session', etat.session);
-            // Les lectures gardées par le service worker sont celles du compte précédent.
-            if (changeDeCompte) navigator.serviceWorker?.controller?.postMessage({ type: 'purger-api' });
+            // Une session retrouvée : le navigateur peut de nouveau récupérer une version plus récente du service worker.
+            etat.enregistrement?.update().catch(() => {});
             sync.reconnecte().then(rafraichirEntete);
             location.hash = '#/';
             await rafraichirEntete();
@@ -134,6 +148,7 @@ export async function demarrer(racine) {
     const sync = creerSync({
         file,
         api,
+        meta: stockage.meta,
         pieces: { lire: (empreinte) => stockage.pieces.get(empreinte), supprimer: (empreinte) => stockage.pieces.delete(empreinte) },
         telecharger: () => telechargerDonnees({ api, elements: stockage.elements, file, meta: stockage.meta }),
         estEnLigne: () => navigator.onLine !== false && etat.session !== null && !etat.sessionExpiree,
@@ -168,23 +183,33 @@ export async function demarrer(racine) {
         remplacer(ecran, contenu);
     }
 
-    window.addEventListener('hashchange', () => { etat.message = null; rafraichirEntete(); dessiner(); });
+    window.addEventListener('hashchange', () => {
+        etat.message = null;
+        // Un code saisi ne survit pas à un changement d'écran.
+        for (const nettoyer of ctx.nettoyages.splice(0)) nettoyer();
+        rafraichirEntete();
+        dessiner().then(() => {
+            if (etat.rechargementEnAttente && ecranSansSaisie()) location.reload();
+            else demanderMiseAJour();
+        });
+    });
     window.addEventListener('online', () => { etat.enLigne = true; rafraichirEntete(); });
     window.addEventListener('offline', () => { etat.enLigne = false; rafraichirEntete(); });
 
     await rafraichirEntete();
     await dessiner();
     ctx.arreter = sync.demarrer({ fenetre: window });
-    enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEntete);
+    enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEntete, ecranSansSaisie);
 
     return ctx;
 }
 
 /** Enregistre le service worker et lui confie les ressources déjà chargées par la page (hors connexion ensuite). */
-function enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEntete) {
+function enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEntete, ecranSansSaisie) {
     if (!('serviceWorker' in navigator) || !amorce.service_worker) return;
 
     navigator.serviceWorker.register(amorce.service_worker, { scope: amorce.portee ?? '/terrain/' }).then((enregistrement) => {
+        etat.enregistrement = enregistrement;
         const surveiller = (worker) => {
             worker.addEventListener('statechange', () => {
                 if (worker.state === 'installed' && navigator.serviceWorker.controller) {
@@ -211,6 +236,12 @@ function enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEnt
         // La nouvelle version a pris la main (la file était vide) : on recharge une fois pour l'utiliser.
         // Au tout premier chargement, le service worker prend la main sans qu'il y ait rien à recharger.
         if (rechargement || !avaitUnControleur) return;
+        // Jamais de rechargement pendant une saisie : il attend le retour à la liste.
+        if (!ecranSansSaisie()) {
+            etat.rechargementEnAttente = true;
+
+            return;
+        }
         rechargement = true;
         location.reload();
     });

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { STATUTS } from '../../resources/js/terrain/file.js';
 import {
-    construireListe, dechargesDeRedistribution, detailSynchronisation, enAttenteDEnvoi, indicateurHorsLigne, LIBELLES_STATUT,
+    construireListe, dechargesDeRedistribution, duCompte, detailSynchronisation, enAttenteDEnvoi, indicateurHorsLigne, LIBELLES_STATUT,
     reserveRestante, statutAffiche, texteHorsLigne,
 } from '../../resources/js/terrain/vue.js';
 
@@ -105,4 +105,20 @@ test('indicateur « Tout est disponible hors ligne »', () => {
     const incomplet = indicateurHorsLigne({ coquille: true, cle: false, donnees: false });
     assert.deepEqual(incomplet, { pret: false, manque: ['clé de preuve', 'affectations'] });
     assert.match(texteHorsLigne(incomplet), /clé de preuve, affectations/);
+});
+
+test('la liste ne montre que les declarations du compte connecte', () => {
+    const file = [
+        declaration(1, 'en_attente', { utilisateur_id: 3 }),
+        declaration(2, 'a_verifier', { utilisateur_id: 99, message: 'secret d\'un autre', resume: { numero: '2' } }),
+        declaration(4, 'a_verifier', { utilisateur_id: 3, resume: { numero: '4' } }),
+        declaration(5, 'synchronise', { resume: { numero: '5' } }),
+    ];
+
+    const lignes = construireListe([remise(1), remise(2)], file, 3);
+
+    assert.deepEqual(lignes.map((l) => [l.remise_id, l.statut]), [[4, 'a_verifier'], [2, 'disponible'], [1, 'en_attente'], [5, 'synchronise']]);
+    assert.equal(lignes.some((l) => l.detail === 'secret d\'un autre'), false);
+    assert.deepEqual(duCompte(file, 3).map((e) => e.remise_id), [1, 4, 5]);
+    assert.deepEqual(duCompte(file, 99).map((e) => e.remise_id), [2, 5], 'sans titulaire connu : visible de tous');
 });

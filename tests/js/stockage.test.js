@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-    creerStockage, identifiantAppareil, MAGASINS, migrer, MIGRATIONS, NOM_BASE, ouvrirBase, proteger, VERSION,
+    creerStockage, identifiantAppareil, MAGASINS, migrer, MIGRATIONS, NOM_BASE, ouvrirBase, proteger, protegerTransaction, VERSION,
 } from '../../resources/js/terrain/stockage.js';
 import { creerFauxIndexedDB } from './support/faux-indexeddb.js';
 
@@ -102,4 +102,49 @@ test('identifiant de la tablette : genere une fois, conserve ensuite', async () 
     assert.equal(await identifiantAppareil(meta, () => { throw new Error('ne doit pas regenerer'); }), premier);
     assert.match(await identifiantAppareil((await ouvrirBase({ indexedDB: creerFauxIndexedDB() }).then(creerStockage)).meta), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     assert.deepEqual(Object.keys(MAGASINS).sort(), ['ELEMENTS', 'FILE', 'META', 'PIECES']);
+});
+
+test('la transaction de montee de version n\'offre ni clear, ni delete, ni deleteIndex ; lire et ecrire restent possibles', () => {
+    const appels = [];
+    const magasin = {
+        get: (...a) => { appels.push(['get', ...a]); return 'lu'; },
+        put: (...a) => { appels.push(['put', ...a]); },
+        clear: () => appels.push(['clear']),
+        delete: () => appels.push(['delete']),
+        deleteIndex: () => appels.push(['deleteIndex']),
+        createIndex: (...a) => appels.push(['createIndex', ...a]),
+    };
+    const transaction = protegerTransaction({ objectStore: () => magasin, abort() {} });
+    const m = transaction.objectStore('file');
+
+    assert.equal(m.get('x'), 'lu');
+    m.put({ id: 'x' });
+    m.createIndex('par_statut', 'statut');
+    assert.throws(() => m.clear(), /ne peut pas appeler file\.clear/);
+    assert.throws(() => m.delete('x'), /ne peut pas appeler file\.delete/);
+    assert.throws(() => m.deleteIndex('par_statut'), /deleteIndex/);
+    assert.deepEqual(appels.map((a) => a[0]), ['get', 'put', 'createIndex']);
+});
+
+test('une migration recoit la transaction protegee : vider un magasin fait echouer la montee de version', () => {
+    const base = { createObjectStore() {} };
+    const vide = [];
+    const transaction = { objectStore: () => ({ clear: () => vide.push('clear') }) };
+
+    assert.throws(() => migrer(base, transaction, 0, 1, [(b, t) => t.objectStore('file').clear()]), /ne peut pas appeler/);
+    assert.deepEqual(vide, []);
+});
+
+test('ouverture bloquee : refus, et une connexion ouverte apres coup est refermee', async () => {
+    let fermee = false;
+    let requete;
+    const indexedDB = { open: () => { requete = {}; return requete; } };
+
+    const promesse = ouvrirBase({ indexedDB });
+    requete.onblocked();
+    await assert.rejects(promesse, /Base verrouillée/);
+    requete.result = { close: () => { fermee = true; } };
+    requete.onsuccess();
+
+    assert.equal(fermee, true);
 });

@@ -446,3 +446,32 @@ test('les pieces d\'une declaration envoyee sont liberees, sauf celle restee a v
     assert.equal(pieces.has(EMPREINTE_A), false);
     assert.equal(pieces.has(EMPREINTE_B), true);
 });
+
+test('une redistribution enregistree diminue la reserve gardee sur la tablette ; une liberation la vide', async () => {
+    const reglages = new Map([['reserve:5', { decharge_id: 5, lignes: [{ materiel_id: 3, quantite: 25 }, { materiel_id: 4, quantite: 5 }] }]]);
+    const meta = { lire: async (c) => reglages.get(c), ecrire: async (c, v) => { reglages.set(c, v); } };
+    const { file, sync } = installer({ meta, reponses: (m) => (m === 'POST' ? { status: 201, corps: { redistribution: { statut: 'en_attente', a_arbitrer: false } } } : { status: 200, corps: null }) });
+    await file.ajouter({ type: 'redistribution', id: 'cle-redistribution-0001', cle: 'cle-redistribution-0001', decharge_id: 5, horodatage_terminal: '2026-11-06T09:30:00+00:00', lignes: [{ materiel_id: 3, quantite: 10 }] });
+    await file.ajouter({ type: 'redistribution', id: 'cle-redistribution-0002', cle: 'cle-redistribution-0002', decharge_id: 5, horodatage_terminal: '2026-11-06T09:31:00+00:00', lignes: [{ materiel_id: 3, quantite: 20 }, { materiel_id: 4, quantite: 1 }] });
+
+    await sync.cycle();
+    assert.deepEqual(reglages.get('reserve:5').lignes, [{ materiel_id: 3, quantite: 0 }, { materiel_id: 4, quantite: 4 }], 'plancher à zéro');
+
+    await file.ajouter({ type: 'liberation', id: 'liberation-1', decharge_id: 5 });
+    await sync.cycle();
+    assert.deepEqual(reglages.get('reserve:5').lignes, []);
+});
+
+test('une redistribution a arbitrer ne diminue pas la reserve (rien n\'a ete compte) ; refus 422 non plus', async () => {
+    const reglages = new Map([['reserve:5', { decharge_id: 5, lignes: [{ materiel_id: 3, quantite: 25 }] }]]);
+    const meta = { lire: async (c) => reglages.get(c), ecrire: async (c, v) => { reglages.set(c, v); } };
+    let reponse = { status: 201, corps: { redistribution: { statut: 'a_arbitrer', a_arbitrer: true } } };
+    const { file, sync } = installer({ meta, reponses: () => reponse });
+    await file.ajouter({ type: 'redistribution', id: 'cle-redistribution-0001', cle: 'cle-redistribution-0001', decharge_id: 5, horodatage_terminal: '2026-11-06T09:30:00+00:00', lignes: [{ materiel_id: 3, quantite: 10 }] });
+    await sync.cycle();
+    reponse = { status: 422, corps: { message: 'refus' } };
+    await file.ajouter({ type: 'redistribution', id: 'cle-redistribution-0002', cle: 'cle-redistribution-0002', decharge_id: 5, horodatage_terminal: '2026-11-06T09:31:00+00:00', lignes: [{ materiel_id: 3, quantite: 10 }] });
+    await sync.cycle();
+
+    assert.equal(reglages.get('reserve:5').lignes[0].quantite, 25);
+});

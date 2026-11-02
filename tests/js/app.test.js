@@ -171,3 +171,73 @@ test('jeton refuse en cours de route (401) : retour a la connexion, file conserv
     assert.ok(appels.some((a) => a.chemin === '/remises/12/declarations'));
     ctx.arreter();
 });
+
+test('envois a verifier d\'un autre compte : ni bloquants ni visibles ; mise a jour du service worker apres une connexion reussie', async () => {
+    indexedDB.bases.clear();
+    reseau();
+    const miseAJour = [];
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const enregistrement = { update: async () => { miseAJour.push(1); }, addEventListener() {}, installing: null, waiting: null };
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { onLine: true, serviceWorker: { controller: null, register: async () => enregistrement, ready: new Promise(() => {}), addEventListener() {} } },
+    });
+    try {
+        const racine = new Element('div');
+        const ctx = await demarrer(racine);
+        await ctx.file.ajouter({
+            type: 'declaration', id: 'cle-declaration-0003', cle: 'cle-declaration-0003', remise_id: 12, decharge_id: 5, utilisateur_id: 99,
+            horodatage_terminal: '2026-11-05T10:00:00+01:00', bloc_preuve: 'QQ==', signataire: { user_id: 7, nom: 'A', qualite: 'B' }, lignes: [], pieces: [],
+        });
+        await ctx.file.marquer('cle-declaration-0003', { status: 422, corps: { message: 'Message privé de l\'autre compte' } });
+        assert.equal(miseAJour.length, 0);
+
+        parId(racine, 'connexion-email').value = 'agent@exemple.sn';
+        parId(racine, 'connexion-mdp').value = 'mot-de-passe';
+        await trouverTous(racine, (e) => e.tagName === 'FORM')[0].emettre('submit');
+        await attendre(async () => (await ctx.stockage.meta.lire('derniere_sync')) !== undefined);
+        await ctx.rafraichir();
+
+        assert.equal((await ctx.stockage.meta.lire('session')).utilisateur.id, 3, 'connecté malgré l\'envoi à vérifier d\'un autre compte');
+        assert.equal(racine.textContent.includes('Message privé'), false);
+        assert.equal((await ctx.file.lister())[0].statut, 'a_verifier', 'rien n\'est perdu');
+        assert.equal(miseAJour.length, 1, 'registration.update() après la connexion');
+        ctx.arreter();
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', original);
+    }
+});
+
+test('mise a jour du service worker : seulement sur la liste, sans champ actif et file vide', async () => {
+    indexedDB.bases.clear();
+    reseau();
+    const racine = new Element('div');
+    const ctx = await demarrer(racine);
+    try {
+    const messages = [];
+    ctx.etat.miseAJour = { postMessage: (m) => messages.push(m) };
+
+    globalThis.location.hash = '#/reception/remise-12';
+    await ctx.demanderMiseAJour();
+    assert.deepEqual(messages, [], 'pas pendant une saisie de réception');
+
+    globalThis.location.hash = '#/';
+    const champ = new Element('input');
+    racine.enfants[1].appendChild(champ); // la zone d'écran (<main>)
+    globalThis.document.activeElement = champ;
+    await ctx.demanderMiseAJour();
+    assert.deepEqual(messages, [], 'pas avec un champ actif');
+    globalThis.document.activeElement = null;
+
+    await ctx.file.ajouter({ type: 'liberation', id: 'liberation-1', decharge_id: 5 });
+    await ctx.demanderMiseAJour();
+    assert.deepEqual(messages, [], 'pas tant qu\'un envoi attend');
+    await ctx.file.marquer('liberation-1', 'synchronise');
+
+    await ctx.demanderMiseAJour();
+    assert.deepEqual(messages, [{ type: 'activer', file_vide: true }]);
+    } finally {
+        globalThis.location.hash = '';
+        ctx.arreter();
+    }
+});

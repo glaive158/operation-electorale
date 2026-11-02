@@ -50,6 +50,33 @@ export function proteger(base) {
     };
 }
 
+/**
+ * La transaction de montée de version vue par une migration : on peut lire et écrire (transformer des données),
+ * jamais vider un magasin (`clear`) ni supprimer un enregistrement (`delete`), ni supprimer un index.
+ */
+export function protegerTransaction(transaction) {
+    if (!transaction) return transaction;
+    const interdit = (nom) => () => { throw new Error(`Une migration ne peut pas appeler ${nom} : aucune donnée de la tablette n'est effacée.`); };
+
+    return {
+        objectStore: (nom) => {
+            const magasin = transaction.objectStore(nom);
+
+            return new Proxy(magasin, {
+                get(cible, propriete) {
+                    if (propriete === 'clear' || propriete === 'delete' || propriete === 'deleteIndex') return interdit(`${nom}.${String(propriete)}`);
+                    const valeur = Reflect.get(cible, propriete, cible);
+
+                    return typeof valeur === 'function' ? valeur.bind(cible) : valeur;
+                },
+            });
+        },
+        abort: () => transaction.abort(),
+        get oncomplete() { return transaction.oncomplete; },
+        set oncomplete(f) { transaction.oncomplete = f; },
+    };
+}
+
 /** Joue les migrations de `ancienne` (exclue) à `nouvelle` (incluse), dans l'ordre. */
 export function migrer(base, transaction, ancienne, nouvelle, migrations = MIGRATIONS) {
     if (!Number.isInteger(ancienne) || !Number.isInteger(nouvelle) || ancienne < 0 || nouvelle < ancienne || nouvelle > migrations.length) {
@@ -57,7 +84,7 @@ export function migrer(base, transaction, ancienne, nouvelle, migrations = MIGRA
     }
     const protegee = proteger(base);
     for (let version = ancienne; version < nouvelle; version += 1) {
-        migrations[version](protegee, transaction);
+        migrations[version](protegee, protegerTransaction(transaction));
     }
 }
 
@@ -74,23 +101,36 @@ export function ouvrirBase({ indexedDB = globalThis.indexedDB, nom = NOM_BASE, m
 
             return;
         }
+        let termine = false;
+        const echouer = (erreur) => {
+            if (termine) return;
+            termine = true;
+            reject(erreur);
+        };
         const requete = indexedDB.open(nom, migrations.length);
         requete.onupgradeneeded = (evenement) => {
             try {
                 migrer(requete.result, requete.transaction, evenement.oldVersion, migrations.length, migrations);
             } catch (erreur) {
                 requete.transaction?.abort();
-                reject(erreur);
+                echouer(erreur);
             }
         };
         requete.onsuccess = () => {
             const base = requete.result;
+            if (termine) {
+                // Ouverture aboutie après un refus (autre fenêtre qui se ferme tard) : on ne garde pas de connexion orpheline.
+                base.close();
+
+                return;
+            }
+            termine = true;
             // Une autre fenêtre veut migrer : on lâche la base plutôt que de la bloquer.
             base.onversionchange = () => base.close();
             resolve(base);
         };
-        requete.onerror = () => reject(requete.error ?? new Error('Ouverture de la base impossible.'));
-        requete.onblocked = () => reject(new Error('Base verrouillée par une autre fenêtre : fermez les autres onglets du terrain.'));
+        requete.onerror = () => echouer(requete.error ?? new Error('Ouverture de la base impossible.'));
+        requete.onblocked = () => echouer(new Error('Base verrouillée par une autre fenêtre : fermez les autres onglets du terrain.'));
     });
 }
 

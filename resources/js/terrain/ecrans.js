@@ -11,7 +11,7 @@ import { construireBloc, contenuPreuve, importerCle } from './preuve.js';
 import { creerSignature } from './signature.js';
 import {
     CLASSES_STATUT, construireListe, dechargesDeRedistribution, indicateurHorsLigne, LIBELLES_ETAPE, LIBELLES_STATUT,
-    reserveRestante, texteHorsLigne,
+    duCompte, reserveRestante, texteHorsLigne,
 } from './vue.js';
 
 const CARTE = 'bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-4';
@@ -71,7 +71,7 @@ export async function ecranListe(ctx) {
     const [elements, file, cle, derniere] = await Promise.all([
         ctx.stockage.elements.list(), ctx.file.lister(), ctx.stockage.meta.lire('cle_preuve'), ctx.stockage.meta.lire('derniere_sync'),
     ]);
-    const lignes = construireListe(elements, file);
+    const lignes = construireListe(elements, file, ctx.etat.session?.utilisateur?.id ?? null);
     const indicateur = indicateurHorsLigne({ coquille: await ctx.coquilleEnCache(), cle: Boolean(cle), donnees: Boolean(derniere) });
     const session = ctx.etat.session;
 
@@ -142,7 +142,7 @@ function lireEntier(champ) {
 
 export async function ecranReception(ctx, id) {
     const element = await ctx.stockage.elements.get(id);
-    const file = await ctx.file.lister();
+    const file = duCompte(await ctx.file.lister(), ctx.etat.session?.utilisateur?.id ?? null);
     const remiseId = element?.remise?.id ?? Number(String(id).replace('remise-', ''));
     const existante = file.find((e) => e.type === 'declaration' && e.remise_id === remiseId);
     if (existante) return recapitulatif(ctx, existante);
@@ -247,6 +247,8 @@ export async function ecranReception(ctx, id) {
             },
         }, 'Enregistrer ma position');
 
+        // Un code saisi ne survit ni à un retour en arrière ni à un changement d'écran.
+        ctx.nettoyages?.push(() => { code.value = ''; });
         const selection = signataires.length > 1
             ? h('div', {}, h('label', { class: ETIQUETTE, for: 'reception-signataire' }, 'Qui signe ?'),
                 h('select', {
@@ -259,9 +261,11 @@ export async function ecranReception(ctx, id) {
         bouton.addEventListener('click', async () => {
             if (etat.occupe) return;
             remplacer(erreur);
-            if (!etat.signataire) { remplacer(erreur, alerte('Aucune autorité n\'est rattachée à ce destinataire : la réception ne peut pas être signée ici.')); return; }
-            if (!/^[0-9]{6}$/.test(code.value)) { remplacer(erreur, alerte('Le code personnel comporte 6 chiffres.')); return; }
-            if (etat.signature.estVide()) { remplacer(erreur, alerte('La signature est obligatoire : signez dans le cadre.')); return; }
+            // Toute vérification préalable qui échoue efface aussi le code saisi.
+            const refuser = (texte) => { code.value = ''; remplacer(erreur, alerte(texte)); };
+            if (!etat.signataire) { refuser('Aucune autorité n\'est rattachée à ce destinataire : la réception ne peut pas être signée ici.'); return; }
+            if (!/^[0-9]{6}$/.test(code.value)) { refuser('Le code personnel comporte 6 chiffres.'); return; }
+            if (etat.signature.estVide()) { refuser('La signature est obligatoire : signez dans le cadre.'); return; }
             etat.occupe = true;
             bouton.disabled = true;
             try {
@@ -295,7 +299,7 @@ export async function ecranReception(ctx, id) {
                 h('div', {}, h('label', { class: ETIQUETTE }, 'Photo de la réception (facultative)'), entreePhoto, apercu),
                 h('div', { class: 'space-y-1' }, boutonGps, etatGps),
                 erreur,
-                h('div', { class: 'flex justify-between gap-2' }, h('button', { type: 'button', class: BOUTON_SECONDAIRE, onclick: () => { etat.etape = 'lignes'; dessiner(); } }, 'Retour'), bouton)));
+                h('div', { class: 'flex justify-between gap-2' }, h('button', { type: 'button', class: BOUTON_SECONDAIRE, onclick: () => { code.value = ''; etat.etape = 'lignes'; dessiner(); } }, 'Retour'), bouton)));
     }
 
     /* Validation : le bloc est chiffré une fois, avec le code effacé aussitôt, puis tout part dans la file. */
@@ -392,7 +396,8 @@ export async function ecranRedistribution(ctx) {
             lien('#/', 'Retour à la liste'));
     }
 
-    const [elements, reserves, file] = await Promise.all([ctx.stockage.elements.list(), ctx.stockage.meta.lister('reserve:'), ctx.file.lister()]);
+    const [elements, reserves, toute] = await Promise.all([ctx.stockage.elements.list(), ctx.stockage.meta.lister('reserve:'), ctx.file.lister()]);
+    const file = duCompte(toute, ctx.etat.session?.utilisateur?.id ?? null);
     const decharges = dechargesDeRedistribution({ designe, elements, reserves, file });
     const enLigne = ctx.etat.enLigne;
 
@@ -439,7 +444,7 @@ export async function ecranRedistribution(ctx) {
                     type: 'button', class: BOUTON_SECONDAIRE,
                     onclick: async () => {
                         if (!window.confirm('Libérer le reste de la réserve ? Il redevient disponible pour la redistribution en ligne.')) return;
-                        await ctx.file.ajouter({ type: 'liberation', id: `liberation-${decharge.id}-${identifiantAleatoire()}`, decharge_id: decharge.id });
+                        await ctx.file.ajouter({ type: 'liberation', id: `liberation-${decharge.id}-${identifiantAleatoire()}`, decharge_id: decharge.id, utilisateur_id: ctx.etat.session?.utilisateur?.id ?? null });
                         ctx.sync.cycle().catch(() => {});
                         await ctx.rafraichir();
                     },

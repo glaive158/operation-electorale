@@ -34,6 +34,12 @@ export const LIBELLES_VERIFICATION = Object.freeze({
 
 const declarationsActives = (file) => file.filter((e) => e.type === 'declaration');
 
+/**
+ * Les éléments de la file visibles pour un compte : les siens, et ceux sans titulaire connu. Les envois d'un autre
+ * compte (même « à vérifier ») restent sur la tablette mais ne s'affichent ni ne se modifient ici.
+ */
+export const duCompte = (file, utilisateurId) => file.filter((e) => e.utilisateur_id == null || e.utilisateur_id === utilisateurId);
+
 /** Message court du résultat d'une déclaration déjà envoyée (affiché sous le statut). */
 export function detailSynchronisation(declaration) {
     const reponse = declaration?.reponse?.declaration;
@@ -66,8 +72,8 @@ export function statutAffiche(element, declaration) {
  *
  * @returns {Array<{id: string, remise_id: number, titre: string, de: string, a: string, etape: string, statut: string, detail: ?string, element: ?object, declaration: ?object}>}
  */
-export function construireListe(elements, file) {
-    const declarations = declarationsActives(file);
+export function construireListe(elements, file, utilisateurId = null) {
+    const declarations = declarationsActives(utilisateurId === null ? file : duCompte(file, utilisateurId));
     const parRemise = new Map(declarations.map((d) => [d.remise_id, d]));
     const lignes = [];
     const vus = new Set();

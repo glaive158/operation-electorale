@@ -3,8 +3,8 @@
 namespace App\Http\Controllers\Terrain;
 
 use App\Http\Controllers\Controller;
+use Illuminate\Foundation\Vite;
 use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Vite;
 
 /**
  * Application de terrain installable (PWA) : une coquille unique, chargée une fois puis conservée par le
@@ -23,9 +23,12 @@ class AppController extends Controller
     {
         // Ressources compilées désignées depuis la racine du site : toujours de la même origine que la page,
         // quel que soit l'hôte par lequel la tablette y accède (la politique de sécurité n'admet que 'self').
-        Vite::createAssetPathsUsing(fn (string $chemin) => '/'.ltrim($chemin, '/'));
+        // Sur une copie : l'instance partagée de Vite (et donc les autres pages) garde ses chemins habituels.
+        $vite = clone app(Vite::class);
+        $vite->createAssetPathsUsing(fn (string $chemin) => '/'.ltrim($chemin, '/'));
 
         return response()->view('terrain.app', [
+            'vite' => $vite,
             // Données d'amorçage identiques pour tous : la page est mise en cache, elle ne porte rien de personnel.
             'amorce' => [
                 'service_worker' => route('pwa.terrain.sw', [], false),

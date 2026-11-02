@@ -158,6 +158,8 @@ class PwaCoquilleTest extends TestCase
         try {
             app(Vite::class)->useBuildDirectory($dossier);
             $html = $this->actingAs($this->utilisateur('agent_transport'))->get('/terrain/app')->getContent();
+            // Une autre page rendue ensuite, dans le même processus, garde les chemins habituels de Vite.
+            $autre = (string) app(Vite::class)(['resources/css/app.css']);
         } finally {
             @unlink(public_path("{$dossier}/manifest.json"));
             @rmdir(public_path($dossier));
@@ -167,6 +169,7 @@ class PwaCoquilleTest extends TestCase
         $this->assertStringContainsString('href="/'.$dossier.'/assets/app-aaaa.css"', $html);
         $this->assertStringNotContainsString('autre-hote.exemple', $html);
         $this->assertStringNotContainsString('http://', $html);
+        $this->assertMatchesRegularExpression('#href="https?://[^"/]+/'.$dossier.'/assets/app-aaaa\.css"#', $autre, 'chemins habituels de Vite hors de la coquille');
     }
 
     public function test_routes_publiques_limitees_au_script_au_manifeste_et_a_l_icone(): void

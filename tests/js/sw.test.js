@@ -103,34 +103,44 @@ test('le cache porte la version du script et l\'installation precharge la coquil
     assert.equal(sw.journalReseau.includes('/x.js'), false, 'rien d\'une autre origine');
 });
 
-test('installation : une coquille redirigee vers la connexion n\'est jamais conservee', async () => {
+test('installation tout ou rien : coquille redirigee, absente ou reseau coupe => l\'installation echoue', async () => {
     const redirigee = new Response('connexion', { status: 200 });
     Object.defineProperty(redirigee, 'redirected', { value: true });
     const sw = installer({ reseau: { '/terrain/app': () => redirigee } });
+    await assert.rejects(sw.declencher('install'), /redirigée/);
 
-    await sw.declencher('install');
+    const absente = installer({ reseau: {} });
+    await assert.rejects(absente.declencher('install'), /404/);
 
-    assert.equal(sw.cache('terrain-coquille-v1').size, 0);
+    const horsLigne = installer({ reseau: reseauComplet() });
+    horsLigne.etat.enLigne = false;
+    await assert.rejects(horsLigne.declencher('install'), /Failed to fetch/);
 });
 
-test('installation hors connexion : elle reussit sans rien conserver', async () => {
-    const sw = installer();
-    sw.etat.enLigne = false;
+test('installation tout ou rien : une ressource referencee manquante fait echouer l\'installation', async () => {
+    for (const manquante of ['/build/assets/app-123.js', '/build/assets/app-456.css', '/terrain/icon.svg', '/terrain/manifest.webmanifest']) {
+        const reseau = reseauComplet();
+        delete reseau[manquante];
+        const sw = installer({ reseau });
 
-    await sw.declencher('install');
-
-    assert.equal(sw.cache('terrain-coquille-v1').size, 0);
+        await assert.rejects(sw.declencher('install'), /404/, manquante);
+    }
+    // Une ressource redirigée (session expirée) échoue de même.
+    const redirigee = new Response('x', { status: 200 });
+    Object.defineProperty(redirigee, 'redirected', { value: true });
+    const sw = installer({ reseau: { ...reseauComplet(), '/build/assets/app-123.js': () => redirigee } });
+    await assert.rejects(sw.declencher('install'), /redirigée/);
 });
 
 test('activation : les caches des anciennes versions sont supprimes, les autres gardes, clients pris en charge', async () => {
     const sw = installer({
         version: 'v2',
-        caches: { 'terrain-coquille-v1': { '/x': 1 }, 'terrain-api-v1': {}, 'terrain-coquille-v2': { '/terrain/app': 1 }, 'terrain-api-v2': {}, 'autre-site': {} },
+        caches: { 'terrain-coquille-v1': { '/x': 1 }, 'terrain-coquille-v2': { '/terrain/app': 1 }, 'autre-site': {} },
     });
 
     await sw.declencher('activate');
 
-    assert.deepEqual([...sw.stockage.keys()].sort(), ['autre-site', 'terrain-api-v2', 'terrain-coquille-v2']);
+    assert.deepEqual([...sw.stockage.keys()].sort(), ['autre-site', 'terrain-coquille-v2']);
     assert.equal(sw.etat.claim, 1);
 });
 
@@ -170,27 +180,15 @@ test('modules compiles et icone : cache d\'abord, conserves a la premiere demand
     assert.deepEqual(sw.journalReseau, []);
 });
 
-test('API : reseau d\'abord ; les lectures d\'affectations servent de repli hors connexion, pas les autres', async () => {
-    const sw = installer({ reseau: { '/api/terrain/affectations': new Response('{"elements":[]}', { status: 200 }), '/api/terrain/decharges/D-1': new Response('{"x":1}') } });
+test('l\'API n\'est jamais interceptee ni conservee : lectures comprises', async () => {
+    const sw = installer({ reseau: { '/api/terrain/affectations': new Response('{"elements":[]}', { status: 200 }) } });
 
-    const enLigne = await sw.requete('/api/terrain/affectations');
-    assert.equal(await enLigne.reponse.text(), '{"elements":[]}');
-    await sw.requete('/api/terrain/decharges/D-1');
-
-    sw.etat.enLigne = false;
-    const horsLigne = await sw.requete('/api/terrain/affectations');
-    assert.equal(await horsLigne.reponse.text(), '{"elements":[]}');
-    await assert.rejects(sw.requete('/api/terrain/decharges/D-1'), /Failed to fetch/);
-});
-
-test('API : une erreur du serveur n\'ecrase pas la derniere lecture reussie', async () => {
-    const sw = installer({ reseau: { '/api/terrain/cle-preuve': new Response('{"pem":"ok"}', { status: 200 }) } });
-    await sw.requete('/api/terrain/cle-preuve');
-    sw.etat.enLigne = false;
-
-    const { reponse } = await sw.requete('/api/terrain/cle-preuve');
-
-    assert.equal(await reponse.text(), '{"pem":"ok"}');
+    for (const chemin of ['/api/terrain/affectations', '/api/terrain/cle-preuve', '/api/terrain/appareil', '/api/terrain/decharges/D-1']) {
+        const { reponse } = await sw.requete(chemin);
+        assert.equal(reponse, null, chemin);
+    }
+    assert.deepEqual([...sw.stockage.keys()], []);
+    assert.deepEqual(sw.journalReseau, []);
 });
 
 test('ne touche ni aux ecritures, ni aux HEAD, ni aux pages web de /terrain/, ni aux autres origines', async () => {
@@ -233,12 +231,4 @@ test('message precharger : ressources du site seulement, une fois chacune', asyn
     sw.journalReseau.length = 0;
     await sw.declencher('message', { data: { type: 'precharger', urls: ['/build/assets/app-123.js'] } });
     assert.deepEqual(sw.journalReseau, []);
-});
-
-test('message purger-api : le cache des lectures est vide (changement de compte)', async () => {
-    const sw = installer({ caches: { 'terrain-api-v1': { '/api/terrain/affectations': 1 }, 'terrain-coquille-v1': {} } });
-
-    await sw.declencher('message', { data: { type: 'purger-api' } });
-
-    assert.deepEqual([...sw.stockage.keys()], ['terrain-coquille-v1']);
 });

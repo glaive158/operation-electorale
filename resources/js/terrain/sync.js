@@ -41,12 +41,13 @@ const RETENTABLE = (status) => status === 0 || status === 401 || status === 408 
  * @param {object} options.file                    file d'envoi (creerFile)
  * @param {object} options.api                     creerApi()
  * @param {{lire: Function, supprimer?: Function}} options.pieces   octets des pièces ({empreinte, blob})
+ * @param {{lire: Function, ecrire: Function}} [options.meta]  réglages locaux (réserves de l'appareil)
  * @param {() => Promise<{status: number}|void>} [options.telecharger]  téléchargement des affectations
  * @param {() => boolean} [options.estEnLigne]
  * @param {() => void} [options.surSessionExpiree]
  * @param {(info: object) => void} [options.surChangement]
  */
-export function creerSync({ file, api, pieces, telecharger, estEnLigne = () => true, surSessionExpiree = () => {}, surChangement = () => {} }) {
+export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = () => true, surSessionExpiree = () => {}, surChangement = () => {} }) {
     let enCours = null;
     let redemande = false;
 
@@ -114,6 +115,27 @@ export function creerSync({ file, api, pieces, telecharger, estEnLigne = () => t
         }
     }
 
+    /**
+     * La réserve gardée sur la tablette suit ce que le serveur a compté : une redistribution enregistrée la diminue
+     * de ses lignes (sauf si elle est « à arbitrer » : rien n'a alors été compté), une libération la vide.
+     */
+    async function majReserve(element, issue) {
+        if (!meta) return;
+        const cle = `reserve:${element.decharge_id}`;
+        const reserve = await meta.lire(cle);
+        if (!reserve) return;
+        if (element.type === 'liberation') {
+            await meta.ecrire(cle, { ...reserve, lignes: [] });
+        } else if (element.type === 'redistribution' && issue.corps?.redistribution?.a_arbitrer !== true) {
+            const sortie = new Map();
+            for (const l of element.lignes ?? []) sortie.set(l.materiel_id, (sortie.get(l.materiel_id) ?? 0) + l.quantite);
+            await meta.ecrire(cle, {
+                ...reserve,
+                lignes: (reserve.lignes ?? []).map((l) => ({ ...l, quantite: Math.max(0, l.quantite - (sortie.get(l.materiel_id) ?? 0)) })),
+            });
+        }
+    }
+
     async function envoyerFile() {
         let envoyes = 0;
         for (;;) {
@@ -125,6 +147,7 @@ export function creerSync({ file, api, pieces, telecharger, estEnLigne = () => t
             if (marque.statut === STATUTS.SYNCHRONISE) {
                 envoyes += 1;
                 if (element.type === 'declaration') await allegerPieces(element);
+                if (element.type === 'redistribution' || element.type === 'liberation') await majReserve(element, issue);
             }
             // Pas de réponse du serveur ou limite atteinte : inutile d'insister dans ce passage.
             if (issue.status === 0 || issue.status === 429) return { envoyes, session: true, reseau: issue.status === 0 };
