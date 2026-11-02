@@ -4,16 +4,19 @@ namespace Tests\Feature\Logistique;
 
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\Restitution;
 use App\Models\Logistique\RestitutionLigne;
 use App\Models\User;
+use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\SoldeDetenteurService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use Tests\Support\PlanApprouveFictif;
 use Tests\TestCase;
 
@@ -182,5 +185,120 @@ class SoldeDetenteurTest extends TestCase
         DB::disableQueryLog();
 
         $this->assertLessThanOrEqual(5, $requetes);
+    }
+
+    public function test_seule_la_declaration_retenue_compte(): void
+    {
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100], $agent);
+        $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->with('lignes')->firstOrFail();
+        $lignes = [$this->urnes->id => ['recu' => 100, 'defectueux' => 0, 'observation' => null]];
+        $preuve = ['verification' => 'verifiee_code', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null];
+
+        // Tablette de l'agent (retenue) puis compte du préfet (concordante) : la quantité n'est comptée qu'une fois.
+        $tablette = $this->en($agent, fn () => app(DeclarationService::class)->declarer(
+            $remise, 'tablette', ['nom' => 'Awa Fall', 'qualite' => 'Préfet'], $lignes, (string) Str::uuid(), null, $preuve,
+        ));
+        $compte = $this->en($this->autoriteFictive($this->prefecture), fn () => app(DeclarationService::class)->declarer(
+            $remise, 'compte', ['nom' => 'Awa Fall', 'qualite' => 'Préfet'], $lignes, (string) Str::uuid(),
+        ));
+        $this->assertSame(['retenue', 'concordante'], [$tablette->refresh()->statut, $compte->refresh()->statut]);
+
+        $this->assertSame(2, Declaration::where('remise_id', $remise->id)->count());
+        $this->assertSame([
+            ['detenteur_type' => 'destinataire', 'detenteur_id' => $this->prefecture->id, 'materiel_id' => $this->urnes->id, 'solde' => 100],
+        ], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
+    }
+
+    public function test_redistribution_avec_manquant_n_est_attendue_de_personne(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $remise = $this->redistribuer($decharge->refresh(), [$this->urnes->id => 80]);
+        $this->declarerRedistribution($remise, 70);
+        $this->assertSame('retenue', Declaration::where('remise_id', $remise->id)->firstOrFail()->statut);
+
+        // Le préfet est déchargé des 80 transférés, le sous-préfet ne doit que les 70 reçus : les 10 manquants
+        // ne sont attendus de personne (ruling P6-R2).
+        $this->assertSame(20, $this->solde('destinataire', $this->prefecture->id));
+        $this->assertSame(70, $this->solde('destinataire', $this->sousPrefecture1->id));
+        $this->assertSame(90, app(SoldeDetenteurService::class)->soldes($this->cycle)->sum('solde'));
+    }
+
+    public function test_circuit_etranger_credite_le_destinataire_sans_agent_ni_transporteur(): void
+    {
+        $this->approuverPlanFictif([[$this->poste, $this->urnes, 100]]);
+        $service = app(DechargeService::class);
+        $decharge = $service->preparer($this->cycle, $this->poste, 'materiel_lourd');
+        foreach ($decharge->lignes as $ligne) {
+            $service->modifierLigne($ligne, $ligne->materiel_id === $this->urnes->id ? 40 : 0, null);
+        }
+        $service->valider($decharge);
+        app(RemiseService::class)->charger($decharge->refresh(), [
+            'nom' => 'Moussa Ndiaye', 'qualite' => 'Chauffeur', 'societe' => 'Fret Express', 'bordereau' => 'BL-2026-001',
+        ]);
+
+        // Chargée, non reçue : personne ne doit rien (le transporteur n'est pas un détenteur).
+        $this->assertSame([], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
+
+        $this->deposerRecue($decharge->refresh(), [$this->urnes->id => 40]);
+
+        $this->assertSame([
+            ['detenteur_type' => 'destinataire', 'detenteur_id' => $this->poste->id, 'materiel_id' => $this->urnes->id, 'solde' => 40],
+        ], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
+    }
+
+    public function test_nombre_de_requetes_independant_du_volume(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $this->assertSame(1, app(SoldeDetenteurService::class)->soldes($this->cycle)->count());
+        $petit = $this->nombreDeRequetes(fn () => app(SoldeDetenteurService::class)->soldes($this->cycle));
+
+        // Plusieurs décharges, détenteurs et articles : un agent de plus, un second sous-préfet, des isoloirs, des redistributions.
+        $this->isoloirs->forceFill(['reutilisable' => true])->save();
+        $this->approuverPlanFictif([
+            [$this->sousPrefecture1, $this->urnes, 200], [$this->sousPrefecture2, $this->urnes, 100],
+            [$this->sousPrefecture1, $this->isoloirs, 50],
+        ]);
+        $autreAgent = User::factory()->create(['role' => 'agent_transport']);
+        $deuxieme = $this->deposerChargee($this->sousPrefecture2, [$this->urnes->id => 100], $autreAgent);
+        $this->deposerRecue($deuxieme, [$this->urnes->id => 90]);
+        $troisieme = $this->deposerChargee($this->sousPrefecture1, [$this->isoloirs->id => 50]);
+        $this->deposerRecue($troisieme, [$this->isoloirs->id => 50]);
+        $this->declarerRedistribution($this->redistribuer($decharge->refresh(), [$this->urnes->id => 10]), 10);
+        $this->redistribuer($deuxieme->refresh(), [$this->urnes->id => 20]);
+
+        $this->assertGreaterThanOrEqual(4, app(SoldeDetenteurService::class)->soldes($this->cycle)->count());
+        $grand = $this->nombreDeRequetes(fn () => app(SoldeDetenteurService::class)->soldes($this->cycle));
+
+        $this->assertSame($petit, $grand);
+        $this->assertLessThanOrEqual(5, $grand);
+    }
+
+    public function test_filtre_detenteur_type_et_identifiant_ensemble(): void
+    {
+        $service = app(SoldeDetenteurService::class);
+
+        foreach ([['destinataire', null], [null, 5], ['inconnu', 5]] as [$type, $id]) {
+            try {
+                $service->soldes($this->cycle, $type, $id);
+                $this->fail('Le filtre incomplet ou inconnu aurait dû être refusé.');
+            } catch (InvalidArgumentException) {
+            }
+        }
+
+        $this->assertSame([], $service->soldes($this->cycle, 'agent', 5)->all());
+    }
+
+    private function nombreDeRequetes(callable $action): int
+    {
+        DB::enableQueryLog();
+        DB::flushQueryLog();
+        $action();
+        $requetes = count(DB::getQueryLog());
+        DB::disableQueryLog();
+
+        return $requetes;
     }
 }

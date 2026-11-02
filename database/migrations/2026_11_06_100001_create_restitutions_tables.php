@@ -72,7 +72,8 @@ return new class extends Migration
 
         Schema::create('restitution_declaration_lignes', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('restitution_declaration_id')->constrained('restitution_declarations');
+            // Noms explicites : le nom par défaut dépasse les 64 caractères de MySQL.
+            $table->foreignId('restitution_declaration_id')->constrained('restitution_declarations', 'id', 'rdl_declaration_foreign');
             $table->foreignId('materiel_id')->constrained('materiels');
             $table->unsignedInteger('restitue');
             $table->string('observation', 500)->nullable();
@@ -84,7 +85,7 @@ return new class extends Migration
         // Pièces annoncées par une déclaration de restitution : « attendues » (piece_jointe_id nul) jusqu'à l'envoi.
         Schema::create('restitution_declaration_pieces', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('restitution_declaration_id')->constrained('restitution_declarations');
+            $table->foreignId('restitution_declaration_id')->constrained('restitution_declarations', 'id', 'rdp_declaration_foreign');
             $table->char('empreinte', 64)->index();
             $table->enum('role', ['signature', 'photo']);
             $table->foreignId('piece_jointe_id')->nullable()->constrained('pieces_jointes');

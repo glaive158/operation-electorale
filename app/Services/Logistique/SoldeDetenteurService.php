@@ -6,6 +6,7 @@ use App\Models\Logistique\Cycle;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 /**
  * Ce que chaque détenteur doit encore restituer à l'issue d'un cycle, par article réutilisable (spec §9.4).
@@ -28,12 +29,21 @@ class SoldeDetenteurService
      * Soldes strictement positifs du cycle, un par (détenteur, article réutilisable), triés par type, détenteur
      * puis article. Un solde nul ou négatif n'est jamais renvoyé.
      *
-     * @param  ?string  $detenteurType  limite le calcul à ce détenteur (avec `$detenteurId`)
+     * @param  ?string  $detenteurType  limite le calcul à ce détenteur ; avec `$detenteurId`, les deux ou aucun
      * @param  ?int  $sauf  restitution dont les propres retours déclarés ne se déduisent pas (son recalcul)
      * @return Collection<int, array{detenteur_type: string, detenteur_id: int, materiel_id: int, solde: int}>
+     *
+     * @throws InvalidArgumentException si un seul des deux est donné, ou si le type est inconnu
      */
     public function soldes(Cycle $cycle, ?string $detenteurType = null, ?int $detenteurId = null, ?int $sauf = null): Collection
     {
+        if (($detenteurType === null) !== ($detenteurId === null)) {
+            throw new InvalidArgumentException('Le type et l\'identifiant du détenteur se donnent ensemble.');
+        }
+        if ($detenteurType !== null && ! in_array($detenteurType, ['agent', 'destinataire'], true)) {
+            throw new InvalidArgumentException("Type de détenteur inconnu : {$detenteurType}.");
+        }
+
         $soldes = [];
         $ajouter = function (Collection $lignes, int $signe) use (&$soldes) {
             foreach ($lignes as $ligne) {

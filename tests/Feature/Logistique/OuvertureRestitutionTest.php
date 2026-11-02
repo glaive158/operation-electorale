@@ -206,4 +206,21 @@ class OuvertureRestitutionTest extends TestCase
         $this->expectException(RegleLogistique::class);
         $this->service()->recalculer($prefecture);
     }
+
+    public function test_lignes_inserees_pour_tous_les_articles_avec_un_journal_par_restitution(): void
+    {
+        $this->isoloirs->forceFill(['reutilisable' => true])->save();
+        $this->approuverPlanFictif([[$this->sousPrefecture1, $this->urnes, 100], [$this->sousPrefecture1, $this->isoloirs, 50]]);
+        $this->stockerFictif($this->isoloirs, 1000, 100);
+        $chargee = $this->deposerChargee($this->sousPrefecture1, [$this->isoloirs->id => 50]);
+        $this->deposerRecue($chargee, [$this->isoloirs->id => 50]);
+
+        $this->assertSame(['creees' => 2, 'inchangees' => 0], $this->service()->ouvrir($this->cycle));
+
+        $prefecture = $this->restitutionDe('destinataire', $this->prefecture->id);
+        $this->assertSame([$this->urnes->id => 20, $this->isoloirs->id => 50], $this->attendus($prefecture));
+        $this->assertNotNull($prefecture->lignes()->first()->created_at);
+        $this->assertSame(1, JournalEntree::where('action', 'ouverture_restitution')->where('objet_id', $prefecture->id)->count());
+        $this->assertSame(2, JournalEntree::where('action', 'ouverture_restitution')->count());
+    }
 }

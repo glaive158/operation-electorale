@@ -25,7 +25,7 @@ class RestitutionService
      * Ouvre une restitution « à préparer » pour chaque détenteur qui a un solde et aucune restitution ouverte
      * (non contrôlée) sur le cycle ; ses lignes portent l'attendu, égal au solde. Idempotente : un détenteur qui
      * a déjà une restitution ouverte est laissé tel quel. Renvoie le nombre de restitutions créées et le nombre
-     * de détenteurs laissés inchangés.
+     * de détenteurs laissés inchangés. Une écriture de journal par restitution créée.
      *
      * Le verrou du cycle est exclusif : l'unicité d'une restitution ouverte par détenteur ne repose sur aucune
      * contrainte de base, deux ouvertures simultanées doivent donc se succéder.
@@ -61,13 +61,19 @@ class RestitutionService
                 ]);
                 $restitution->forceFill(['ouverte_par' => auth()->id()])->save();
 
+                // Une seule requête pour toutes les lignes : le verrou exclusif du cycle se tient le moins longtemps
+                // possible. Les quantités autres que l'attendu prennent la valeur 0 par défaut de la table.
+                $maintenant = now();
                 $attendus = [];
+                $lignes = [];
                 foreach ($soldes->sortBy('materiel_id') as $solde) {
-                    RestitutionLigne::create([
+                    $lignes[] = [
                         'restitution_id' => $restitution->id, 'materiel_id' => $solde['materiel_id'], 'attendu' => $solde['solde'],
-                    ]);
+                        'created_at' => $maintenant, 'updated_at' => $maintenant,
+                    ];
                     $attendus[$solde['materiel_id']] = $solde['solde'];
                 }
+                RestitutionLigne::insert($lignes);
 
                 Journal::noter('restitution', $restitution->id, 'ouverture_restitution', null, [
                     'cycle_id' => $actuel->id, 'detenteur_type' => $restitution->detenteur_type,
