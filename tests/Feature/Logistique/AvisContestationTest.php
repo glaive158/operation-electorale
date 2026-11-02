@@ -766,7 +766,7 @@ class AvisContestationTest extends TestCase
     {
         [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
         $b = $this->compte($livraison->load('lignes'), 10);
-        $refus = 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+        $refus = 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
         $reliquat = $this->solde($decharge);
         $this->assertSame(60, $reliquat['reliquat']);
 
@@ -793,7 +793,7 @@ class AvisContestationTest extends TestCase
     {
         [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
         $redistribution = Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')->sole();
-        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
 
         $this->en($this->prefet, fn () => app(RemiseService::class)->annulerRedistribution($redistribution, 'Réception contestée.'));
         app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.');
@@ -836,8 +836,8 @@ class AvisContestationTest extends TestCase
         $this->contester($a);
         $b = $this->compte($this->remise, 10);
 
-        $this->refus(fn () => app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
-        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+        $this->refus(fn () => app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.'), 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
         $this->assertSame('retenue', $a->refresh()->statut);
     }
 }

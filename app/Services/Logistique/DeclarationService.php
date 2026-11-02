@@ -22,6 +22,7 @@ use Carbon\CarbonInterface;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -42,6 +43,8 @@ class DeclarationService
     private const MAX_QUANTITE = 10_000_000;
 
     private const REFUS_CLE_REUTILISEE = "Clé d'idempotence déjà utilisée pour un autre contenu.";
+
+    private const REFUS_SEPARATION = "Le signataire du départ ne peut pas constater l'arrivée.";
 
     private const REFUS_BLOC_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
 
@@ -133,6 +136,7 @@ class DeclarationService
                 $this->controlerEtape($actuelle);
                 ['anomalies' => $anomalies, 'delegation' => $delegation, 'delegation_depart' => $delegationDepart] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
                 $this->controlerStatut($actuelle, $mode);
+                $this->controlerSeparationDesSignatures($actuelle, $mode, $auteur, $preuve);
 
                 $anomalies = array_merge($anomalies, $this->controlerLignes($actuelle, $lignes));
                 if ($decharge->statut_document === 'annulee') {
@@ -628,6 +632,32 @@ class DeclarationService
     }
 
     /**
+     * Sur une redistribution, la même personne ne signe pas le départ (la tablette de la préfecture, son autorité ou
+     * son adjoint) et l'arrivée (le compte du destinataire, ou le signataire dont la tablette vérifie le code).
+     *
+     * @param  array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null  $preuve
+     */
+    private function controlerSeparationDesSignatures(Remise $remise, string $mode, User $auteur, ?array $preuve): void
+    {
+        if ($remise->etape !== 'redistribution') {
+            return;
+        }
+
+        $actives = Declaration::where('remise_id', $remise->id)->whereNotIn('statut', ['ecartee', 'remplacee'])->get();
+        $arrivee = $mode === 'compte' ? $auteur->id : ($preuve['signataire_user_id'] ?? null);
+        $conflit = $mode === 'compte'
+            // L'arrivée au compte : le même utilisateur n'a pas déjà signé le départ sur la tablette.
+            ? $actives->contains(fn (Declaration $d) => $d->mode === 'tablette' && (int) $d->user_id === (int) $auteur->id)
+            // Le départ à la tablette : l'auteur n'est ni le signataire d'arrivée de cette déclaration, ni celui d'une autre.
+            : ($arrivee !== null && (int) $arrivee === (int) $auteur->id)
+                || $actives->contains(fn (Declaration $d) => (int) $d->signataire_user_id === (int) $auteur->id);
+
+        if ($conflit) {
+            throw new RegleLogistique(self::REFUS_SEPARATION);
+        }
+    }
+
+    /**
      * Une remise déjà reçue attend encore la déclaration de l'autre mode, tant qu'aucun arbitrage n'a tranché.
      */
     private function attendUneConfirmation(Remise $remise): bool
@@ -685,15 +715,23 @@ class DeclarationService
 
         $cibles = [];
         $divergence = false;
-        // Une retenue contestée dont la réception sert déjà en aval est figée (redistribution, exemplaire de
-        // réception) : la défaire ferait tomber le solde du préfet sous ce qui est déjà remis. Elle ne bouge qu'à
-        // la levée de la contestation ou à l'arbitrage ; toute autre déclaration active est réconciliée comme si
-        // aucune déclaration saine n'existait (à vérifier, jamais retenue à côté d'elle).
-        $figee = $actives->first(fn (Declaration $d) => $d->statut === 'retenue' && $d->contestation === 'contestee');
+        // Une retenue dont la réception sert déjà en aval (redistribution, réserve de l'appareil, exemplaire de
+        // réception, remplacement résolu), ou que son signataire conteste, est figée : la défaire ferait tomber le
+        // solde du préfet sous ce qui est déjà remis ou réservé. Elle ne bouge qu'à la levée de la contestation, à
+        // l'arbitrage ou quand plus rien n'en dépend. Une autre déclaration active, contestée ou divergente, est
+        // réconciliée sans elle : à vérifier, jamais retenue à côté d'elle ; seule une déclaration saine et
+        // identique à une retenue non contestée la confirme (concordante).
+        $figee = $this->retenueFigee($remise, $actives);
         if ($figee !== null) {
             foreach ($actives as $declaration) {
-                $cibles[$declaration->id] = $declaration->id === $figee->id ? 'retenue' : 'a_verifier';
-                if ($declaration->id !== $figee->id && $this->contenu($declaration) !== $this->contenu($figee)) {
+                if ($declaration->id === $figee->id) {
+                    $cibles[$declaration->id] = 'retenue';
+
+                    continue;
+                }
+                $identique = $this->contenu($declaration) === $this->contenu($figee);
+                $cibles[$declaration->id] = $figee->contestation !== 'contestee' && $identique && $this->saine($declaration) ? 'concordante' : 'a_verifier';
+                if (! $identique) {
                     $divergence = true;
                 }
             }
@@ -751,6 +789,27 @@ class DeclarationService
             $remise->forceFill(['statut' => $statut])->save();
             Journal::noter('remise', $remise->id, 'statut_remise', ['statut' => $avant], ['statut' => $statut]);
         }
+    }
+
+    /**
+     * La déclaration retenue qu'un rapprochement ne doit pas défaire : contestée, ou dont la réception sert en aval
+     * (AvisReceptionService::receptionUtilisee, seule implémentation de la règle). Les verrous cycle, décharge et
+     * remise sont tenus par l'appelant.
+     *
+     * @param  Collection<int, Declaration>  $actives
+     */
+    private function retenueFigee(Remise $remise, $actives): ?Declaration
+    {
+        $retenue = $actives->first(fn (Declaration $d) => $d->statut === 'retenue');
+        if ($retenue === null) {
+            return null;
+        }
+        if ($retenue->contestation === 'contestee') {
+            return $retenue;
+        }
+
+        // Service résolu à l'appel : il dépend lui-même de celui-ci.
+        return app(AvisReceptionService::class)->receptionUtilisee($remise, Decharge::findOrFail($remise->decharge_id)) ? $retenue : null;
     }
 
     /**

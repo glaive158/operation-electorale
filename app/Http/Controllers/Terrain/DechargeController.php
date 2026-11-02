@@ -109,7 +109,7 @@ class DechargeController extends Controller
 
     /**
      * Les remises de la décharge qui touchent le périmètre : reçues ou données par ses destinataires, et pour
-     * un agent, celles où il prend ou livre le matériel.
+     * un agent, celles où il prend ou livre le matériel. Une redistribution à arbitrer n'est vue que du côté départ.
      *
      * @return Collection<int, Remise>
      */
@@ -127,6 +127,9 @@ class DechargeController extends Controller
                 }
             })
             ->with(['lignes.materiel', 'declarations.lignes.materiel'])
-            ->orderBy('id')->get();
+            ->orderBy('id')->get()
+            // Une redistribution à arbitrer n'existe pas encore pour celui qui la recevrait : seul le côté départ la voit.
+            ->reject(fn (Remise $r) => $r->statut === 'a_arbitrer' && ! ($r->de_type === 'destinataire' && in_array((int) $r->de_id, $ids, true)))
+            ->values();
     }
 }

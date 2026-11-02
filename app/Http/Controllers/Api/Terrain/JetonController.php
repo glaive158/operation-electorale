@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class JetonController extends Controller
 {
@@ -34,6 +35,11 @@ class JetonController extends Controller
 
         $expire = now()->addDays((int) config('logistique.jeton_jours', 30));
         $jeton = $utilisateur->createToken($donnees['appareil'], ['terrain'], $expire);
+        // Un appareil qui s'annonce par son UUID lie son identité au jeton : c'est ce lien, et non l'en-tête
+        // X-Appareil seul, qui fait de lui l'appareil désigné d'une préfecture.
+        if (Str::isUuid($donnees['appareil'])) {
+            $jeton->accessToken->forceFill(['appareil_identifiant' => mb_strtolower($donnees['appareil'])])->save();
+        }
 
         return response()->json([
             'token' => $jeton->plainTextToken,

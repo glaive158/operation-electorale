@@ -139,7 +139,9 @@ class AppareilService
         return DB::transaction(function () use ($appareil, $decharge, $quantites, $auteur) {
             $cycle = Cycle::whereKey($decharge->cycle_id)->lockForUpdate()->first();
             $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
-            $prefecture = $this->remises->prefectureQuiRedistribue($actuelle, $auteur);
+            // Un seul instant pour le contrôle du droit et la délégation consignée.
+            $maintenant = now();
+            $prefecture = $this->remises->prefectureQuiRedistribue($actuelle, $auteur, $maintenant);
 
             if ($cycle === null || ! $cycle->estOuvert()) {
                 throw new RegleLogistique('Cycle clôturé : réserve impossible.');
@@ -203,7 +205,7 @@ class AppareilService
                 'decharge_id' => $actuelle->id, 'reserve' => $anciennes->map(fn (ReserveAppareil $l) => $l->quantite)->all(),
             ], [
                 'decharge_id' => $actuelle->id, 'reserve' => $retenues,
-                'delegation_id' => $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, now())?->id,
+                'delegation_id' => $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, $maintenant)?->id,
             ]);
 
             return $lignes;

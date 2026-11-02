@@ -6,6 +6,7 @@ use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Appareil;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
+use App\Models\Logistique\DeclarationLigne;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\JournalEntree;
@@ -15,14 +16,18 @@ use App\Models\User;
 use App\Services\Logistique\AffectationsTerrain;
 use App\Services\Logistique\AppareilService;
 use App\Services\Logistique\ArbitrageService;
+use App\Services\Logistique\AvisReceptionService;
+use App\Services\Logistique\DechargePdfService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\DelegationService;
+use App\Services\Logistique\DonneesDecharge;
+use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\RemiseService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
-use Laravel\Sanctum\Sanctum;
+use Laravel\Sanctum\PersonalAccessToken;
 use Tests\Support\PlanApprouveFictif;
 use Tests\TestCase;
 
@@ -114,20 +119,32 @@ class AppareilReserveTest extends TestCase
         ];
     }
 
-    private function sync(Decharge $decharge, array $corps, ?string $appareil, ?User $par = null)
+    /** Authentifie $utilisateur par un jeton de terrain, lié à l'appareil $lie (identité prouvée) ou non. */
+    private function terrain(User $utilisateur, ?string $lie): void
     {
-        Sanctum::actingAs($par ?? $this->prefet, ['terrain']);
+        $jeton = new PersonalAccessToken(['name' => 'test', 'abilities' => ['terrain']]);
+        $jeton->forceFill(['appareil_identifiant' => $lie === null ? null : mb_strtolower($lie)]);
+        $utilisateur->withAccessToken($jeton);
+        $this->app['auth']->guard('sanctum')->setUser($utilisateur);
+        $this->app['auth']->shouldUse('sanctum');
+    }
 
+    /**
+     * Envoie une redistribution. Par défaut le jeton est celui de l'appareil annoncé par l'en-tête ; `$jeton` le
+     * remplace (null : jeton sans appareil).
+     */
+    private function sync(Decharge $decharge, array $corps, ?string $appareil, ?User $par = null, string|false|null $jeton = false)
+    {
+        $this->terrain($par ?? $this->prefet, $jeton === false ? $appareil : $jeton);
         $this->withoutHeader('X-Appareil');
 
         return $this->withHeaders($appareil === null ? [] : ['X-Appareil' => $appareil])
             ->postJson("/api/terrain/decharges/{$decharge->id}/redistributions", $corps);
     }
 
-    private function api(string $methode, Decharge $decharge, string $chemin, ?string $appareil, array $corps = [], ?User $par = null)
+    private function api(string $methode, Decharge $decharge, string $chemin, ?string $appareil, array $corps = [], ?User $par = null, string|false|null $jeton = false)
     {
-        Sanctum::actingAs($par ?? $this->prefet, ['terrain']);
-
+        $this->terrain($par ?? $this->prefet, $jeton === false ? $appareil : $jeton);
         $this->withoutHeader('X-Appareil');
 
         return $this->withHeaders($appareil === null ? [] : ['X-Appareil' => $appareil])
@@ -674,7 +691,7 @@ class AppareilReserveTest extends TestCase
         $appareil = $this->designer(null, 'Tablette du préfet');
         $ancien = $this->designer();
 
-        Sanctum::actingAs($this->prefet, ['terrain']);
+        $this->terrain($this->prefet, $ancien->identifiant);
         $this->withHeaders(['X-Appareil' => $ancien->identifiant])->getJson('/api/terrain/appareil')->assertOk()
             ->assertJsonPath('designe', true)
             ->assertJsonPath('appareil.identifiant', $ancien->identifiant)
@@ -682,6 +699,10 @@ class AppareilReserveTest extends TestCase
         $this->withHeaders(['X-Appareil' => $appareil->identifiant])->getJson('/api/terrain/appareil')->assertOk()
             ->assertJsonPath('designe', false)->assertJsonPath('appareil', null);
         $this->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
+
+        // Sans jeton lié à l'appareil, l'en-tête seul ne prouve rien.
+        $this->terrain($this->prefet, null);
+        $this->withHeaders(['X-Appareil' => $ancien->identifiant])->getJson('/api/terrain/appareil')->assertOk()->assertJsonPath('designe', false);
     }
 
     public function test_affectations_de_preparation_excluent_la_reserve(): void
@@ -782,5 +803,228 @@ class AppareilReserveTest extends TestCase
 
         $this->post(route('logistique.appareils.revoquer', $appareil), ['motif' => 'Tablette perdue'])->assertSessionHas('success');
         $this->assertFalse($appareil->fresh()->actif);
+    }
+
+    public function test_un_jeton_d_une_autre_autorite_ne_fait_pas_de_l_en_tete_l_appareil_designe(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $appareil = $this->designer();
+        $adjoint = $this->adjoint('sous_prefet');
+        $this->reserver($appareil, $decharge, [$this->urnes->id => 60]);
+
+        // L'adjoint recopie l'identifiant de la tablette désignée avec son propre jeton, non lié à elle.
+        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, null)->assertForbidden();
+        $this->api('POST', $decharge, 'reserve', $appareil->identifiant, [], $adjoint, (string) Str::uuid())->assertForbidden();
+        $this->api('DELETE', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, null)->assertForbidden();
+        $this->api('GET', $decharge, 'reserve', $appareil->identifiant, [], $this->prefet, (string) Str::uuid())->assertForbidden();
+        $this->assertSame(60, $this->solde($decharge)['reserve_appareil']);
+
+        // Même chose à la synchronisation : l'identité n'étant pas établie, la remise est à arbitrer, sans toucher la réserve.
+        foreach ([null, (string) Str::uuid()] as $jeton) {
+            $reponse = $this->sync($decharge, $this->corps([$this->urnes->id => 10]), $appareil->identifiant, $adjoint, $jeton)->assertCreated();
+            $this->assertSame('a_arbitrer', $reponse->json('redistribution.statut'));
+            $this->assertSame('Appareil non désigné pour cette préfecture.', $reponse->json('redistribution.raison'));
+            $this->assertNull(Remise::findOrFail($reponse->json('redistribution.id'))->appareil_id);
+        }
+        $this->assertSame(['transfere' => 0, 'reserve_appareil' => 60], array_intersect_key($this->solde($decharge), ['transfere' => 0, 'reserve_appareil' => 0]));
+
+        // Le jeton de l'appareil désigné (identifiant en majuscules dans l'en-tête compris) fonctionne, y compris pour un adjoint.
+        $this->api('GET', $decharge, 'reserve', strtoupper($appareil->identifiant), [], $adjoint, $appareil->identifiant)->assertOk()
+            ->assertJsonPath('reserve.lignes.0.quantite', 60);
+        $this->sync($decharge, $this->corps([$this->urnes->id => 10]), strtoupper($appareil->identifiant), $adjoint, $appareil->identifiant)
+            ->assertCreated()->assertJsonPath('redistribution.statut', 'en_attente');
+    }
+
+    public function test_jeton_cree_pour_un_appareil_porte_son_identifiant(): void
+    {
+        $uuid = (string) Str::uuid();
+        $this->postJson('/api/terrain/jetons', ['email' => $this->prefet->email, 'password' => 'password', 'appareil' => strtoupper($uuid)])
+            ->assertCreated();
+        $jeton = $this->prefet->tokens()->latest('id')->firstOrFail();
+        $this->assertSame($uuid, $jeton->appareil_identifiant);
+
+        $this->postJson('/api/terrain/jetons', ['email' => $this->prefet->email, 'password' => 'password', 'appareil' => 'Tablette 1'])->assertCreated();
+        $this->assertNull($this->prefet->tokens()->latest('id')->firstOrFail()->appareil_identifiant);
+    }
+
+    private function livraisonDe(Decharge $decharge): Remise
+    {
+        return Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->with('lignes')->firstOrFail();
+    }
+
+    public function test_contestation_apres_reserve_laisse_la_reception_retenue_puis_l_arbitrage_exige_la_liberation(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $livraison = $this->livraisonDe($decharge);
+        $declaration = Declaration::where('remise_id', $livraison->id)->sole();
+        $appareil = $this->designer();
+        $this->reserver($appareil, $decharge);
+
+        $this->en($this->prefet, fn () => app(AvisReceptionService::class)->contester($declaration, 'Ce n\'est pas moi.'));
+
+        $declaration->refresh();
+        $this->assertSame(['retenue', 'contestee'], [$declaration->statut, $declaration->contestation]);
+        $this->assertSame('recue', $livraison->fresh()->statut);
+        $solde = $this->solde($decharge);
+        $this->assertLessThanOrEqual($solde['recu_utilisable'], $solde['transfere'] + $solde['reserve_appareil']);
+
+        $refus = 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+        $this->refus(fn () => $this->en($this->responsable, fn () => app(ArbitrageService::class)->rejeter($declaration, 'Non.')), $refus);
+        $this->assertSame(100, $this->solde($decharge)['recu_utilisable']);
+
+        $this->en($this->prefet, fn () => app(AppareilService::class)->liberer($appareil, $decharge));
+        $this->en($this->responsable, fn () => app(ArbitrageService::class)->rejeter($declaration, 'Non.'));
+        $this->assertSame('ecartee', $declaration->fresh()->statut);
+        $this->assertSame(0, $this->solde($decharge)['recu_utilisable']);
+    }
+
+    public function test_declaration_divergente_apres_reserve_ne_defait_pas_la_retenue(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $livraison = $this->livraisonDe($decharge);
+        $retenue = Declaration::where('remise_id', $livraison->id)->sole();
+        $appareil = $this->designer();
+        $this->reserver($appareil, $decharge);
+
+        $autre = $this->en($decharge->agent, fn () => app(DeclarationService::class)->declarer(
+            $livraison, 'tablette', ['nom' => 'Agent', 'qualite' => 'Agent de transport'],
+            [$this->urnes->id => ['recu' => 90, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        ));
+
+        $this->assertSame('retenue', $retenue->fresh()->statut);
+        $this->assertSame('a_verifier', $autre->fresh()->statut);
+        $this->assertContains('divergence', $autre->fresh()->anomalies);
+        $this->assertSame('a_verifier', $livraison->fresh()->statut);
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100, 'reserve_appareil' => 100, 'mobilisable' => 0], $this->solde($decharge));
+
+        // Retenir l'autre déclaration défairait la réception sur laquelle repose la réserve : refusé jusqu'à la libération.
+        $refus = 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+        $this->refus(fn () => $this->en($this->responsable, fn () => app(ArbitrageService::class)->retenir($autre, 'Agent.')), $refus);
+        $this->assertSame('retenue', $retenue->fresh()->statut);
+
+        $this->en($this->prefet, fn () => app(AppareilService::class)->liberer($appareil, $decharge));
+        $this->en($this->responsable, fn () => app(ArbitrageService::class)->retenir($autre, 'Agent.'));
+        $this->assertSame(['ecartee', 'retenue'], [$retenue->fresh()->statut, $autre->fresh()->statut]);
+        $this->assertSame(90, $this->solde($decharge)['recu_utilisable']);
+    }
+
+    public function test_declaration_identique_apres_reserve_confirme_la_retenue(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $livraison = $this->livraisonDe($decharge);
+        $retenue = Declaration::where('remise_id', $livraison->id)->sole();
+        $this->reserver($this->designer(), $decharge);
+
+        // Une seconde déclaration saine et identique (écrite directement, sans anomalie d'identité).
+        $confirmation = new Declaration([
+            'remise_id' => $livraison->id, 'mode' => 'tablette', 'signataire_nom' => 'Agent', 'signataire_qualite' => 'Agent de transport',
+            'user_id' => $decharge->agent_id, 'decharge_id' => $decharge->id, 'cle_idempotence' => (string) Str::uuid(), 'empreinte_contenu' => str_repeat('a', 64),
+        ]);
+        $confirmation->forceFill(['statut' => 'valide'])->save();
+        DeclarationLigne::create(['declaration_id' => $confirmation->id, 'materiel_id' => $this->urnes->id, 'recu' => 100, 'defectueux' => 0]);
+
+        $this->en($this->responsable, fn () => app(DeclarationService::class)->rapprocher($livraison));
+
+        $this->assertSame('retenue', $retenue->fresh()->statut);
+        $this->assertSame('concordante', $confirmation->fresh()->statut);
+        $this->assertSame('recue', $livraison->fresh()->statut);
+    }
+
+    public function test_remise_a_arbitrer_masquee_au_cote_arrivee_sur_la_page_terrain(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $this->sync($decharge, $this->corps([$this->urnes->id => 30]), (string) Str::uuid())->assertCreated();
+
+        $this->app['auth']->forgetGuards();
+        $this->actingAs($sousPrefet)->get(route('terrain.decharges.show', $decharge))->assertOk()->assertDontSee('À arbitrer');
+        $this->actingAs($this->prefet)->get(route('terrain.decharges.show', $decharge))->assertOk()->assertSee('À arbitrer');
+    }
+
+    public function test_a_arbitrer_est_exclue_des_indicateurs_du_document_et_de_l_emission(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $remiseArbitrer = Remise::findOrFail($this->sync($decharge, $this->corps([$this->urnes->id => 30]), (string) Str::uuid())->json('redistribution.id'));
+        $livraison = $this->livraisonDe($decharge);
+
+        // IndicateurService::chezIntermediaire : toujours 100 chez le préfet, rien en transit.
+        $ligne = app(IndicateurService::class)->parDestinataire($this->cycle)
+            ->first(fn ($l) => $l['destinataire']->id === $this->sousPrefecture1->id && $l['materiel']->id === $this->urnes->id);
+        $this->assertSame([100, 0], [$ligne['chez_intermediaire'], $ligne['en_transit']]);
+
+        // DonneesDecharge::reception : la remise à arbitrer n'y figure pas.
+        $ids = array_column(DonneesDecharge::reception($decharge)['remises'], 'id');
+        $this->assertNotContains($remiseArbitrer->id, $ids);
+
+        // AvisReceptionService::receptionUtilisee : une redistribution à arbitrer n'est pas un usage en aval.
+        $this->assertFalse(app(AvisReceptionService::class)->receptionUtilisee($livraison, $decharge));
+
+        // DechargePdfService::receptionEmissible : une redistribution à arbitrer est « en cours ».
+        $reste = $this->recueParLePrefetEntierementRedistribuee();
+        $this->assertTrue(app(DechargePdfService::class)->receptionEmissible($reste));
+        $this->sync($reste, $this->corps([$this->isoloirs->id => 1]), (string) Str::uuid())->assertCreated();
+        $this->assertFalse(app(DechargePdfService::class)->receptionEmissible($reste->refresh()));
+    }
+
+    /** Une seconde décharge via le préfet (isoloirs), entièrement redistribuée et reçue par le sous-préfet. */
+    private function recueParLePrefetEntierementRedistribuee(): Decharge
+    {
+        $this->actingAs($this->responsable);
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->isoloirs->id => 50]);
+        $this->deposerRecue($decharge, [$this->isoloirs->id => 50]);
+        $redistribution = $this->en($this->prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge, [$this->isoloirs->id => 50]));
+        $this->en($this->autoriteFictive($this->sousPrefecture1), fn () => app(DeclarationService::class)->declarer(
+            $redistribution->load('lignes'), 'compte', ['nom' => 'Sous-préfet', 'qualite' => 'Sous-préfet'],
+            [$this->isoloirs->id => ['recu' => 50, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        ));
+
+        return $decharge->refresh();
+    }
+
+    public function test_le_signataire_du_depart_ne_constate_pas_l_arrivee(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        // L'adjoint est habilité à la préfecture et au sous-préfet.
+        $adjoint = $this->adjoint('chef_poste');
+        $this->en($sousPrefet, fn () => app(DelegationService::class)->deleguer($this->sousPrefecture1, $adjoint, now(), null, 'Adjoint des deux'));
+        $refus = "Le signataire du départ ne peut pas constater l'arrivée.";
+        $lignes = [$this->urnes->id => ['recu' => 40, 'defectueux' => 0, 'observation' => null]];
+        $signataire = ['nom' => 'Adjoint', 'qualite' => 'Chef de poste'];
+
+        // Départ signé à la tablette par l'adjoint, puis arrivée au compte par le même adjoint : refusée.
+        $remise = $this->en($this->prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge, [$this->urnes->id => 40]))->load('lignes');
+        $this->en($adjoint, fn () => app(DeclarationService::class)->declarer($remise, 'tablette', $signataire, $lignes, (string) Str::uuid()));
+        $this->refus(fn () => $this->en($adjoint, fn () => app(DeclarationService::class)->declarer($remise, 'compte', $signataire, $lignes, (string) Str::uuid())), $refus);
+
+        // Le sous-préfet, lui, constate l'arrivée.
+        $this->en($sousPrefet, fn () => app(DeclarationService::class)->declarer($remise, 'compte', ['nom' => 'Sous-préfet', 'qualite' => 'Sous-préfet'], $lignes, (string) Str::uuid()));
+
+        // Dans l'autre sens : arrivée au compte par l'adjoint, puis départ à la tablette par le même adjoint : refusé.
+        $autre = $this->en($this->prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge, [$this->urnes->id => 10]))->load('lignes');
+        $lignesAutre = [$this->urnes->id => ['recu' => 10, 'defectueux' => 0, 'observation' => null]];
+        $this->en($adjoint, fn () => app(DeclarationService::class)->declarer($autre, 'compte', $signataire, $lignesAutre, (string) Str::uuid()));
+        $this->refus(fn () => $this->en($adjoint, fn () => app(DeclarationService::class)->declarer($autre, 'tablette', $signataire, $lignesAutre, (string) Str::uuid())), $refus);
+        // Le préfet signe le départ.
+        $this->en($this->prefet, fn () => app(DeclarationService::class)->declarer($autre, 'tablette', ['nom' => 'Préfet', 'qualite' => 'Préfet'], $lignesAutre, (string) Str::uuid()));
+        $this->assertSame(2, Declaration::where('remise_id', $autre->id)->count());
+    }
+
+    public function test_valider_une_remise_hors_reserve_est_refuse_tant_que_la_reserve_de_l_appareil_est_active(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $appareil = $this->designer();
+        $this->reserver($appareil, $decharge, [$this->urnes->id => 60]);
+        $remise = Remise::findOrFail($this->sync($decharge, $this->corps([$this->urnes->id => 80]), $appareil->identifiant)->json('redistribution.id'));
+        $this->assertSame('a_arbitrer', $remise->statut);
+
+        $this->refus(fn () => $this->arbitrer($remise, 'valider', 'Je valide.'),
+            'Redistribution supérieure au mobilisable du préfet pour Urnes : mobilisable 40, demandé 80.');
+        $this->assertSame('a_arbitrer', $remise->fresh()->statut);
+
+        $this->en($this->prefet, fn () => app(AppareilService::class)->liberer($appareil, $decharge));
+        $this->arbitrer($remise, 'valider', 'Réserve libérée.');
+        $this->assertSame('en_attente', $remise->fresh()->statut);
+        $this->assertSame(80, $this->solde($decharge)['transfere']);
     }
 }

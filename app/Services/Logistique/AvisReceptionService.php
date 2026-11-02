@@ -10,6 +10,7 @@ use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Reclamation;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\ReserveAppareil;
 use App\Models\NotificationOp;
 use App\Models\User;
 use Carbon\CarbonInterface;
@@ -138,6 +139,8 @@ class AvisReceptionService
     /**
      * Une réception est utilisée en aval quand :
      * - une redistribution (ni annulée ni à arbitrer) est partie de la décharge (réception d'une livraison au préfet) ;
+     * - une part du solde du préfet est réservée à l'appareil désigné (réserve active sur la décharge) : elle
+     *   suppose elle aussi la réception retenue, et ne se défait qu'avec la libération de la réserve ;
      * - l'exemplaire de réception de la décharge a été émis ;
      * - la décharge est un remplacement dont la réception a déjà résolu la réclamation d'origine.
      * Ce qui a été remis plus loin ou clos ne se défait pas d'un geste : le responsable tranche. Seule
@@ -148,6 +151,10 @@ class AvisReceptionService
         // Une redistribution ne se prépare que sur une livraison retenue : toute redistribution non annulée en dépend.
         if ($remise->etape === 'livraison' && Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
             ->whereNotIn('statut', ['annulee', 'a_arbitrer'])->exists()) {
+            return true;
+        }
+
+        if ($remise->etape === 'livraison' && ReserveAppareil::where('decharge_id', $decharge->id)->where('statut', 'active')->exists()) {
             return true;
         }
 

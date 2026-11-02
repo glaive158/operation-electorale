@@ -235,7 +235,7 @@ class RemiseService
      */
     public function preparerRedistribution(Decharge $decharge, array $lignes): Remise
     {
-        [$remise] = $this->redistribuer($decharge, $lignes, null, null, null);
+        [$remise] = $this->redistribuer($decharge, $lignes, null, null, null, true);
 
         return $remise->load('lignes');
     }
@@ -244,8 +244,9 @@ class RemiseService
      * Redistribution envoyée par un terminal, idempotente par `$cle`.
      *
      * - Sans identifiant d'appareil (envoi en ligne) : la règle de preparerRedistribution, sur le mobilisable.
-     * - Avec l'identifiant de l'appareil désigné de la préfecture : la remise est créée dans la limite de sa réserve
-     *   active, qu'elle consomme. Tout dépassement, un appareil non désigné, révoqué ou d'une autre préfecture, ou un
+     * - Avec l'identifiant de l'appareil désigné de la préfecture, dont l'identité est établie (`$identiteVerifiee` :
+     *   le jeton de l'appelant est lié à cet appareil) : la remise est créée dans la limite de sa réserve active,
+     *   qu'elle consomme. Tout dépassement, un appareil non désigné, révoqué ou d'une autre préfecture, ou un
      *   état de la décharge qui n'autorise plus la redistribution (cycle clos, réception à vérifier…) n'est pas
      *   perdu : la remise est conservée au statut « à arbitrer », sans aucun transfert compté.
      *
@@ -254,7 +255,7 @@ class RemiseService
      * @param  array<int, int|string>  $lignes  quantité par identifiant d'article ; les zéros sont omis
      * @return array{0: Remise, 1: bool} la remise et vrai si elle vient d'être créée (faux : rejeu)
      */
-    public function redistribuerSynchronisee(Decharge $decharge, array $lignes, string $cle, CarbonInterface $horodatageTerminal, ?string $identifiantAppareil = null): array
+    public function redistribuerSynchronisee(Decharge $decharge, array $lignes, string $cle, CarbonInterface $horodatageTerminal, ?string $identifiantAppareil = null, bool $identiteVerifiee = true): array
     {
         if (preg_match('/^[A-Za-z0-9-]{16,64}$/', $cle) !== 1) {
             throw new InvalidArgumentException("La clé d'idempotence doit compter de 16 à 64 caractères (lettres, chiffres, tirets).");
@@ -263,7 +264,7 @@ class RemiseService
             throw new InvalidArgumentException("L'identifiant de l'appareil est invalide.");
         }
 
-        [$remise, $creee] = $this->redistribuer($decharge, $lignes, $cle, $horodatageTerminal, $identifiantAppareil);
+        [$remise, $creee] = $this->redistribuer($decharge, $lignes, $cle, $horodatageTerminal, $identifiantAppareil, $identiteVerifiee);
 
         return [$remise->load('lignes'), $creee];
     }
@@ -272,9 +273,10 @@ class RemiseService
      * @param  array<int, int|string>  $lignes
      * @return array{0: Remise, 1: bool}
      */
-    private function redistribuer(Decharge $decharge, array $lignes, ?string $cle, ?CarbonInterface $horodatage, ?string $identifiant): array
+    private function redistribuer(Decharge $decharge, array $lignes, ?string $cle, ?CarbonInterface $horodatage, ?string $identifiant, bool $identiteVerifiee): array
     {
         $this->exigerAuteur();
+        $identifiant = $identifiant === null ? null : mb_strtolower($identifiant);
         $auteur = auth()->user();
         $lignes = $this->quantitesRedistribuees($lignes);
         $demandes = array_filter($lignes, fn (int $quantite) => $quantite > 0);
@@ -282,7 +284,7 @@ class RemiseService
         $horodatage = $horodatage?->copy()->startOfSecond()->setTimezone((string) config('app.timezone'));
 
         try {
-            [$remise, $creee, $conflit] = DB::transaction(function () use ($decharge, $demandes, $auteur, $cle, $horodatage, $identifiant) {
+            [$remise, $creee, $conflit] = DB::transaction(function () use ($decharge, $demandes, $auteur, $cle, $horodatage, $identifiant, $identiteVerifiee) {
                 $cycle = Cycle::whereKey($decharge->cycle_id)->lockForUpdate()->first();
                 $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
 
@@ -299,7 +301,9 @@ class RemiseService
                     return [$existante, false, true];
                 }
 
-                $prefecture = $this->prefectureQuiRedistribue($actuelle, $auteur);
+                // Un seul instant pour le contrôle du droit et la délégation consignée.
+                $maintenant = now();
+                $prefecture = $this->prefectureQuiRedistribue($actuelle, $auteur, $maintenant);
                 $depuisAppareil = $identifiant !== null;
 
                 // Sur un appareil, un état qui n'autorise plus la redistribution n'efface pas ce qui s'est passé sur le terrain.
@@ -346,28 +350,8 @@ class RemiseService
                         }
                     }
                 } else {
-                    $appareil = Appareil::where('identifiant', $identifiant)->lockForUpdate()->first();
-                    $designe = $appareil !== null && $appareil->actif && (int) $appareil->destinataire_id === (int) $prefecture->id;
-                    if (! $designe) {
-                        $raisons[] = match (true) {
-                            $appareil === null => 'Appareil non désigné pour cette préfecture.',
-                            ! $appareil->actif => 'Appareil révoqué.',
-                            default => 'Appareil désigné pour une autre préfecture.',
-                        };
-                    } elseif ($probleme === null) {
-                        $reserves = ReserveAppareil::where('appareil_id', $appareil->id)->where('decharge_id', $actuelle->id)
-                            ->where('statut', 'active')->orderBy('materiel_id')->lockForUpdate()->get()->keyBy('materiel_id');
-                        foreach ($demandes as $materielId => $quantite) {
-                            $libelle = Materiel::find($materielId)?->libelle ?? "article {$materielId}";
-                            $disponible = (int) ($reserves->get($materielId)?->quantite ?? 0);
-                            ['recu_utilisable' => $utilisable, 'transfere' => $transfere] = $solde[$materielId];
-                            if ($quantite > $disponible) {
-                                $raisons[] = "Quantité supérieure à la réserve de l'appareil pour {$libelle} : réserve {$disponible}, demandée {$quantite}.";
-                            } elseif ($transfere + $quantite > $utilisable) {
-                                $raisons[] = "Redistribution supérieure au reçu utilisable du préfet pour {$libelle} : reçu utilisable {$utilisable}, déjà transféré {$transfere}, demandé {$quantite}.";
-                            }
-                        }
-                    }
+                    [$appareil, $reserves, $raisonsAppareil] = $this->evaluerAppareil($identifiant, $identiteVerifiee, $prefecture, $actuelle, $demandes, $solde, $probleme);
+                    $raisons = array_merge($raisons, $raisonsAppareil);
                 }
 
                 $aArbitrer = $raisons !== [];
@@ -387,7 +371,7 @@ class RemiseService
                     RemiseLigne::create(['remise_id' => $redistribution->id, 'materiel_id' => $materielId, 'quantite' => $quantite]);
                 }
 
-                $delegation = $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, now());
+                $delegation = $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, $maintenant);
                 $contexte = [
                     'decharge_id' => $actuelle->id, 'de' => $prefecture->id, 'a' => (int) $actuelle->destinataire_id,
                     'lignes' => $demandes, 'delegation_id' => $delegation?->id,
@@ -436,6 +420,49 @@ class RemiseService
     }
 
     /**
+     * Évalue une redistribution envoyée par un appareil : l'appareil connu (verrouillé) et ses réserves actives
+     * (verrouillées) quand il est désigné, et les raisons pour lesquelles la remise est à arbitrer. Un appareil est
+     * désigné s'il est actif, de cette préfecture, et si son identité est établie par le jeton ; ses quantités
+     * doivent tenir dans sa réserve et dans ce que le préfet a reçu en bon état. Les raisons sont vides quand la
+     * remise est acceptée. `$probleme` non nul : l'état de la décharge exclut déjà toute réserve utilisable.
+     *
+     * @param  array<int, int>  $demandes
+     * @param  Collection<int, array{recu_utilisable: int, transfere: int, reliquat: int, reserve_appareil: int, mobilisable: int}>  $solde
+     * @return array{0: ?Appareil, 1: Collection<int, ReserveAppareil>, 2: list<string>}
+     */
+    private function evaluerAppareil(string $identifiant, bool $identiteVerifiee, Destinataire $prefecture, Decharge $decharge, array $demandes, Collection $solde, ?string $probleme): array
+    {
+        $appareil = $identiteVerifiee ? Appareil::where('identifiant', $identifiant)->lockForUpdate()->first() : null;
+        $designe = $appareil !== null && $appareil->actif && (int) $appareil->destinataire_id === (int) $prefecture->id;
+        if (! $designe) {
+            return [$appareil, collect(), [match (true) {
+                $appareil !== null && ! $appareil->actif => 'Appareil révoqué.',
+                $appareil !== null => 'Appareil désigné pour une autre préfecture.',
+                default => 'Appareil non désigné pour cette préfecture.',
+            }]];
+        }
+        if ($probleme !== null) {
+            return [$appareil, collect(), []];
+        }
+
+        $raisons = [];
+        $reserves = ReserveAppareil::where('appareil_id', $appareil->id)->where('decharge_id', $decharge->id)
+            ->where('statut', 'active')->orderBy('materiel_id')->lockForUpdate()->get()->keyBy('materiel_id');
+        foreach ($demandes as $materielId => $quantite) {
+            $libelle = Materiel::find($materielId)?->libelle ?? "article {$materielId}";
+            $disponible = (int) ($reserves->get($materielId)?->quantite ?? 0);
+            ['recu_utilisable' => $utilisable, 'transfere' => $transfere] = $solde[$materielId];
+            if ($quantite > $disponible) {
+                $raisons[] = "Quantité supérieure à la réserve de l'appareil pour {$libelle} : réserve {$disponible}, demandée {$quantite}.";
+            } elseif ($transfere + $quantite > $utilisable) {
+                $raisons[] = "Redistribution supérieure au reçu utilisable du préfet pour {$libelle} : reçu utilisable {$utilisable}, déjà transféré {$transfere}, demandé {$quantite}.";
+            }
+        }
+
+        return [$appareil, $reserves, $raisons];
+    }
+
+    /**
      * Même envoi : même décharge, même auteur, même appareil déclaré, mêmes quantités et même instant du terminal.
      *
      * @param  array<int, int>  $demandes
@@ -480,7 +507,8 @@ class RemiseService
             $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
             $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
 
-            $prefecture = $this->prefectureQuiRedistribue($decharge, $auteur);
+            $maintenant = now();
+            $prefecture = $this->prefectureQuiRedistribue($decharge, $auteur, $maintenant);
             if ($actuelle->etape !== 'redistribution' || (int) $actuelle->de_id !== (int) $decharge->remis_a_id) {
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
@@ -492,7 +520,7 @@ class RemiseService
             }
 
             $actuelle->forceFill(['statut' => 'annulee', 'motif_annulation' => $motif])->save();
-            $delegation = $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, now());
+            $delegation = $this->perimetre->estTitulaireDe($auteur, $prefecture) ? null : $this->delegations->activeA($prefecture, $auteur, $maintenant);
             Journal::noter('remise', $actuelle->id, 'annulation_redistribution', ['statut' => 'en_attente'], [
                 'statut' => 'annulee', 'decharge_id' => $decharge->id, 'delegation_id' => $delegation?->id,
             ], $motif);
@@ -504,9 +532,9 @@ class RemiseService
     /**
      * La préfecture qui redistribue une décharge : celle à qui elle est remise, dont l'auteur est l'autorité (le
      * titulaire ou l'adjoint habilité par une délégation en vigueur), pour une sous-préfecture en circuit via le
-     * préfet. Sinon la redistribution est hors périmètre.
+     * préfet, à l'instant donné (maintenant par défaut). Sinon la redistribution est hors périmètre.
      */
-    public function prefectureQuiRedistribue(Decharge $decharge, User $auteur): Destinataire
+    public function prefectureQuiRedistribue(Decharge $decharge, User $auteur, ?CarbonInterface $instant = null): Destinataire
     {
         $prefecture = $decharge->remis_a_id === null ? null : Destinataire::find($decharge->remis_a_id);
         $destinataire = Destinataire::find($decharge->destinataire_id);
@@ -517,7 +545,7 @@ class RemiseService
             || $prefecture->type !== 'prefecture'
             || $destinataire->type !== 'sous_prefecture'
             || (int) $destinataire->prefecture_id !== (int) $prefecture->id
-            || ! $this->perimetre->estAutoriteDe($auteur, $prefecture)) {
+            || ! $this->perimetre->estAutoriteDe($auteur, $prefecture, $instant)) {
             throw new RegleLogistique(self::HORS_PERIMETRE);
         }
 

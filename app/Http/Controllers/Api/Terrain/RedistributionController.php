@@ -14,7 +14,8 @@ use Illuminate\Http\Request;
 /**
  * Redistribution du préfet (ou de son adjoint) au sous-préfet, envoyée par un terminal, idempotente par clé.
  * Avec l'en-tête X-Appareil : redistribution hors ligne de l'appareil désigné, dans sa réserve ; tout dépassement ou
- * appareil non désigné est conservé « à arbitrer » (201, statut a_arbitrer). Sans en-tête : règle en ligne.
+ * appareil non désigné, ou dont l'identité n'est pas établie par le jeton, est conservé « à arbitrer » (201, statut
+ * a_arbitrer). Sans en-tête : règle en ligne.
  */
 class RedistributionController extends Controller
 {
@@ -41,6 +42,7 @@ class RedistributionController extends Controller
 
         [$remise, $creee] = $this->remises->redistribuerSynchronisee(
             $decharge, $quantites, $donnees['cle'], Carbon::createFromFormat('Y-m-d\TH:i:sP', $donnees['horodatage_terminal']), $identifiant,
+            $identifiant === null || $this->jetonLieA($request, $identifiant),
         );
 
         return response()->json(['redistribution' => $this->representation($remise)], $creee ? 201 : 200);

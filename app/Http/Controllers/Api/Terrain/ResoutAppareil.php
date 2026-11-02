@@ -8,6 +8,7 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Destinataire;
 use App\Services\Logistique\PerimetreTerrain;
 use App\Services\Logistique\RemiseService;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
@@ -34,6 +35,18 @@ trait ResoutAppareil
     }
 
     /**
+     * L'identité de l'appareil est-elle établie ? Le jeton de l'appelant doit avoir été créé pour cet appareil : l'en-tête
+     * seul ne prouve rien, n'importe quel terminal peut recopier l'identifiant de la tablette désignée.
+     */
+    private function jetonLieA(Request $request, string $identifiant): bool
+    {
+        $jeton = $request->user()?->currentAccessToken();
+        $lie = $jeton instanceof Model ? $jeton->getAttribute('appareil_identifiant') : null;
+
+        return is_string($lie) && hash_equals(mb_strtolower($lie), $identifiant);
+    }
+
+    /**
      * La préfecture qui redistribue la décharge, si l'appelant la voit et en est l'autorité ; sinon la décharge
      * n'existe pas pour lui (404).
      */
@@ -50,11 +63,11 @@ trait ResoutAppareil
         }
     }
 
-    /** L'appareil désigné (actif) de la préfecture, identifié par l'en-tête ; sinon 403. */
+    /** L'appareil désigné (actif) de la préfecture, identifié par l'en-tête et le jeton ; sinon 403. */
     private function appareilDesigne(Request $request, Destinataire $prefecture): Appareil
     {
         $identifiant = $this->identifiantAppareil($request);
-        $appareil = $identifiant === null ? null
+        $appareil = $identifiant === null || ! $this->jetonLieA($request, $identifiant) ? null
             : Appareil::where('identifiant', $identifiant)->where('actif', true)->where('destinataire_id', $prefecture->id)->first();
 
         if ($appareil === null) {

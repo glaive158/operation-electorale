@@ -28,7 +28,7 @@ class ArbitrageService
 {
     private const MAX_TEXTE = 500;
 
-    private const RECEPTION_UTILISEE = 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+    private const RECEPTION_UTILISEE = 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
 
     public function __construct(
         private readonly DeclarationService $declarations,
@@ -294,19 +294,24 @@ class ArbitrageService
             $actives = Declaration::where('remise_id', $remise->id)->orderBy('id')->lockForUpdate()->get();
             $actuelle = $actives->firstWhere('id', $declaration->id);
 
-            // Une retenue contestée dont la réception sert en aval est figée par le rapprochement : elle s'arbitre
-            // même si la remise est reçue, mais pas au détriment de ce qui en dépend.
-            $figee = $actuelle !== null && $actuelle->statut === 'retenue' && $actuelle->contestation === 'contestee';
+            // Une retenue contestée, ou dont la réception sert en aval (redistribution, réserve de l'appareil,
+            // exemplaire, remplacement), est figée par le rapprochement : elle s'arbitre même si la remise est
+            // reçue (contestée, ou à vérifier à cause d'une autre déclaration), mais pas au détriment de ce qui en
+            // dépend.
+            $utilisee = app(AvisReceptionService::class)->receptionUtilisee($remise, $decharge);
+            $estFigee = fn (?Declaration $d) => $d !== null && $d->statut === 'retenue' && ($d->contestation === 'contestee' || $utilisee);
+            $figee = $estFigee($actuelle) && ($actuelle->contestation === 'contestee' || $remise->statut === 'a_verifier');
             if ($actuelle === null || (! $figee && ($remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true)))) {
                 throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
             }
 
-            // Écarter une retenue contestée (la rejeter, ou en retenir une autre) défait la réception sur laquelle
-            // reposent la redistribution, l'exemplaire de réception ou le remplacement : refusé tant qu'elle sert.
+            // Écarter une retenue figée (la rejeter, ou en retenir une autre) défait la réception sur laquelle
+            // reposent la redistribution, la réserve, l'exemplaire de réception ou le remplacement : refusé tant
+            // qu'elle sert.
             $ecarteraUneFigee = $retenir
-                ? $actives->contains(fn (Declaration $autre) => $autre->id !== $actuelle->id && $autre->statut === 'retenue' && $autre->contestation === 'contestee')
+                ? $actives->contains(fn (Declaration $autre) => $autre->id !== $actuelle->id && $estFigee($autre))
                 : $figee;
-            if ($ecarteraUneFigee && app(AvisReceptionService::class)->receptionUtilisee($remise, $decharge)) {
+            if ($ecarteraUneFigee && $utilisee) {
                 throw new RegleLogistique(self::RECEPTION_UTILISEE);
             }
 
@@ -321,11 +326,13 @@ class ArbitrageService
                 }
             }
             if ($figee && $retenir) {
-                // Confirmer la retenue contestée : elle reste retenue et la contestation est levée.
-                $actuelle->forceFill(['contestation' => 'levee'])->save();
-                Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
-                    'contestation' => 'levee', 'statut' => 'retenue', 'remise_id' => $remise->id,
-                ], $motif);
+                // Confirmer la retenue figée : elle reste retenue et, si elle était contestée, la contestation est levée.
+                if ($actuelle->contestation === 'contestee') {
+                    $actuelle->forceFill(['contestation' => 'levee'])->save();
+                    Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
+                        'contestation' => 'levee', 'statut' => 'retenue', 'remise_id' => $remise->id,
+                    ], $motif);
+                }
             } else {
                 $this->changerStatut($actuelle, $retenir ? 'retenue' : 'ecartee', $remise);
             }

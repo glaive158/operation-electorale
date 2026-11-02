@@ -28,11 +28,11 @@ class AppareilController extends Controller
         private readonly PerimetreTerrain $perimetre,
     ) {}
 
-    /** Cet appareil est-il l'appareil désigné d'une préfecture dont l'appelant est l'autorité ? */
+    /** Cet appareil (identité établie par le jeton) est-il l'appareil désigné d'une préfecture dont l'appelant est l'autorité ? */
     public function show(Request $request): JsonResponse
     {
         $identifiant = $this->identifiantAppareil($request);
-        $appareil = $identifiant === null ? null : $this->appareils->actif($identifiant);
+        $appareil = $identifiant === null || ! $this->jetonLieA($request, $identifiant) ? null : $this->appareils->actif($identifiant);
         $prefecture = $appareil?->prefecture;
 
         if ($appareil === null || $prefecture === null || ! $this->perimetre->estAutoriteDe($request->user(), $prefecture)) {
