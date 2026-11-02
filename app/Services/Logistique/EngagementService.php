@@ -159,14 +159,15 @@ class EngagementService
     }
 
     /**
-     * Dotation, besoin, engagé et reste de tous les destinataires par catégorie, en trois requêtes
-     * quel que soit leur nombre (plan, remplacements et clôtures, engagé). Même règle que etat() :
-     * le reste se calcule article par article (un surplus sur un article ne compense pas le manque
-     * d'un autre). Collection vide si aucun article n'a ni dotation approuvée ni remplacement.
+     * Les articles de chaque destinataire, avec de quoi calculer son besoin : dotation approuvée du plan, besoins de
+     * remplacement, expéditions annulées et abandons de réception des clôtures d'écart. Deux requêtes, quel que soit
+     * le nombre de destinataires. Un article existe pour un destinataire dès qu'il a une dotation approuvée ou un
+     * remplacement ; une clôture ne crée jamais d'article, elle ne fait que réduire un besoin existant.
      *
-     * @return Collection<string, array{destinataire_id: int, categorie: string, dotation: int, besoin: int, engage: int, reste: int}> clé « destinataire_id|catégorie »
+     * @param  list<int>|null  $destinataireIds  restreint aux destinataires donnés (null : tous)
+     * @return array<string, array{destinataire_id: int, materiel_id: int, categorie: string, dotation: int, remplacement: int, annulee: int, abandon: int, clotures: int}> clé « destinataire_id|materiel_id »
      */
-    public function synthese(Cycle $cycle, ?string $categorie = null): Collection
+    public function articles(Cycle $cycle, ?string $categorie = null, ?array $destinataireIds = null): array
     {
         $plan = DB::table('plan_dotation_lignes')
             ->join('plans_dotation', 'plans_dotation.id', '=', 'plan_dotation_lignes.plan_dotation_id')
@@ -175,6 +176,7 @@ class EngagementService
             ->where('plans_dotation.statut', 'approuve')
             ->whereNotNull('plan_dotation_lignes.dotation_approuvee')
             ->when($categorie !== null, fn ($q) => $q->where('materiels.categorie', $categorie))
+            ->when($destinataireIds !== null, fn ($q) => $q->whereIn('plan_dotation_lignes.destinataire_id', $destinataireIds))
             ->get([
                 'plan_dotation_lignes.destinataire_id as destinataire_id',
                 'plan_dotation_lignes.materiel_id as materiel_id',
@@ -186,38 +188,55 @@ class EngagementService
             ->join('materiels', 'materiels.id', '=', 'besoins_remplacement.materiel_id')
             ->where('besoins_remplacement.cycle_id', $cycle->id)
             ->when($categorie !== null, fn ($q) => $q->where('materiels.categorie', $categorie))
+            ->when($destinataireIds !== null, fn ($q) => $q->whereIn('besoins_remplacement.destinataire_id', $destinataireIds))
             ->groupBy('besoins_remplacement.destinataire_id', 'besoins_remplacement.materiel_id', 'materiels.categorie')
-            ->selectRaw('besoins_remplacement.destinataire_id as destinataire_id, besoins_remplacement.materiel_id as materiel_id, materiels.categorie as categorie, SUM(besoins_remplacement.quantite) as remplacement, 0 as annulee');
+            ->selectRaw('besoins_remplacement.destinataire_id as destinataire_id, besoins_remplacement.materiel_id as materiel_id, materiels.categorie as categorie, SUM(besoins_remplacement.quantite) as remplacement, 0 as annulee, 0 as abandon, 0 as clotures');
         $ajustements = DB::table('arbitrages')
             ->join('materiels', 'materiels.id', '=', 'arbitrages.materiel_id')
             ->where('arbitrages.cycle_id', $cycle->id)
             ->where('arbitrages.objet', 'cloture_ecart')
             ->when($categorie !== null, fn ($q) => $q->where('materiels.categorie', $categorie))
+            ->when($destinataireIds !== null, fn ($q) => $q->whereIn('arbitrages.destinataire_id', $destinataireIds))
             ->groupBy('arbitrages.destinataire_id', 'arbitrages.materiel_id', 'materiels.categorie')
-            ->selectRaw('arbitrages.destinataire_id as destinataire_id, arbitrages.materiel_id as materiel_id, materiels.categorie as categorie, 0 as remplacement, SUM(arbitrages.quantite_expedition_annulee) as annulee')
+            ->selectRaw('arbitrages.destinataire_id as destinataire_id, arbitrages.materiel_id as materiel_id, materiels.categorie as categorie, 0 as remplacement, SUM(arbitrages.quantite_expedition_annulee) as annulee, SUM(arbitrages.quantite_abandon_reception) as abandon, COUNT(*) as clotures')
             ->unionAll($remplacements)
             ->get();
 
-        // Un article existe pour un destinataire dès qu'il a une dotation approuvée ou un remplacement ;
-        // une clôture ne crée jamais d'article, elle ne fait que réduire un besoin existant.
         $articles = [];
         foreach ($plan as $l) {
             $cle = $l->destinataire_id.'|'.$l->materiel_id;
-            $articles[$cle] = ['destinataire_id' => (int) $l->destinataire_id, 'materiel_id' => (int) $l->materiel_id, 'categorie' => (string) $l->categorie, 'dotation' => (int) $l->dotation, 'remplacement' => 0, 'annulee' => 0];
+            $articles[$cle] = ['destinataire_id' => (int) $l->destinataire_id, 'materiel_id' => (int) $l->materiel_id, 'categorie' => (string) $l->categorie, 'dotation' => (int) $l->dotation, 'remplacement' => 0, 'annulee' => 0, 'abandon' => 0, 'clotures' => 0];
         }
         foreach ($ajustements as $a) {
             $cle = $a->destinataire_id.'|'.$a->materiel_id;
             if ((int) $a->remplacement > 0) {
-                $articles[$cle] ??= ['destinataire_id' => (int) $a->destinataire_id, 'materiel_id' => (int) $a->materiel_id, 'categorie' => (string) $a->categorie, 'dotation' => 0, 'remplacement' => 0, 'annulee' => 0];
+                $articles[$cle] ??= ['destinataire_id' => (int) $a->destinataire_id, 'materiel_id' => (int) $a->materiel_id, 'categorie' => (string) $a->categorie, 'dotation' => 0, 'remplacement' => 0, 'annulee' => 0, 'abandon' => 0, 'clotures' => 0];
                 $articles[$cle]['remplacement'] += (int) $a->remplacement;
             }
         }
         foreach ($ajustements as $a) {
             $cle = $a->destinataire_id.'|'.$a->materiel_id;
-            if ((int) $a->annulee > 0 && isset($articles[$cle])) {
+            if ((int) $a->clotures > 0 && isset($articles[$cle])) {
                 $articles[$cle]['annulee'] += (int) $a->annulee;
+                $articles[$cle]['abandon'] += (int) $a->abandon;
+                $articles[$cle]['clotures'] += (int) $a->clotures;
             }
         }
+
+        return $articles;
+    }
+
+    /**
+     * Dotation, besoin, engagé et reste de tous les destinataires par catégorie, en trois requêtes
+     * quel que soit leur nombre (plan, remplacements et clôtures, engagé). Même règle que etat() :
+     * le reste se calcule article par article (un surplus sur un article ne compense pas le manque
+     * d'un autre). Collection vide si aucun article n'a ni dotation approuvée ni remplacement.
+     *
+     * @return Collection<string, array{destinataire_id: int, categorie: string, dotation: int, besoin: int, engage: int, reste: int}> clé « destinataire_id|catégorie »
+     */
+    public function synthese(Cycle $cycle, ?string $categorie = null): Collection
+    {
+        $articles = $this->articles($cycle, $categorie);
         if ($articles === []) {
             return collect();
         }
