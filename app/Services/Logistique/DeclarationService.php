@@ -672,7 +672,19 @@ class DeclarationService
 
         $cibles = [];
         $divergence = false;
-        if ($actives->count() === 1) {
+        // Une retenue contestée dont la réception sert déjà en aval est figée (redistribution, exemplaire de
+        // réception) : la défaire ferait tomber le solde du préfet sous ce qui est déjà remis. Elle ne bouge qu'à
+        // la levée de la contestation ou à l'arbitrage ; toute autre déclaration active est réconciliée comme si
+        // aucune déclaration saine n'existait (à vérifier, jamais retenue à côté d'elle).
+        $figee = $actives->first(fn (Declaration $d) => $d->statut === 'retenue' && $d->contestation === 'contestee');
+        if ($figee !== null) {
+            foreach ($actives as $declaration) {
+                $cibles[$declaration->id] = $declaration->id === $figee->id ? 'retenue' : 'a_verifier';
+                if ($declaration->id !== $figee->id && $this->contenu($declaration) !== $this->contenu($figee)) {
+                    $divergence = true;
+                }
+            }
+        } elseif ($actives->count() === 1) {
             $cibles[$actives[0]->id] = $this->saine($actives[0]) ? 'retenue' : 'a_verifier';
         } elseif ($actives->count() === 2) {
             [$premiere, $seconde] = [$actives[0], $actives[1]];
@@ -687,6 +699,9 @@ class DeclarationService
         }
 
         foreach ($actives as $declaration) {
+            if ($figee !== null && $declaration->id === $figee->id) {
+                continue;
+            }
             $cible = $cibles[$declaration->id];
             $anomalies = $declaration->anomalies ?? [];
             if ($divergence && ! in_array('divergence', $anomalies, true)) {

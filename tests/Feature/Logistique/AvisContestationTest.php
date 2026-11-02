@@ -710,4 +710,81 @@ class AvisContestationTest extends TestCase
 
         $this->assertSame('a_verifier', $declaration->refresh()->statut);
     }
+
+    /** Décharge via le préfet : livraison retenue (signée par le préfet), 40 urnes redistribuées, puis contestée. */
+    private function livraisonContesteeUtilisee(): array
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $livraison = $this->livraison($decharge);
+        $a = $this->tablette($livraison, $this->prefet, 100);
+        $this->en($this->prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 40]));
+        $this->contester($a);
+        $this->assertSame('retenue', $a->refresh()->statut);
+
+        return [$decharge, $livraison, $a];
+    }
+
+    private function solde(Decharge $decharge): array
+    {
+        return app(RemiseService::class)->soldePrefet($decharge)->get($this->urnes->id);
+    }
+
+    public function test_une_retenue_contestee_utilisee_en_aval_reste_figee_au_rapprochement(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+
+        $b = $this->compte($livraison->load('lignes'), 100);
+
+        $this->assertSame(['retenue', 'contestee'], [$a->refresh()->statut, $a->contestation]);
+        $this->assertSame('a_verifier', $b->refresh()->statut);
+        $this->assertSame('a_verifier', $livraison->refresh()->statut);
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+    }
+
+    public function test_apres_la_levee_le_rapprochement_reprend_son_cours(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+        $b = $this->compte($livraison->load('lignes'), 90);
+        $this->assertSame(['retenue', 'a_verifier'], [$a->refresh()->statut, $b->refresh()->statut]);
+        // La divergence est portée par l'autre déclaration ; la figée n'est pas modifiée.
+        $this->assertSame(['divergence'], $b->anomalies);
+        $this->assertNull($a->anomalies);
+
+        app(ArbitrageService::class)->leverContestation($a, 'Confirmée.');
+        // Le rejet de B relance le rapprochement : A, seule et saine, est retenue de nouveau comme avant.
+        app(ArbitrageService::class)->rejeter($b, 'Quantité erronée.');
+
+        $this->assertSame(['retenue', 'ecartee'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('recue', $livraison->refresh()->statut);
+        $this->assertSame(60, $this->solde($decharge)['reliquat']);
+    }
+
+    public function test_une_retenue_figee_s_arbitre(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+        $b = $this->compte($livraison->load('lignes'), 90);
+
+        // Rejeter l'autre déclaration relance le rapprochement : la figée reste retenue, la remise revient à reçue.
+        app(ArbitrageService::class)->rejeter($b, 'Quantité erronée.');
+        $this->assertSame(['retenue', 'ecartee'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('recue', $livraison->refresh()->statut);
+        $this->assertSame('contestee', $a->contestation);
+
+        // Le responsable peut écarter la figée elle-même : la remise attend alors une nouvelle déclaration.
+        app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.');
+        $this->assertSame('ecartee', $a->refresh()->statut);
+        $this->assertSame('en_attente', $livraison->refresh()->statut);
+    }
+
+    public function test_retenir_une_autre_declaration_ecarte_la_figee(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+        $b = $this->compte($livraison->load('lignes'), 90);
+
+        app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.');
+
+        $this->assertSame(['ecartee', 'retenue'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame('recue', $livraison->refresh()->statut);
+    }
 }

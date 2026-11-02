@@ -208,7 +208,9 @@ class ArbitrageService
             $actives = Declaration::where('remise_id', $remise->id)->orderBy('id')->lockForUpdate()->get();
             $actuelle = $actives->firstWhere('id', $declaration->id);
 
-            if ($actuelle === null || $remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true)) {
+            // Une retenue contestée dont la réception sert en aval, figée par le rapprochement, s'arbitre aussi.
+            $figee = $actuelle !== null && $actuelle->statut === 'retenue' && $actuelle->contestation === 'contestee';
+            if ($actuelle === null || ! $figee && ($remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true))) {
                 throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
             }
 
