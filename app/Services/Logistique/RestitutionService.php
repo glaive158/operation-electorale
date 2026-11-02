@@ -8,6 +8,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Restitution;
 use App\Models\Logistique\RestitutionDeclaration;
 use App\Models\Logistique\RestitutionDeclarationLigne;
@@ -20,6 +21,7 @@ use Carbon\CarbonInterface;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -30,9 +32,11 @@ use LogicException;
  * Restitution du matériel réutilisable à l'issue d'un cycle : ouverture d'une restitution par détenteur
  * (agent ou destinataire) d'après son solde (SoldeDetenteurService), recalcul tant qu'elle est à préparer,
  * désignation de l'agent de retour, déclaration du détenteur (compte, ou tablette de l'agent avec le code
- * personnel du détenteur), arbitrage des déclarations divergentes et prise en charge par l'agent.
+ * personnel du détenteur), arbitrage des déclarations divergentes et prise en charge par l'agent, puis réception
+ * et contrôle au central (remise en stock du bon et du à réparer) et décision sur le réformé.
  *
- * Ordre des verrous : cycle (partagé, sauf l'ouverture), restitution, déclarations. La restitution se tient aussi
+ * Ordre des verrous : cycle (partagé, sauf l'ouverture), restitution, déclarations, lignes, puis matériels
+ * (par id croissant, dans StockService). La restitution se tient aussi
  * sur un cycle clos (spec §9.3) : aucune écriture ici ne refuse un cycle clos.
  */
 class RestitutionService
@@ -47,6 +51,8 @@ class RestitutionService
 
     private const REFUS_BLOC_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
 
+    private const REFUS_CONTROLE_QUANTITES = 'Les quantités contrôlées doivent être des entiers de 0 à 10 000 000.';
+
     private const DEJA_PRISE_EN_CHARGE = 'Ce retour est déjà pris en charge.';
 
     public function __construct(
@@ -55,6 +61,7 @@ class RestitutionService
         private readonly DelegationService $delegations,
         private readonly PreuveService $preuves,
         private readonly PieceJointeService $pieceJointes,
+        private readonly StockService $stock,
     ) {}
 
     /**
@@ -386,6 +393,172 @@ class RestitutionService
         }, attempts: 3);
 
         $r->refresh();
+    }
+
+    /**
+     * Réception au central : le gestionnaire compte ce que l'agent a rapporté, article par article (chaque ligne
+     * de la restitution, une seule fois, de 0 à 10 000 000). Aucun mouvement de stock : le contrôle décide de
+     * l'état. Seul un retour pris en charge (« en retour ») se réceptionne ; la restitution passe « reçue au
+     * central ». Un cycle clos n'y fait pas obstacle (spec §9.3).
+     *
+     * @param  array<int|string, mixed>  $recus  quantité reçue par identifiant d'article
+     */
+    public function receptionner(Restitution $r, array $recus): void
+    {
+        $this->exigerAuteur();
+        $this->exigerGestionnaire('Seul un gestionnaire logistique peut réceptionner un retour.');
+        $recus = $this->parArticle($recus, 'reçue', fn (mixed $valeur) => $this->entier($valeur, 'Les quantités reçues doivent être des entiers de 0 à 10 000 000.'));
+
+        DB::transaction(function () use ($r, $recus) {
+            $this->verrouillerCycle($r);
+            $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->statut !== 'en_retour') {
+                throw new RegleLogistique('Seul un retour pris en charge peut être réceptionné au central.');
+            }
+            $lignes = $this->lignesDe($actuelle, $recus, 'reçue');
+
+            $avant = [];
+            foreach ($lignes as $materielId => $ligne) {
+                $avant[$materielId] = $ligne->recu_central;
+                if ($ligne->recu_central !== $recus[$materielId]) {
+                    $ligne->forceFill(['recu_central' => $recus[$materielId]])->save();
+                }
+            }
+            $actuelle->forceFill(['statut' => 'recue_central'])->save();
+
+            ksort($recus);
+            Journal::noter('restitution', $actuelle->id, 'reception_restitution', [
+                'statut' => 'en_retour', 'recu_central' => $avant,
+            ], [
+                'statut' => 'recue_central', 'recu_central' => $recus,
+                'declare_restitue' => $lignes->map(fn (RestitutionLigne $l) => $l->declare_restitue)->all(),
+            ]);
+        }, attempts: 3);
+
+        $r->refresh();
+    }
+
+    /**
+     * Contrôle au central : pour chaque ligne, ce qui est reçu se répartit en bon, à réparer et réformé (leur somme
+     * vaut le reçu, sans quoi InvalidArgumentException). Le bon et le à réparer rentrent au magasin
+     * (StockService::reintegrer, référencé à la ligne) ; seul le bon augmente le libre. Le réformé ne produit aucun
+     * mouvement : il est noté sur la ligne et attend la décision du responsable (deciderReforme, R3). La
+     * restitution devient « contrôlée » quand aucune réforme n'attend de décision, sinon elle reste « reçue au
+     * central ». Le contrôle se fait une fois, pour toutes les lignes ; il est refusé tant qu'une déclaration à
+     * vérifier attend l'arbitrage du responsable (retenirDeclaration).
+     *
+     * @param  array<int|string, mixed>  $controle  {bon, a_reparer, reforme} par identifiant d'article
+     */
+    public function controler(Restitution $r, array $controle): void
+    {
+        $this->exigerAuteur();
+        $this->exigerGestionnaire('Seul un gestionnaire logistique peut contrôler un retour.');
+        $controle = $this->parArticle($controle, 'contrôlée', function (mixed $valeur) {
+            if (! is_array($valeur)) {
+                throw new InvalidArgumentException(self::REFUS_CONTROLE_QUANTITES);
+            }
+            $quantites = [];
+            foreach (['bon', 'a_reparer', 'reforme'] as $etat) {
+                $quantites[$etat] = $this->entier($valeur[$etat] ?? null, self::REFUS_CONTROLE_QUANTITES);
+            }
+
+            return $quantites;
+        });
+
+        DB::transaction(function () use ($r, $controle) {
+            $this->verrouillerCycle($r);
+            $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->statut !== 'recue_central') {
+                throw new RegleLogistique('Seule une restitution reçue au central peut être contrôlée.');
+            }
+            // Le retour a pu être pris en charge pendant qu'une déclaration divergente attendait encore l'arbitrage.
+            if (RestitutionDeclaration::where('restitution_id', $actuelle->id)->where('statut', 'a_verifier')->lockForUpdate()->exists()) {
+                throw new RegleLogistique("Une déclaration à vérifier attend l'arbitrage du responsable : le contrôle est impossible.");
+            }
+            $lignes = $this->lignesDe($actuelle, $controle, 'contrôlée');
+            // Le contrôle écrit toutes les lignes d'un coup : une ligne déjà répartie dit qu'il a eu lieu (le statut
+            // ne change pas tant qu'une réforme attend sa décision).
+            if ($lignes->contains(fn (RestitutionLigne $l) => $l->bon + $l->a_reparer + $l->reforme > 0)) {
+                throw new RegleLogistique('Ce retour est déjà contrôlé.');
+            }
+
+            $materiels = Materiel::whereIn('id', $lignes->keys())->get()->keyBy('id');
+            foreach ($lignes as $materielId => $ligne) {
+                $q = $controle[$materielId];
+                if ($ligne->recu_central !== $q['bon'] + $q['a_reparer'] + $q['reforme']) {
+                    throw new InvalidArgumentException(sprintf(
+                        'Contrôle incomplet pour %s : bon + à réparer + réformé doit valoir %d.',
+                        $materiels[$materielId]->libelle, $ligne->recu_central,
+                    ));
+                }
+            }
+
+            // Par id croissant (lignesDe) : l'ordre des verrous de matériels est celui de StockService.
+            $motif = 'Retour contrôlé au central (restitution n° '.$actuelle->id.')';
+            foreach ($lignes as $materielId => $ligne) {
+                $q = $controle[$materielId];
+                foreach (['bon', 'a_reparer'] as $etat) {
+                    if ($q[$etat] > 0) {
+                        $this->stock->reintegrer($materiels[$materielId], $q[$etat], $etat, $ligne, $motif);
+                    }
+                }
+                $ligne->forceFill($q)->save();
+            }
+
+            $statut = $this->reformesEnAttente($actuelle) > 0 ? 'recue_central' : 'controlee';
+            if ($statut !== $actuelle->statut) {
+                $actuelle->forceFill(['statut' => $statut])->save();
+            }
+
+            ksort($controle);
+            Journal::noter('restitution', $actuelle->id, 'controle_restitution', ['statut' => 'recue_central'], [
+                'statut' => $statut, 'controle' => $controle,
+                'recu_central' => $lignes->map(fn (RestitutionLigne $l) => $l->recu_central)->all(),
+            ]);
+        }, attempts: 3);
+
+        $r->refresh();
+    }
+
+    /**
+     * Le responsable décide du réformé d'une ligne contrôlée : le motif est consigné avec son auteur. Aucun mouvement
+     * de stock (R3) : ces unités n'ont jamais rejoint le magasin. La restitution devient « contrôlée » quand plus
+     * aucune réforme n'attend de décision.
+     */
+    public function deciderReforme(RestitutionLigne $ligne, string $motif): void
+    {
+        $this->exigerAuteur();
+        $this->exigerResponsable('Seul un responsable logistique peut décider de la réforme.');
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+        $restitution = Restitution::findOrFail(RestitutionLigne::whereKey($ligne->id)->value('restitution_id'));
+
+        DB::transaction(function () use ($restitution, $ligne, $motif) {
+            $this->verrouillerCycle($restitution);
+            $actuelle = Restitution::whereKey($restitution->id)->lockForUpdate()->firstOrFail();
+            $courante = RestitutionLigne::where('restitution_id', $actuelle->id)->orderBy('materiel_id')->lockForUpdate()->get()->firstWhere('id', $ligne->id);
+
+            if ($courante === null || $courante->reforme <= 0) {
+                throw new RegleLogistique('Aucune quantité réformée à décider sur cette ligne.');
+            }
+            if ($courante->motif_reforme !== null) {
+                throw new RegleLogistique('La réforme de cette ligne est déjà décidée.');
+            }
+
+            $courante->forceFill(['motif_reforme' => $motif, 'reforme_decidee_par' => auth()->id()])->save();
+            $statut = $this->reformesEnAttente($actuelle) > 0 ? $actuelle->statut : 'controlee';
+            if ($statut !== $actuelle->statut) {
+                $actuelle->forceFill(['statut' => $statut])->save();
+            }
+
+            Journal::noter('restitution', $actuelle->id, 'decision_reforme_restitution', null, [
+                'ligne_id' => $courante->id, 'materiel_id' => $courante->materiel_id, 'reforme' => $courante->reforme, 'statut' => $statut,
+            ], $motif);
+        }, attempts: 3);
+
+        $ligne->refresh();
     }
 
     /**
@@ -950,6 +1123,65 @@ class RestitutionService
         return Canonique::empreinte(['restitution_id' => $restitutionId, 'mode' => $mode, 'signataire' => $signataire, 'lignes' => $lignes]);
     }
 
+    /**
+     * Quantités par article d'un envoi de réception ou de contrôle : clés d'articles entiers, chaque valeur validée
+     * par `$valeur`.
+     *
+     * @param  callable(mixed): mixed  $valeur
+     * @return array<int, mixed>
+     */
+    private function parArticle(array $envoi, string $verbe, callable $valeur): array
+    {
+        $retenu = [];
+        foreach ($envoi as $materielId => $contenu) {
+            if (! is_int($materielId) && ! (is_string($materielId) && preg_match('/^\d{1,12}$/', $materielId) === 1)) {
+                throw new InvalidArgumentException('Chaque ligne de la restitution doit être '.$verbe.'.');
+            }
+            $retenu[(int) $materielId] = $valeur($contenu);
+        }
+
+        return $retenu;
+    }
+
+    private function entier(mixed $valeur, string $message): int
+    {
+        if (is_string($valeur) && preg_match('/^-?\d{1,12}$/', $valeur) === 1) {
+            $valeur = (int) $valeur;
+        }
+        if (! is_int($valeur) || $valeur < 0 || $valeur > self::MAX_QUANTITE) {
+            throw new InvalidArgumentException($message);
+        }
+
+        return $valeur;
+    }
+
+    /**
+     * Les lignes de la restitution, verrouillées par article croissant : l'envoi les couvre toutes et elles seules.
+     *
+     * @param  array<int, mixed>  $envoi
+     * @return Collection<int, RestitutionLigne>
+     */
+    private function lignesDe(Restitution $r, array $envoi, string $verbe): Collection
+    {
+        $lignes = RestitutionLigne::where('restitution_id', $r->id)->orderBy('materiel_id')->lockForUpdate()->get()->keyBy('materiel_id');
+        foreach (array_keys($envoi) as $materielId) {
+            if (! $lignes->has($materielId)) {
+                throw new RegleLogistique('Article hors de cette restitution.');
+            }
+        }
+        if (count($envoi) !== $lignes->count()) {
+            throw new InvalidArgumentException('Chaque ligne de la restitution doit être '.$verbe.'.');
+        }
+
+        return $lignes;
+    }
+
+    /** Nombre de lignes dont le réformé attend encore la décision du responsable. */
+    private function reformesEnAttente(Restitution $r): int
+    {
+        return RestitutionLigne::where('restitution_id', $r->id)->where('reforme', '>', 0)->whereNull('motif_reforme')->count();
+    }
+
     /** Verrou partagé du cycle, d'abord : la restitution ne refuse pas un cycle clos (spec §9.3). */
     private function verrouillerCycle(Restitution $r): void
     {
@@ -969,6 +1201,13 @@ class RestitutionService
     {
         if (auth()->id() === null) {
             throw new LogicException('Opération de restitution sans auteur.');
+        }
+    }
+
+    private function exigerGestionnaire(string $message): void
+    {
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique($message);
         }
     }
 
