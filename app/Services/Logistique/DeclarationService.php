@@ -215,6 +215,20 @@ class DeclarationService
             $this->pieceJointes->rattacherEnAttente(array_keys($pieces));
         }
 
+        // Avis au signataire d'une nouvelle déclaration de tablette (jamais sur un rejeu), une fois la
+        // transaction englobante validée : une déclaration qui n'existe pas ne donne pas d'avis.
+        if ($mode === 'tablette' && $declaration->wasRecentlyCreated && $declaration->signataire_user_id !== null) {
+            DB::afterCommit(function () use ($declaration) {
+                try {
+                    // Service résolu à l'appel : il dépend lui-même de celui-ci.
+                    app(AvisReceptionService::class)->envoyer($declaration);
+                } catch (\Throwable $e) {
+                    // La déclaration est enregistrée : un avis manqué ne la défait pas, il est consigné.
+                    report($e);
+                }
+            });
+        }
+
         return $declaration->load('lignes');
     }
 

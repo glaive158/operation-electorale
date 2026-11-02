@@ -44,6 +44,50 @@ class ArbitrageService
     }
 
     /**
+     * Le responsable lève la contestation d'un signataire (vérification faite auprès de lui). La déclaration
+     * garde son statut : elle reste à arbitrer par retenir() ou rejeter() si elle l'attendait.
+     */
+    public function leverContestation(Declaration $declaration, string $motif): void
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Levée de contestation sans auteur.');
+        }
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut lever une contestation.');
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        $cycleId = Decharge::whereKey($declaration->decharge_id)->value('cycle_id');
+        if ($cycleId === null) {
+            throw new LogicException('Déclaration sans décharge : invariant rompu.');
+        }
+
+        DB::transaction(function () use ($declaration, $motif, $cycleId) {
+            // Pas de refus de cycle clos : aucun stock n'est touché.
+            if (Cycle::whereKey($cycleId)->lockForUpdate()->first() === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
+            }
+            Decharge::whereKey($declaration->decharge_id)->lockForUpdate()->firstOrFail();
+            Remise::whereKey($declaration->remise_id)->lockForUpdate()->firstOrFail();
+            $actuelle = Declaration::whereKey($declaration->id)->lockForUpdate()->firstOrFail();
+
+            if ($actuelle->contestation !== 'contestee') {
+                throw new RegleLogistique('Aucune contestation à lever pour cette réception.');
+            }
+
+            $actuelle->forceFill(['contestation' => 'levee'])->save();
+            Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
+                'contestation' => 'levee', 'statut' => $actuelle->statut, 'remise_id' => $actuelle->remise_id,
+            ], $motif);
+        }, attempts: 3);
+
+        $declaration->refresh();
+    }
+
+    /**
      * Le responsable accepte un écart pour (cycle, destinataire, article) : une part est abandonnée à la
      * réception (le destinataire n'aura jamais reçu l'objectif), une part de l'expédition est annulée (le besoin
      * baisse, la proposition de commande aussi).

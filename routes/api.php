@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\Terrain\AffectationController;
 use App\Http\Controllers\Api\Terrain\ClePreuveController;
+use App\Http\Controllers\Api\Terrain\ContestationController;
 use App\Http\Controllers\Api\Terrain\DeclarationController;
 use App\Http\Controllers\Api\Terrain\JetonController;
 use App\Http\Controllers\Api\Terrain\PieceController;
@@ -21,5 +22,6 @@ Route::prefix('terrain')->group(function () {
         Route::post('pieces', [PieceController::class, 'store']);
         Route::match(['head'], 'pieces/{empreinte}', [PieceController::class, 'show'])->where('empreinte', '[0-9a-f]{64}');
         Route::post('remises/{remise}/declarations', [DeclarationController::class, 'store'])->whereNumber('remise');
+        Route::post('declarations/{declaration}/contestation', [ContestationController::class, 'store'])->whereNumber('declaration');
     });
 });

@@ -34,6 +34,7 @@ use App\Http\Controllers\Logistique\ReclamationController;
 use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\Terrain\CodeController as TerrainCodeController;
+use App\Http\Controllers\Terrain\ContestationController as TerrainContestationController;
 use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController;
 use App\Http\Controllers\Terrain\DeclarationController as TerrainDeclarationController;
 use App\Http\Controllers\Terrain\DelegationController as TerrainDelegationController;
@@ -149,6 +150,7 @@ Route::middleware(['auth'])->group(function () {
         Route::middleware(['can:logistique-terrain', 'premier-acces'])->group(function () {
             Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
             Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
+            Route::post('declarations/{declaration}/contestation', [TerrainContestationController::class, 'store'])->whereNumber('declaration')->name('declarations.contestation');
             Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
             Route::post('remises/{remise}/annulation', [TerrainRedistributionController::class, 'annuler'])->name('redistributions.annuler');
             Route::post('decharges/{decharge}/reclamations', [TerrainReclamationController::class, 'store'])->name('reclamations.store');

@@ -263,7 +263,13 @@ class DeclarationApiTest extends TestCase
     {
         config(['logistique.declaration_attente_verrou' => 0]);
         $refuse = [];
-        $this->surveillerVerifier(function () use (&$refuse) {
+        $dejaPasse = false;
+        $this->surveillerVerifier(function () use (&$refuse, &$dejaPasse) {
+            // Une seule fois : sans verrou, le second envoi vérifierait à son tour et rappellerait ce rappel sans fin.
+            if ($dejaPasse) {
+                return;
+            }
+            $dejaPasse = true;
             // Pendant la vérification du premier envoi, un second envoi identique arrive : il attend le verrou.
             try {
                 app(DeclarationService::class)->declarerParTablette(
