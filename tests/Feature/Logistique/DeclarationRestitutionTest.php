@@ -6,6 +6,7 @@ use App\Exceptions\Logistique\DeclarationEnCours;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\JournalEntree;
+use App\Models\Logistique\Remise;
 use App\Models\Logistique\Restitution;
 use App\Models\Logistique\RestitutionDeclaration;
 use App\Models\User;
@@ -20,9 +21,11 @@ use App\Services\Logistique\StockService;
 use App\Support\Canonique;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
@@ -50,6 +53,8 @@ class DeclarationRestitutionTest extends TestCase
 
     private Restitution $restitution;
 
+    private Remise $redistribution;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -71,6 +76,7 @@ class DeclarationRestitutionTest extends TestCase
         $this->deposerRecue($decharge, [$this->urnes->id => 100]);
         $this->actingAs($this->autoriteFictive($this->prefecture));
         $remise = app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 100]);
+        $this->redistribution = $remise;
         $this->sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
         $this->actingAs($this->sousPrefet);
         app(DeclarationService::class)->declarer(
@@ -329,12 +335,12 @@ class DeclarationRestitutionTest extends TestCase
 
     public function test_divergence_puis_arbitrage(): void
     {
+        // La tablette sans code n'est pas retenue ; le compte qui diverge la rejoint : toutes deux à vérifier.
+        $tablette = $this->tablette($this->lignes(80), null, now()->toIso8601String());
         $compte = $this->compte($this->lignes(90));
-        $horodatage = now()->toIso8601String();
-        $tablette = $this->tablette($this->lignes(80), $this->bloc($this->lignes(80), $horodatage), $horodatage);
 
         $this->assertSame(['a_verifier', 'a_verifier'], RestitutionDeclaration::orderBy('id')->pluck('statut')->all());
-        $this->assertSame(['divergence'], $tablette->refresh()->anomalies);
+        $this->assertSame(['identite', 'divergence'], $tablette->refresh()->anomalies);
         $this->assertSame(['divergence'], $compte->refresh()->anomalies);
         $this->assertSame(0, $this->declareRestitue());
 
@@ -423,13 +429,226 @@ class DeclarationRestitutionTest extends TestCase
             try {
                 $this->tablette($lignes, $this->bloc($this->lignes(100), $horodatage, '000111'), $horodatage);
                 $this->fail("Les lignes devaient être refusées : {$message}");
-            } catch (InvalidArgumentException $e) {
+            } catch (InvalidArgumentException|RegleLogistique $e) {
                 $this->assertSame($message, $e->getMessage());
+                // Un article hors de la restitution dépend de son état : une règle (422), pas une saisie invalide.
+                $this->assertSame($message === 'Article hors de cette restitution.' ? RegleLogistique::class : InvalidArgumentException::class, $e::class);
             }
         }
 
         $this->assertSame(0, RestitutionDeclaration::count());
         $this->assertSame(0, $this->echecs());
+    }
+
+    public function test_retenue_d_office_figee_face_a_une_declaration_divergente(): void
+    {
+        $compte = $this->compte($this->lignes(90));
+        $horodatage = now()->toIso8601String();
+        $tablette = $this->tablette($this->lignes(80), $this->bloc($this->lignes(80), $horodatage), $horodatage);
+
+        $this->assertSame('retenue', $compte->refresh()->statut);
+        $this->assertNull($compte->anomalies);
+        $this->assertSame('a_verifier', $tablette->refresh()->statut);
+        $this->assertSame(['divergence'], $tablette->anomalies);
+        $this->assertSame(90, $this->declareRestitue());
+
+        // Seul l'arbitrage change la retenue.
+        $this->service()->retenirDeclaration($tablette, 'Comptage au déchargement');
+        $this->assertSame('ecartee', $compte->refresh()->statut);
+        $this->assertSame(80, $this->declareRestitue());
+    }
+
+    public function test_redeclaration_des_chiffres_ecartes_apres_arbitrage(): void
+    {
+        $tablette = $this->tablette($this->lignes(80), null, now()->toIso8601String());
+        $compte = $this->compte($this->lignes(90));
+        $this->service()->retenirDeclaration($tablette, 'Comptage de l\'agent confirmé');
+        $this->assertSame(80, $this->declareRestitue());
+
+        // Le détenteur redéclare les chiffres écartés : à vérifier, la retenue ne bouge pas.
+        $nouvelle = $this->compte($this->lignes(90));
+
+        $this->assertSame('a_verifier', $nouvelle->statut);
+        $this->assertSame(['divergence'], $nouvelle->anomalies);
+        $this->assertSame('retenue', $tablette->refresh()->statut);
+        $this->assertSame(['identite', 'divergence'], $tablette->anomalies);
+        $this->assertSame('ecartee', $compte->refresh()->statut);
+        $this->assertSame(80, $this->declareRestitue());
+    }
+
+    public function test_redeclaration_identique_d_une_retenue_confirme(): void
+    {
+        $tablette = $this->tablette($this->lignes(80), null, now()->toIso8601String());
+        $this->service()->retenirDeclaration($tablette, 'Signataire reconnu par l\'agent');
+
+        $compte = $this->compte($this->lignes(80));
+
+        $this->assertSame('concordante', $compte->statut);
+        $this->assertSame('retenue', $tablette->refresh()->statut);
+        $this->assertSame(80, $this->declareRestitue());
+    }
+
+    public function test_excedent_retenu_puis_tablette_identique_a_verifier(): void
+    {
+        $compte = $this->compte($this->lignes(120));
+        $this->service()->retenirDeclaration($compte, 'Vingt urnes d\'un autre lot rendues en même temps');
+        $horodatage = now()->toIso8601String();
+
+        $tablette = $this->tablette($this->lignes(120), $this->bloc($this->lignes(120), $horodatage), $horodatage);
+
+        // Identique mais pas saine (excédent) : la nouvelle est à vérifier, la retenue reste telle quelle.
+        $this->assertSame('a_verifier', $tablette->statut);
+        $this->assertSame(['excedent'], $tablette->anomalies);
+        $this->assertSame('retenue', $compte->refresh()->statut);
+        $this->assertSame(['excedent'], $compte->anomalies);
+        $this->assertSame(120, $this->declareRestitue());
+    }
+
+    public function test_recalcul_refuse_une_fois_declaree(): void
+    {
+        $this->compte($this->lignes(90));
+
+        try {
+            $this->service()->recalculer($this->restitution);
+            $this->fail('Le recalcul devait être refusé une fois la restitution déclarée.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Cette restitution a déjà une déclaration : ses attendus ne peuvent plus être recalculés.', $e->getMessage());
+        }
+        $this->assertSame(100, (int) $this->restitution->lignes()->sole()->attendu);
+    }
+
+    public function test_verrou_de_la_restitution_avant_toute_autre_lecture(): void
+    {
+        // SQLite ne montre ni les verrous ni la course : on vérifie l'ordre des requêtes de chaque écriture. Le
+        // verrou du cycle est suivi immédiatement de celui de la restitution (rien n'est lu entre les deux, sous
+        // REPEATABLE READ l'instantané n'est donc pris qu'après le verrou de la restitution).
+        DB::enableQueryLog();
+        $horodatage = now()->toIso8601String();
+        $this->tablette($this->lignes(80), $this->bloc($this->lignes(80), $horodatage), $horodatage);
+        $this->compte($this->lignes(90));
+        $this->service()->retenirDeclaration(RestitutionDeclaration::where('mode', 'compte')->sole(), 'Comptage du sous-préfet');
+        $this->service()->affecterAgent($this->restitution, $this->agentRetour);
+        $this->actingAs($this->agentRetour);
+        $this->service()->prendreEnCharge($this->restitution, $this->agentRetour);
+        $requetes = array_column(DB::getQueryLog(), 'query');
+        DB::disableQueryLog();
+
+        $verrousDeCycle = 0;
+        foreach ($requetes as $i => $requete) {
+            if (! str_starts_with($requete, 'select * from "cycles_electoraux"')) {
+                continue;
+            }
+            $verrousDeCycle++;
+            $this->assertStringStartsWith('select * from "restitutions" where "restitutions"."id" = ?', $requetes[$i + 1] ?? '');
+        }
+        $this->assertSame(5, $verrousDeCycle);
+
+        // Dans l'écriture d'une déclaration, le rejeu se lit après le verrou de la restitution.
+        $cle = array_keys(array_filter($requetes, fn ($q) => str_contains($q, 'from "restitution_declarations" where "cle_idempotence" = ?')));
+        $restitution = array_keys(array_filter($requetes, fn ($q) => str_starts_with($q, 'select * from "restitutions" where "restitutions"."id" = ?')));
+        $this->assertNotEmpty($cle);
+        $this->assertLessThan(max($cle), min($restitution));
+    }
+
+    public function test_filet_d_unicite_decide_d_apres_la_base(): void
+    {
+        $horodatage = now()->toIso8601String();
+        $tablette = $this->tablette($this->lignes(100), $this->bloc($this->lignes(100), $horodatage), $horodatage);
+        $compte = $this->compte($this->lignes(100), null, 'cle-compte-0000000001');
+        // Le message d'une violation cite toutes les colonnes insérées : il ne dit pas laquelle est en double.
+        $violation = new UniqueConstraintViolationException('sqlite',
+            'insert into "restitution_declarations" ("restitution_id", "cle_idempotence", "bloc_empreinte") values (?, ?, ?)', [],
+            new \PDOException('UNIQUE constraint failed: restitution_declarations.cle_idempotence'));
+        $service = $this->service();
+        $apresViolation = \Closure::bind(fn (...$arguments) => $this->apresViolation(...$arguments), $service, RestitutionService::class);
+
+        // Une déclaration de cette clé, même envoi : rejeu (jamais « preuve déjà utilisée » au compte).
+        [$rejouee, $conflit] = $apresViolation($violation, $this->restitution, 'compte', 'cle-compte-0000000001', $compte->empreinte_contenu, null, $this->sousPrefet);
+        $this->assertSame($compte->id, $rejouee->id);
+        $this->assertFalse($conflit);
+
+        // Même clé, autre contenu : conflit.
+        [, $conflit] = $apresViolation($violation, $this->restitution, 'compte', 'cle-compte-0000000001', str_repeat('0', 64), null, $this->sousPrefet);
+        $this->assertTrue($conflit);
+
+        // Clé libre, bloc déjà porté : preuve déjà utilisée.
+        try {
+            $apresViolation($violation, $this->restitution, 'tablette', 'cle-libre-000000000001', str_repeat('0', 64),
+                ['bloc_empreinte' => $tablette->bloc_empreinte, 'signataire_user_id' => $this->sousPrefet->id], $this->agentRetour);
+            $this->fail('Le bloc déjà porté devait être refusé.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Preuve déjà utilisée par une autre déclaration.', $e->getMessage());
+        }
+
+        // Ni l'une ni l'autre : l'erreur d'origine.
+        try {
+            $apresViolation($violation, $this->restitution, 'compte', 'cle-libre-000000000002', str_repeat('0', 64), null, $this->sousPrefet);
+            $this->fail("L'erreur d'origine devait remonter.");
+        } catch (UniqueConstraintViolationException $e) {
+            $this->assertSame($violation, $e);
+        }
+    }
+
+    public function test_bloc_d_une_remise_refuse_sur_une_restitution_sans_compter(): void
+    {
+        $horodatage = now()->toIso8601String();
+        $contenuRemise = app(PreuveService::class)->contenuPreuve(
+            $this->redistribution, self::SIGNATAIRE, $this->sousPrefet->id,
+            [['materiel_id' => $this->urnes->id, 'recu' => 100, 'defectueux' => 0, 'observation' => null]], self::CLE, $horodatage,
+        );
+        $clair = json_encode(['code' => '000111', 'cle' => self::CLE, 'empreinte' => Canonique::empreinte($contenuRemise)]);
+        $this->assertTrue(openssl_public_encrypt($clair, $chiffre, app(PreuveService::class)->clePublique(), OPENSSL_PKCS1_OAEP_PADDING));
+
+        try {
+            $this->tablette($this->lignes(100), base64_encode($chiffre), $horodatage);
+            $this->fail("Le bloc d'une remise devait être refusé sur une restitution.");
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Preuve ne correspondant pas au contenu de la déclaration.', $e->getMessage());
+        }
+        $this->assertSame(0, RestitutionDeclaration::count());
+        $this->assertSame(0, $this->echecs());
+    }
+
+    public function test_bloc_d_une_restitution_refuse_sur_une_remise_sans_compter(): void
+    {
+        $horodatage = now()->toIso8601String();
+        $bloc = $this->bloc($this->lignes(100), $horodatage, '000111');
+        $contenuRemise = app(PreuveService::class)->contenuPreuve(
+            $this->redistribution, self::SIGNATAIRE, $this->sousPrefet->id,
+            [['materiel_id' => $this->urnes->id, 'recu' => 100, 'defectueux' => 0, 'observation' => null]], self::CLE, $horodatage,
+        );
+
+        try {
+            app(PreuveService::class)->verifier($contenuRemise, self::CLE, $bloc, $this->sousPrefet, Carbon::parse($horodatage), null);
+            $this->fail("Le bloc d'une restitution devait être refusé sur une remise.");
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Preuve ne correspondant pas au contenu de la déclaration.', $e->getMessage());
+        }
+        $anomalie = JournalEntree::where('action', 'anomalie_preuve')->sole();
+        $this->assertSame('remise', $anomalie->objet_type);
+        $this->assertSame($this->redistribution->id, $anomalie->objet_id);
+        $this->assertSame(0, $this->echecs());
+    }
+
+    public function test_delegue_signe_a_la_tablette_avec_son_propre_code(): void
+    {
+        $adjoint = User::factory()->create(['role' => 'sous_prefet']);
+        $delegation = Delegation::create([
+            'destinataire_id' => $this->sousPrefecture1->id, 'autorite_user_id' => $this->sousPrefet->id, 'delegue_user_id' => $adjoint->id,
+            'du' => now()->subDay(), 'au' => now()->addDay(), 'motif' => 'Intérim', 'cree_par' => $this->responsable->id,
+        ]);
+        $this->definirCode($adjoint, '135790');
+        $horodatage = now()->toIso8601String();
+
+        $declaration = $this->tablette(
+            $this->lignes(100), $this->bloc($this->lignes(100), $horodatage, '135790', self::CLE, $adjoint), $horodatage,
+            self::CLE, null, $adjoint->id,
+        );
+
+        $this->assertSame('verifiee_code', $declaration->verification_identite);
+        $this->assertSame($adjoint->id, $declaration->signataire_user_id);
+        $this->assertSame($delegation->id, $declaration->delegation_id);
+        $this->assertSame('retenue', $declaration->statut);
     }
 
     public function test_horodatage_avant_l_ouverture_echec_non_compte(): void

@@ -142,6 +142,12 @@ class RestitutionService
             if ($actuelle->statut !== 'a_preparer') {
                 throw new RegleLogistique('Seule une restitution à préparer peut être recalculée.');
             }
+            // Une déclaration (même à vérifier) porte sur les attendus du moment : ils ne bougent plus sous elle.
+            $declaree = RestitutionDeclaration::where('restitution_id', $actuelle->id)
+                ->whereNotIn('statut', ['ecartee', 'remplacee'])->lockForUpdate()->exists();
+            if ($declaree) {
+                throw new RegleLogistique('Cette restitution a déjà une déclaration : ses attendus ne peuvent plus être recalculés.');
+            }
 
             $soldes = $this->soldes
                 ->soldes($cycle, $actuelle->detenteur_type, $actuelle->detenteur_id, $actuelle->id)
@@ -406,23 +412,14 @@ class RestitutionService
     }
 
     /**
-     * Enregistre ; si une écriture concurrente de la même clé a gagné, la retrouve (ou refuse si elle diffère).
+     * Enregistre (une écriture concurrente de la même clé est retrouvée par enregistrer), puis rattache les pièces.
      *
      * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
      * @param  array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null  $preuve
      */
     private function enregistrerOuRejouer(Restitution $r, string $mode, array $signataire, array $lignes, string $cle, ?CarbonInterface $instant, ?array $preuve, array $pieces, string $empreinte, User $auteur): RestitutionDeclaration
     {
-        try {
-            $declaration = $this->enregistrer($r, $mode, $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur);
-        } catch (UniqueConstraintViolationException $e) {
-            $rejeu = str_contains($e->getMessage(), 'cle_idempotence') ? $this->rejeu($cle, $r, $mode, $empreinte, $preuve['bloc_empreinte'] ?? null, $auteur) : null;
-            if ($rejeu === null) {
-                throw $e;
-            }
-
-            return $rejeu;
-        }
+        $declaration = $this->enregistrer($r, $mode, $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur);
 
         // Les pièces envoyées pendant l'enregistrement ont pu manquer le rattachement : on le refait.
         if ($pieces !== [] && $declaration->wasRecentlyCreated) {
@@ -441,7 +438,11 @@ class RestitutionService
     {
         try {
             [$declaration, $conflit] = DB::transaction(function () use ($r, $mode, $signataire, $lignes, $cle, $instant, $preuve, $pieces, $empreinte, $auteur) {
+                // Les verrous avant toute autre lecture : sous REPEATABLE READ, l'instantané de la transaction se fige à
+                // la première lecture non verrouillante ; prise après le verrou de la restitution, elle voit tout ce
+                // que les écritures précédentes sur cette restitution ont validé.
                 $this->verrouillerCycle($r);
+                $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
 
                 // Rejeu : avant tout autre contrôle.
                 $existante = RestitutionDeclaration::where('cle_idempotence', $cle)->first();
@@ -454,7 +455,6 @@ class RestitutionService
                     return [$existante, true];
                 }
 
-                $actuelle = Restitution::whereKey($r->id)->lockForUpdate()->firstOrFail();
                 $delegation = $this->controlerDroit($auteur, $actuelle, $mode);
                 $this->controlerStatut($actuelle, $mode);
                 $anomalies = $this->controlerLignes($actuelle, $lignes);
@@ -506,19 +506,7 @@ class RestitutionService
                 return [$declaration, false];
             }, attempts: 3);
         } catch (UniqueConstraintViolationException $e) {
-            // Filet de concurrence : le même bloc de preuve ne sert qu'à une seule déclaration.
-            if (str_contains($e->getMessage(), 'bloc_empreinte')) {
-                $porteur = RestitutionDeclaration::where('bloc_empreinte', $preuve['bloc_empreinte'] ?? '')->value('id');
-                if ($porteur !== null) {
-                    Journal::noter('restitution_declaration', (int) $porteur, 'anomalie_preuve', null, [
-                        'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
-                    ], self::REFUS_BLOC_REUTILISE);
-                }
-
-                throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
-            }
-
-            throw $e;
+            [$declaration, $conflit] = $this->apresViolation($e, $r, $mode, $cle, $empreinte, $preuve, $auteur);
         }
 
         if ($conflit) {
@@ -526,6 +514,39 @@ class RestitutionService
         }
 
         return $declaration;
+    }
+
+    /**
+     * Filet de concurrence, après une violation d'unicité : une écriture a échappé aux verrous. La base dit laquelle
+     * (le message de l'erreur cite toutes les colonnes insérées, il ne dit rien) : une déclaration de cette clé ⇒
+     * rejeu (même envoi) ou conflit ; sinon une déclaration portant ce bloc ⇒ preuve déjà utilisée ; sinon l'erreur.
+     *
+     * @param  array{bloc_empreinte?: ?string, signataire_user_id?: ?int}|null  $preuve
+     * @return array{0: RestitutionDeclaration, 1: bool} la déclaration et vrai pour un conflit de clé
+     */
+    private function apresViolation(UniqueConstraintViolationException $e, Restitution $r, string $mode, string $cle, string $empreinte, ?array $preuve, User $auteur): array
+    {
+        $existante = RestitutionDeclaration::where('cle_idempotence', $cle)->first();
+        if ($existante !== null) {
+            if ($this->memeEnvoi($existante, $mode, $empreinte, $preuve['bloc_empreinte'] ?? null, $auteur)) {
+                return [$existante->load('lignes'), false];
+            }
+            $this->noterAnomalieIdempotence($existante, $cle, $r, $mode, $empreinte);
+
+            return [$existante, true];
+        }
+
+        $bloc = $preuve['bloc_empreinte'] ?? null;
+        $porteur = $bloc === null ? null : RestitutionDeclaration::where('bloc_empreinte', $bloc)->value('id');
+        if ($porteur !== null) {
+            Journal::noter('restitution_declaration', (int) $porteur, 'anomalie_preuve', null, [
+                'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
+            ], self::REFUS_BLOC_REUTILISE);
+
+            throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
+        }
+
+        throw $e;
     }
 
     /**
@@ -672,7 +693,7 @@ class RestitutionService
             throw new RegleLogistique("Cette restitution n'attend plus de déclaration.");
         }
         $dejaFaite = RestitutionDeclaration::where('restitution_id', $r->id)->where('mode', $mode)
-            ->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
+            ->whereNotIn('statut', ['ecartee', 'remplacee'])->lockForUpdate()->exists();
         if ($dejaFaite) {
             throw new RegleLogistique('Une déclaration '.mb_strtolower(Declaration::MODES[$mode]).' existe déjà pour cette restitution.');
         }
@@ -687,13 +708,14 @@ class RestitutionService
      */
     private function controlerLignes(Restitution $r, array $lignes): array
     {
-        $attendus = RestitutionLigne::where('restitution_id', $r->id)->pluck('attendu', 'materiel_id')
+        $attendus = RestitutionLigne::where('restitution_id', $r->id)->lockForUpdate()->pluck('attendu', 'materiel_id')
             ->map(fn ($attendu) => (int) $attendu)->all();
 
         $anomalies = [];
         foreach ($lignes as $ligne) {
+            // Dépend de l'état de la restitution (ses lignes), pas de la forme de l'envoi : une règle, pas une saisie invalide.
             if (! array_key_exists($ligne['materiel_id'], $attendus)) {
-                throw new InvalidArgumentException('Article hors de cette restitution.');
+                throw new RegleLogistique('Article hors de cette restitution.');
             }
             if ($ligne['restitue'] > $attendus[$ligne['materiel_id']]) {
                 $anomalies[] = 'excedent';
@@ -707,10 +729,12 @@ class RestitutionService
     }
 
     /**
-     * Rapproche les déclarations actives (ni écartées ni remplacées) : une seule saine est retenue ; deux saines et
-     * identiques se confirment (la plus ancienne est retenue, l'autre concordante) ; deux divergentes sont toutes
-     * deux à vérifier, et rien n'est compté jusqu'à l'arbitrage. Le retour déclaré des lignes suit la retenue.
-     * L'appelant tient les verrous du cycle et de la restitution.
+     * Rapproche les déclarations actives (ni écartées ni remplacées). Une déclaration retenue (d'office ou par
+     * arbitrage) est figée : une nouvelle déclaration saine et identique la confirme (concordante), toute autre est
+     * à vérifier, sans toucher à la retenue ni au retour déclaré ; seul l'arbitrage change la retenue. Sans retenue :
+     * une seule saine est retenue ; deux saines et identiques se confirment (la plus ancienne est retenue, l'autre
+     * concordante) ; deux divergentes sont toutes deux à vérifier, et rien n'est compté jusqu'à l'arbitrage. Le
+     * retour déclaré des lignes suit la retenue. L'appelant tient les verrous du cycle et de la restitution.
      *
      * @return array{changements: array<int, array{avant: string, apres: string}>, declare_restitue: array<int, int>}
      */
@@ -722,14 +746,28 @@ class RestitutionService
             throw new LogicException('Plus de deux déclarations actives sur une restitution : invariant rompu.');
         }
 
-        $divergence = false;
         $cibles = [];
-        if ($actives->count() === 1) {
+        $retenue = $actives->first(fn (RestitutionDeclaration $d) => $d->statut === 'retenue');
+        $divergentes = [];
+        if ($retenue !== null) {
+            foreach ($actives as $declaration) {
+                if ($declaration->id === $retenue->id) {
+                    $cibles[$declaration->id] = 'retenue';
+
+                    continue;
+                }
+                $identique = $this->contenu($declaration) === $this->contenu($retenue);
+                $cibles[$declaration->id] = $identique && $this->saine($declaration) ? 'concordante' : 'a_verifier';
+                if (! $identique) {
+                    $divergentes[] = $declaration->id;
+                }
+            }
+        } elseif ($actives->count() === 1) {
             $cibles[$actives[0]->id] = $this->saine($actives[0]) ? 'retenue' : 'a_verifier';
         } elseif ($actives->count() === 2) {
             [$premiere, $seconde] = [$actives[0], $actives[1]];
             if ($this->contenu($premiere) !== $this->contenu($seconde)) {
-                $divergence = true;
+                $divergentes = [$premiere->id, $seconde->id];
                 $cibles = [$premiere->id => 'a_verifier', $seconde->id => 'a_verifier'];
             } elseif ($this->saine($premiere) && $this->saine($seconde)) {
                 $cibles = [$premiere->id => 'retenue', $seconde->id => 'concordante'];
@@ -740,8 +778,11 @@ class RestitutionService
 
         $changements = [];
         foreach ($actives as $declaration) {
+            if ($retenue !== null && $declaration->id === $retenue->id) {
+                continue;
+            }
             $anomalies = $declaration->anomalies ?? [];
-            if ($divergence && ! in_array('divergence', $anomalies, true)) {
+            if (in_array($declaration->id, $divergentes, true) && ! in_array('divergence', $anomalies, true)) {
                 $anomalies[] = 'divergence';
             }
             $cible = $cibles[$declaration->id];
@@ -762,11 +803,11 @@ class RestitutionService
      */
     private function appliquerRetenue(Restitution $r): array
     {
-        $retenue = RestitutionDeclaration::where('restitution_id', $r->id)->where('statut', 'retenue')->with('lignes')->first();
+        $retenue = RestitutionDeclaration::where('restitution_id', $r->id)->where('statut', 'retenue')->lockForUpdate()->with('lignes')->first();
         $declares = $retenue?->lignes->mapWithKeys(fn (RestitutionDeclarationLigne $l) => [$l->materiel_id => $l->restitue])->all() ?? [];
 
         $resultat = [];
-        foreach (RestitutionLigne::where('restitution_id', $r->id)->orderBy('materiel_id')->get() as $ligne) {
+        foreach (RestitutionLigne::where('restitution_id', $r->id)->orderBy('materiel_id')->lockForUpdate()->get() as $ligne) {
             $quantite = (int) ($declares[$ligne->materiel_id] ?? 0);
             if ($ligne->declare_restitue !== $quantite) {
                 $ligne->forceFill(['declare_restitue' => $quantite])->save();
