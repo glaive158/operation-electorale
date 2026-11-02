@@ -5,6 +5,8 @@
     $arrondis = \App\Models\Logistique\CleRepartition::LIBELLES_ARRONDI;
     $effectifs = $d['effectifs'];
     $lignes = $d['lignes'];
+    $reception = $d['reception'] ?? null;
+    $horodatage = fn (?string $t) => $t ? \Carbon\Carbon::parse($t)->format('d/m/Y H:i') : '—';
     $remisDifferent = ($d['remis_a']['libelle'] ?? null) !== ($d['destinataire']['libelle'] ?? null);
     $signataireRemis = trim(($d['remis_a']['signataire_qualite'] ?? '').' '.($d['remis_a']['signataire_nom'] ?? ''));
     if ($signataireRemis === '') {
@@ -43,6 +45,11 @@
     .filigrane { position: fixed; top: 38%; left: 0; width: 100%; text-align: center; font-size: 96pt; font-weight: bold; color: #000; opacity: 0.1; transform: rotate(-30deg); }
     .annexe-page { page-break-before: always; }
     h2 { font-size: 11pt; text-align: center; margin: 0 0 10px 0; }
+    h3 { font-size: 10pt; margin: 14px 0 4px 0; }
+    table.liste { width: 100%; border-collapse: collapse; }
+    table.liste th, table.liste td { border: 0.6pt solid #333; padding: 3px 5px; vertical-align: top; }
+    table.liste th { background: #e8e8e8; text-align: center; }
+    .declaration { margin: 4px 0; font-size: 8.5pt; }
 </style>
 </head>
 <body>
@@ -78,6 +85,67 @@
     L.V : {{ $effectifs['lieux_vote'] }} — B.V : {{ $effectifs['bureaux_vote'] }} — Électeurs : {{ $effectifs['electeurs'] }}@if(($d['cycle']['type'] ?? null) === 'revision') — C.A : {{ $effectifs['commissions'] }}@endif
 </div>
 
+@if($reception)
+<table class="nomenclature">
+    <thead>
+        <tr>
+            <th style="width:30%;">Nomenclature</th>
+            <th style="width:12%;">Annoncé</th>
+            <th style="width:12%;">Reçu</th>
+            <th style="width:14%;">Défectueux</th>
+            <th style="width:13%;">Utilisable</th>
+            <th style="width:19%;">Observations</th>
+        </tr>
+    </thead>
+    <tbody>
+        @php $groupe = null; @endphp
+        @foreach($reception['lignes'] as $ligne)
+            @if(filled($ligne['regroupement']) && $ligne['regroupement'] !== $groupe)
+                <tr class="regroupement"><td colspan="6">{{ $ligne['regroupement'] }}</td></tr>
+            @endif
+            @php $groupe = filled($ligne['regroupement']) ? $ligne['regroupement'] : null; @endphp
+            <tr>
+                <td>{{ $ligne['libelle'] }}</td>
+                <td class="num">{{ $nombre($ligne['annonce']) }}</td>
+                <td class="num">{{ $nombre($ligne['recu']) }}</td>
+                <td class="num">{{ $nombre($ligne['defectueux']) }}</td>
+                <td class="num">{{ $nombre($ligne['utilisable']) }}</td>
+                <td>{{ $ligne['observations'] }}</td>
+            </tr>
+        @endforeach
+    </tbody>
+</table>
+
+<h3>Remises</h3>
+<table class="liste">
+    <thead>
+        <tr><th>Étape</th><th>De</th><th>À</th><th>Date</th><th>Statut</th></tr>
+    </thead>
+    <tbody>
+        @foreach($reception['remises'] as $remise)
+            <tr>
+                <td>{{ $remise['etape_libelle'] }}</td>
+                <td>{{ $remise['de'] }}</td>
+                <td>{{ $remise['a'] }}</td>
+                <td>{{ $date($remise['date']) }}</td>
+                <td>{{ $remise['statut_libelle'] }}</td>
+            </tr>
+        @endforeach
+    </tbody>
+</table>
+
+<h3>Déclarations</h3>
+@foreach($reception['declarations'] as $declaration)
+    <div class="declaration">
+        <strong>{{ $declaration['statut_libelle'] }}</strong> — {{ \App\Models\Logistique\Remise::ETAPES[$declaration['etape']] }}, mode {{ $declaration['mode'] }} —
+        {{ $declaration['signataire_nom'] }}, {{ $declaration['signataire_qualite'] }} —
+        terminal : {{ $horodatage($declaration['horodatage_terminal']) }} ; serveur : {{ $horodatage($declaration['horodatage_serveur']) }}<br>
+        @foreach($declaration['lignes'] as $l)
+            {{ $l['libelle'] }} : reçu {{ $nombre($l['recu']) }}, défectueux {{ $nombre($l['defectueux']) }}@if(filled($l['observation'])) ({{ $l['observation'] }})@endif{{ $loop->last ? '' : ' ;' }}
+        @endforeach
+    </div>
+@endforeach
+@else
 <table class="nomenclature">
     <thead>
         <tr>
@@ -114,6 +182,8 @@
     </tr>
 </table>
 
+@endif
+
 <table class="pied">
     <tr>
         <td class="qr"><img src="{{ $qr }}" width="62" height="62" alt="QR"></td>
@@ -124,6 +194,7 @@
     </tr>
 </table>
 
+@unless($reception)
 <div class="annexe-page">
     <h2>Annexe de calcul — décharge n° {{ $d['numero'] ?? '—' }}</h2>
     <p style="font-size:8.5pt;">Plan de dotation, version {{ $d['plan']['version'] }}.</p>
@@ -151,5 +222,6 @@
         </tbody>
     </table>
 </div>
+@endunless
 </body>
 </html>

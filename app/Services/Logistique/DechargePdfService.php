@@ -38,6 +38,11 @@ class DechargePdfService
     {
         $this->exigerExemplaire($exemplaire);
 
+        // L'exemplaire de réception se rend depuis les remises et déclarations vivantes : jamais d'aperçu.
+        if ($exemplaire === 'reception' && ! $this->receptionEmissible($decharge)) {
+            throw new RegleLogistique(self::NON_EMIS);
+        }
+
         if ($decharge->statut_document === 'brouillon') {
             if (! $apercu) {
                 throw new RegleLogistique(self::NON_EMIS);
@@ -50,6 +55,11 @@ class DechargePdfService
                 throw new LogicException('Décharge sans données figées.');
             }
             $filigrane = $exemplaire === 'annulation' ? 'ANNULÉE' : null;
+        }
+
+        if ($exemplaire === 'reception') {
+            $donnees['titre'] .= ' — EXEMPLAIRE DE RÉCEPTION';
+            $donnees['reception'] = DonneesDecharge::reception($decharge);
         }
 
         // Date et motif d'annulation viennent de la ligne de la décharge (écrits une seule fois, à
@@ -253,12 +263,19 @@ class DechargePdfService
         $permis = match ($exemplaire) {
             'initial' => in_array($decharge->statut_document, ['validee', 'annulee'], true),
             'annulation' => $decharge->statut_document === 'annulee',
+            'reception' => $this->receptionEmissible($decharge),
             default => false,
         };
 
         if (! $permis) {
             throw new RegleLogistique(self::NON_EMIS);
         }
+    }
+
+    /** Le destinataire final a une réception retenue : décharge validée, statut d'acheminement « reçue par le destinataire ». */
+    private function receptionEmissible(Decharge $decharge): bool
+    {
+        return $decharge->statut_document === 'validee' && $decharge->statut_acheminement === 'recue_destinataire';
     }
 
     private function exigerExemplaire(string $exemplaire): void
