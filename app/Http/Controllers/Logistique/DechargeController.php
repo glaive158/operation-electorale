@@ -9,11 +9,14 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Remise;
+use App\Models\User;
 use App\Services\Logistique\CircuitService;
 use App\Services\Logistique\DechargePdfService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EngagementService;
 use App\Services\Logistique\LectureRecensement;
+use App\Services\Logistique\LibellesRemises;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use InvalidArgumentException;
@@ -29,6 +32,7 @@ class DechargeController extends Controller
         private readonly EngagementService $engagements,
         private readonly CircuitService $circuits,
         private readonly LectureRecensement $recensement,
+        private readonly LibellesRemises $libelles,
     ) {
     }
 
@@ -74,17 +78,26 @@ class DechargeController extends Controller
         $decharge->load([
             'cycle', 'destinataire', 'remisA', 'plan', 'documents', 'remplacante', 'remplacee',
             'lignes' => fn ($q) => $q->orderBy('materiel_id'),
-            'lignes.materiel',
+            'lignes.materiel', 'reclamations.materiel',
         ]);
 
         // Un brouillon n'a pas encore figé son engagé : on montre l'état courant du destinataire. Le besoin
         // (dotation, remplacements et clôtures) se lit toujours sur l'état courant.
         $etat = $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie);
 
+        $remises = Remise::where('decharge_id', $decharge->id)
+            ->with(['lignes.materiel', 'declarations.lignes.materiel'])->orderBy('id')->get();
+        $affectable = $decharge->statut_document === 'validee' && ! $decharge->estPartie();
+
         return view('logistique.decharges.show', [
             'decharge' => $decharge,
             'cycle' => $decharge->cycle,
             'etat' => $etat,
+            'remises' => $remises,
+            'parties' => $this->libelles->pour($remises),
+            'agents' => $affectable
+                ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
+                : collect(),
         ]);
     }
 

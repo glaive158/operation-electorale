@@ -10,6 +10,7 @@ use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
 use App\Http\Controllers\Logistique\BesoinController;
+use App\Http\Controllers\Logistique\ArbitrageController;
 use App\Http\Controllers\Logistique\CircuitController;
 use App\Http\Controllers\Logistique\CleController;
 use App\Http\Controllers\Logistique\CommandeController;
@@ -17,14 +18,18 @@ use App\Http\Controllers\Logistique\CommissionController;
 use App\Http\Controllers\Logistique\CorrespondanceController;
 use App\Http\Controllers\Logistique\CycleController;
 use App\Http\Controllers\Logistique\DechargeController;
+use App\Http\Controllers\Logistique\DeclarationController;
 use App\Http\Controllers\Logistique\EcartController;
 use App\Http\Controllers\Logistique\EntiteController;
 use App\Http\Controllers\Logistique\ExpeditionController;
 use App\Http\Controllers\Logistique\GeographieController;
+use App\Http\Controllers\Logistique\IndicateurController;
 use App\Http\Controllers\Logistique\InstantaneController;
 use App\Http\Controllers\Logistique\MaterielController;
 use App\Http\Controllers\Logistique\PlanDotationController;
 use App\Http\Controllers\Logistique\PosteController;
+use App\Http\Controllers\Logistique\ReclamationController;
+use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
@@ -167,6 +172,15 @@ Route::middleware(['auth'])->group(function () {
         Route::get('decharges/{decharge}/apercu', [DechargeController::class, 'apercu'])->name('decharges.apercu');
         Route::get('decharges/{decharge}/pdf/{exemplaire}', [DechargeController::class, 'pdf'])->name('decharges.pdf');
 
+        Route::put('decharges/{decharge}/agent', [RemiseController::class, 'affecter'])->name('decharges.agent');
+        Route::post('decharges/{decharge}/chargement', [RemiseController::class, 'charger'])->name('decharges.charger');
+        Route::get('cycles/{cycle}/a-verifier', [DeclarationController::class, 'aVerifier'])->name('declarations.a-verifier');
+        Route::get('cycles/{cycle}/reclamations', [ReclamationController::class, 'index'])->name('reclamations.index');
+        Route::get('reclamations/{reclamation}', [ReclamationController::class, 'show'])->name('reclamations.show');
+        Route::post('reclamations/{reclamation}/prise-en-charge', [ReclamationController::class, 'prendre'])->name('reclamations.prendre');
+        Route::post('reclamations/{reclamation}/resolution', [ReclamationController::class, 'resoudre'])->name('reclamations.resoudre');
+        Route::get('cycles/{cycle}/suivi', [IndicateurController::class, 'index'])->name('suivi.index');
+
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
             Route::put('cycles/{cycle}/attributions/{materiel}', [StockController::class, 'attribuer'])->name('attributions.update');
@@ -206,6 +220,9 @@ Route::middleware(['auth'])->group(function () {
 
             Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
+            Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
+            Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');
+            Route::post('cycles/{cycle}/clotures-ecart', [ArbitrageController::class, 'cloturer'])->name('clotures-ecart.store');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

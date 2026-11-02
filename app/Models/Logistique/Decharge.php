@@ -29,6 +29,21 @@ class Decharge extends Model
         'remplacement' => 'Remplacement',
     ];
 
+    public const ACHEMINEMENTS = [
+        'a_preparer' => 'À préparer',
+        'chargee' => 'Chargée — en transit',
+        'recue_intermediaire' => 'Reçue par l\'intermédiaire',
+        'recue_destinataire' => 'Reçue par le destinataire',
+        'a_verifier' => 'Réception à vérifier',
+    ];
+
+    public const RECLAMATIONS = [
+        'aucune' => 'Aucune',
+        'ouverte' => 'Ouverte',
+        'en_traitement' => 'En traitement',
+        'resolue' => 'Résolue',
+    ];
+
     // Les statuts, le numéro, le circuit et la validation ne sont pas assignables en masse : ils passent par DechargeService.
     protected $fillable = [
         'cycle_id', 'destinataire_id', 'categorie', 'nature', 'decharge_remplacee_id', 'plan_dotation_id', 'prepare_par',

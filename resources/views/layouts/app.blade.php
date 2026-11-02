@@ -96,6 +96,9 @@
                         ['url' => $versCycle('logistique.expeditions.index'), 'match' => ['logistique.expeditions.*'], 'icon' => 'M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10m10 0H3m10 0h2m4 0h1a1 1 0 001-1v-3.65a1 1 0 00-.22-.624l-3.48-4.35A1 1 0 0017.52 8H14m5 8a2 2 0 11-4 0 2 2 0 014 0zM9 16a2 2 0 11-4 0 2 2 0 014 0z', 'label' => 'Expéditions'],
                         ['url' => $versCycle('logistique.decharges.index'), 'match' => ['logistique.decharges.*', 'logistique.decharge-lignes.*'], 'icon' => 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z', 'label' => 'Décharges'],
                         ['url' => $versCycle('logistique.ecarts.index'), 'match' => ['logistique.ecarts.*'], 'icon' => 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z', 'label' => 'Écarts'],
+                        ['url' => $versCycle('logistique.declarations.a-verifier'), 'match' => ['logistique.declarations.*', 'logistique.clotures-ecart.*'], 'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z', 'label' => 'À vérifier'],
+                        ['url' => $versCycle('logistique.reclamations.index'), 'match' => ['logistique.reclamations.*'], 'icon' => 'M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z', 'label' => 'Réclamations'],
+                        ['url' => $versCycle('logistique.suivi.index'), 'match' => ['logistique.suivi.*'], 'icon' => 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z', 'label' => 'Suivi'],
                     ]);
                 }
                 $adminItems = [

@@ -20,6 +20,9 @@
             ['Expéditions', 'logistique.expeditions.index', $cycleOnglet, 'logistique.expeditions.*'],
             ['Décharges', 'logistique.decharges.index', $cycleOnglet, 'logistique.decharges.*'],
             ['Écarts', 'logistique.ecarts.index', $cycleOnglet, 'logistique.ecarts.*'],
+            ['À vérifier', 'logistique.declarations.a-verifier', $cycleOnglet, 'logistique.declarations.*'],
+            ['Réclamations', 'logistique.reclamations.index', $cycleOnglet, 'logistique.reclamations.*'],
+            ['Suivi', 'logistique.suivi.index', $cycleOnglet, 'logistique.suivi.*'],
         ]);
     }
 @endphp

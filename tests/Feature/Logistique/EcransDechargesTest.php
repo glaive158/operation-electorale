@@ -481,6 +481,8 @@ class EcransDechargesTest extends TestCase
             ['POST', route('logistique.decharges.valider', $brouillon), [], 'gerer'],
             ['POST', route('logistique.decharges.remplacer', $brouillon), [], 'gerer'],
             ['POST', route('logistique.decharges.emettre', $brouillon), ['exemplaire' => 'initial'], 'gerer'],
+            ['PUT', route('logistique.decharges.agent', $brouillon), ['agent_id' => null, 'motif' => 'x'], 'gerer'],
+            ['POST', route('logistique.decharges.charger', $brouillon), [], 'gerer'],
         ];
 
         $sansDroit = [
