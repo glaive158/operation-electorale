@@ -89,7 +89,7 @@ class ArbitrageService
                 throw new RegleLogistique("Une réception est à vérifier pour {$materiel->libelle} : arbitrez-la avant d'accepter un écart.");
             }
 
-            $reste = max(0, $this->objectifReception($actuel, $destinataire, $materiel) - $this->recuUtilisableRetenu($actuel, $destinataire, $materiel));
+            $reste = $this->resteAReceptionner($actuel, $destinataire, $materiel);
             if ($abandonReception > $reste) {
                 throw new RegleLogistique("Abandon supérieur au reste à réceptionner pour {$materiel->libelle} : reste {$reste}.");
             }
@@ -108,6 +108,15 @@ class ArbitrageService
 
             return $arbitrage;
         }, attempts: 3);
+    }
+
+    /**
+     * Reste à réceptionner : objectif de réception moins le reçu utilisable retenu au destinataire final.
+     * À lire sous le verrou du cycle.
+     */
+    public function resteAReceptionner(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): int
+    {
+        return max(0, $this->objectifReception($cycle, $destinataire, $materiel) - $this->recuUtilisableRetenu($cycle, $destinataire, $materiel));
     }
 
     /**

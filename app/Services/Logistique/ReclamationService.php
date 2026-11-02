@@ -48,6 +48,9 @@ class ReclamationService
         $this->exigerAuteur();
         $auteur = auth()->user();
 
+        if (! Gate::forUser($auteur)->allows('logistique-terrain') || ! $this->perimetre->peutVoir($auteur, $decharge)) {
+            throw new RegleLogistique(self::HORS_PERIMETRE);
+        }
         if (! array_key_exists($motif, Reclamation::MOTIFS)) {
             throw new InvalidArgumentException('Motif de réclamation inconnu.');
         }
@@ -58,16 +61,10 @@ class ReclamationService
         if ($message === '' || mb_strlen($message) > self::MAX_MESSAGE) {
             throw new InvalidArgumentException('Le message est obligatoire (1 000 caractères au plus).');
         }
-        if (! Gate::forUser($auteur)->allows('logistique-terrain')) {
-            throw new RegleLogistique(self::HORS_PERIMETRE);
-        }
 
         return DB::transaction(function () use ($decharge, $materiel, $motif, $quantite, $message, $auteur) {
             $this->verrouillerCycle((int) $decharge->cycle_id);
             $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
-            if (! $this->perimetre->peutVoir($auteur, $actuelle)) {
-                throw new RegleLogistique(self::HORS_PERIMETRE);
-            }
             if (! $actuelle->estPartie()) {
                 throw new RegleLogistique("La décharge n'est pas encore partie.");
             }
@@ -142,9 +139,6 @@ class ReclamationService
             'cloture_sans_remplacement' => $this->exigerDroitAdministrer('Seul un responsable logistique peut clôturer une réclamation sans remplacement.'),
             default => $this->exigerDroitGerer(),
         };
-        if ($issue === 'remplacement_autorise' && $quantiteRemplacement === null) {
-            throw new InvalidArgumentException('La quantité à remplacer est obligatoire.');
-        }
         if ($issue === 'erreur_declaration' && $declarationErronee === null) {
             throw new InvalidArgumentException('La déclaration erronée est obligatoire.');
         }
@@ -154,9 +148,6 @@ class ReclamationService
             if ($actuelle->statut === 'resolue') {
                 throw new RegleLogistique('Cette réclamation est déjà résolue.');
             }
-            if ($actuelle->issue === 'remplacement_autorise') {
-                throw new RegleLogistique('Un remplacement est déjà autorisé pour cette réclamation.');
-            }
 
             $avant = ['statut' => $actuelle->statut, 'issue' => $actuelle->issue];
             $apres = ['issue' => $issue, 'decharge_id' => $decharge->id, 'materiel_id' => $actuelle->materiel_id, 'quantite' => $actuelle->quantite];
@@ -164,14 +155,29 @@ class ReclamationService
 
             switch ($issue) {
                 case 'remplacement_autorise':
-                    if ($quantiteRemplacement < 1 || $quantiteRemplacement > $actuelle->quantite) {
-                        throw new InvalidArgumentException("La quantité à remplacer doit être comprise entre 1 et {$actuelle->quantite}.");
+                    // Un remplacement déjà autorisé dont la décharge est annulée ou absente se reprend sur le même besoin.
+                    $besoin = BesoinRemplacement::where('reclamation_id', $actuelle->id)->lockForUpdate()->first();
+                    if ($besoin !== null) {
+                        if (Decharge::where('besoin_remplacement_id', $besoin->id)->where('statut_document', '!=', 'annulee')->exists()) {
+                            throw new RegleLogistique('Un remplacement est déjà autorisé pour cette réclamation.');
+                        }
+                        if ($quantiteRemplacement !== null && $quantiteRemplacement !== (int) $besoin->quantite) {
+                            throw new RegleLogistique("La quantité du remplacement autorisé est de {$besoin->quantite} : elle ne peut pas changer.");
+                        }
+                        $quantiteRemplacement = (int) $besoin->quantite;
+                    } else {
+                        if ($quantiteRemplacement === null) {
+                            throw new InvalidArgumentException('La quantité à remplacer est obligatoire.');
+                        }
+                        if ($quantiteRemplacement < 1 || $quantiteRemplacement > $actuelle->quantite) {
+                            throw new InvalidArgumentException("La quantité à remplacer doit être comprise entre 1 et {$actuelle->quantite}.");
+                        }
+                        $besoin = BesoinRemplacement::create([
+                            'cycle_id' => $cycle->id, 'destinataire_id' => $decharge->destinataire_id,
+                            'materiel_id' => $actuelle->materiel_id, 'quantite' => $quantiteRemplacement,
+                            'motif' => $motif, 'autorise_par' => auth()->id(), 'reclamation_id' => $actuelle->id,
+                        ]);
                     }
-                    $besoin = BesoinRemplacement::create([
-                        'cycle_id' => $cycle->id, 'destinataire_id' => $decharge->destinataire_id,
-                        'materiel_id' => $actuelle->materiel_id, 'quantite' => $quantiteRemplacement,
-                        'motif' => $motif, 'autorise_par' => auth()->id(), 'reclamation_id' => $actuelle->id,
-                    ]);
                     $brouillon = $this->decharges->preparerRemplacement($besoin);
                     $statut = 'en_traitement';
                     $apres += ['quantite_remplacement' => $quantiteRemplacement, 'besoin_remplacement_id' => $besoin->id, 'decharge_remplacement_id' => $brouillon->id];
@@ -183,11 +189,17 @@ class ReclamationService
                     break;
 
                 case 'cloture_sans_remplacement':
-                    $arbitrage = $this->arbitrages->cloturerAvecEcart(
-                        $cycle, Destinataire::findOrFail($decharge->destinataire_id), Materiel::findOrFail($actuelle->materiel_id),
-                        (int) $actuelle->quantite, 0, $motif,
-                    );
-                    $apres += ['arbitrage_id' => $arbitrage->id];
+                    if (! $cycle->estOuvert()) {
+                        throw new RegleLogistique("Cycle clôturé : clôture d'écart impossible.");
+                    }
+                    $destinataire = Destinataire::findOrFail($decharge->destinataire_id);
+                    $materiel = Materiel::findOrFail($actuelle->materiel_id);
+                    // L'abandon ne dépasse pas ce qu'il reste à réceptionner (un remplacement partiel a pu en couvrir une part).
+                    $abandon = min((int) $actuelle->quantite, $this->arbitrages->resteAReceptionner($cycle, $destinataire, $materiel));
+                    $arbitrage = $abandon > 0
+                        ? $this->arbitrages->cloturerAvecEcart($cycle, $destinataire, $materiel, $abandon, 0, $motif)
+                        : null;
+                    $apres += ['abandon_reception' => $abandon, 'arbitrage_id' => $arbitrage?->id];
                     break;
 
                 default: // article_retrouve

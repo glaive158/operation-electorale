@@ -406,16 +406,19 @@ class ReclamationTest extends TestCase
         $this->assertSame('resolue', $decharge->refresh()->statut_reclamation);
     }
 
-    public function test_cloture_sans_remplacement_refusee_si_l_ecart_l_est(): void
+    public function test_cloture_sans_remplacement_sans_reste_a_receptionner_ne_cree_pas_d_arbitrage(): void
     {
         $decharge = $this->partie();
         $this->deposerRecue($decharge, [$this->urnes->id => 100]);
         $reclamation = $this->ouvrir($decharge, 10);
 
-        // Rien à abandonner : tout est déjà reçu utilisable.
-        $this->refus(fn () => $this->service()->resoudre($reclamation, 'cloture_sans_remplacement', 'Écart accepté.'), 'Abandon supérieur au reste à réceptionner pour Urnes : reste 0.');
-        $this->assertSame('ouverte', $reclamation->refresh()->statut);
+        // Tout est déjà reçu utilisable : rien à abandonner, la réclamation est close sans arbitrage.
+        $this->service()->resoudre($reclamation, 'cloture_sans_remplacement', 'Réception complète finalement.');
+
         $this->assertSame(0, Arbitrage::count());
+        $this->assertSame(['resolue', 'cloture_sans_remplacement'], [$reclamation->refresh()->statut, $reclamation->issue]);
+        $this->assertSame('resolue', $decharge->refresh()->statut_reclamation);
+        $this->assertSame(0, JournalEntree::where('action', 'resolution_reclamation')->sole()->apres['arbitrage_id'] ?? 0);
     }
 
     public function test_cycle_clos_ouvrir_et_issues_sans_stock_acceptes(): void
@@ -481,6 +484,83 @@ class ReclamationTest extends TestCase
         $this->assertNull($remplacement->refresh()->besoin_remplacement_id);
         $this->assertSame(10, $nouvelle->lignes->sole()->quantite);
         $this->refus(fn () => $service->preparerRemplacement(BesoinRemplacement::findOrFail($besoinId)), 'Ce remplacement a déjà sa décharge.');
+    }
+
+    public function test_remplacement_en_partie_defectueux_se_cloture_sur_le_reste_a_receptionner(): void
+    {
+        $decharge = $this->partie();
+        $this->deposerRecue($decharge, [$this->urnes->id => ['recu' => 100, 'defectueux' => 10]]);
+        $reclamation = $this->ouvrir($decharge, 10, 'defectueux');
+        $this->service()->resoudre($reclamation, 'remplacement_autorise', 'Urnes à remplacer.', 10);
+        $this->recevoirRemplacement(Decharge::where('nature', 'remplacement')->sole(), 10, 5);
+        $this->assertSame('en_traitement', $reclamation->refresh()->statut);
+
+        // Utilisable : 90 + 5 = 95 sur 100 ; l'abandon est plafonné à 5 et non à la quantité réclamée (10).
+        $this->service()->resoudre($reclamation, 'cloture_sans_remplacement', 'On garde les 5 restantes.');
+
+        $arbitrage = Arbitrage::sole();
+        $this->assertSame([5, 0], [$arbitrage->quantite_abandon_reception, $arbitrage->quantite_expedition_annulee]);
+        $reclamation->refresh();
+        $this->assertSame(['resolue', 'cloture_sans_remplacement'], [$reclamation->statut, $reclamation->issue]);
+        $this->assertSame('resolue', $decharge->refresh()->statut_reclamation);
+        $entree = JournalEntree::where('action', 'resolution_reclamation')->orderByDesc('id')->first();
+        $this->assertSame('remplacement_autorise', $entree->avant['issue']);
+        $this->assertSame('cloture_sans_remplacement', $entree->apres['issue']);
+    }
+
+    public function test_article_retrouve_sur_une_reclamation_a_remplacement_autorise(): void
+    {
+        $decharge = $this->partie(80);
+        $reclamation = $this->ouvrir($decharge, 10);
+        $this->service()->resoudre($reclamation, 'remplacement_autorise', 'Remplacement.', 10);
+
+        $this->service()->resoudre($reclamation->refresh(), 'article_retrouve', 'Retrouvées finalement.');
+
+        $this->assertSame(['resolue', 'article_retrouve'], [$reclamation->refresh()->statut, $reclamation->issue]);
+        $this->assertSame('resolue', $decharge->refresh()->statut_reclamation);
+        $entree = JournalEntree::where('action', 'resolution_reclamation')->orderByDesc('id')->first();
+        $this->assertSame('remplacement_autorise', $entree->avant['issue']);
+    }
+
+    public function test_remplacement_annule_se_reautorise_sur_le_meme_besoin(): void
+    {
+        $decharge = $this->partie(80);
+        $reclamation = $this->ouvrir($decharge, 10);
+        $service = app(DechargeService::class);
+        $this->service()->resoudre($reclamation, 'remplacement_autorise', 'Remplacement.', 10);
+        $premier = Decharge::where('nature', 'remplacement')->sole();
+        $besoinId = $premier->besoin_remplacement_id;
+        $this->refus(fn () => $this->service()->resoudre($reclamation->refresh(), 'remplacement_autorise', 'Encore.', 10), 'Un remplacement est déjà autorisé pour cette réclamation.');
+
+        $service->valider($premier);
+        $service->annuler($premier, 'Erreur de saisie.');
+
+        $this->refus(fn () => $this->service()->resoudre($reclamation->refresh(), 'remplacement_autorise', 'Autre quantité.', 7), 'La quantité du remplacement autorisé est de 10 : elle ne peut pas changer.');
+        $this->service()->resoudre($reclamation->refresh(), 'remplacement_autorise', 'Nouvelle décharge.');
+
+        $this->assertSame(1, BesoinRemplacement::count());
+        $nouvelle = Decharge::where('nature', 'remplacement')->where('statut_document', 'brouillon')->sole();
+        $this->assertSame($besoinId, $nouvelle->besoin_remplacement_id);
+        $this->assertNull($premier->refresh()->besoin_remplacement_id);
+        $this->assertSame(10, $nouvelle->lignes->sole()->quantite);
+        $this->assertSame('en_traitement', $reclamation->refresh()->statut);
+        $this->assertSame(110, app(EngagementService::class)->besoin($this->cycle, $this->prefecture, $this->urnes));
+    }
+
+    public function test_brouillon_de_remplacement_ni_supprime_ni_gonfle(): void
+    {
+        $decharge = $this->partie(80);
+        $this->service()->resoudre($this->ouvrir($decharge, 10), 'remplacement_autorise', 'Remplacement.', 10);
+        $brouillon = Decharge::where('nature', 'remplacement')->sole();
+        $service = app(DechargeService::class);
+
+        $this->refus(fn () => $service->supprimerBrouillon($brouillon, 'Motif.'), 'Ce brouillon porte un remplacement autorisé : il ne peut pas être supprimé.');
+        $this->assertSame(1, Decharge::where('nature', 'remplacement')->count());
+
+        $ligne = $brouillon->lignes->sole();
+        $this->refus(fn () => $service->modifierLigne($ligne, 11, null), 'La quantité d\'un remplacement ne peut pas dépasser celle du besoin autorisé (10).');
+        $service->modifierLigne($ligne, 6, null);
+        $this->assertSame(6, $ligne->refresh()->quantite);
     }
 
     public function test_service_sans_auteur_refuse(): void
