@@ -72,7 +72,10 @@ class ArbitrageService
 
         return DB::transaction(function () use ($cycle, $destinataire, $materiel, $abandonReception, $expeditionAnnulee, $motif) {
             $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->first();
-            if ($actuel === null || ! $actuel->estOuvert()) {
+            if ($actuel === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
+            }
+            if (! $actuel->estOuvert()) {
                 throw new RegleLogistique('Cycle clôturé : clôture d\'écart impossible.');
             }
 
@@ -111,7 +114,7 @@ class ArbitrageService
     private function receptionAVerifier(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): bool
     {
         return Remise::query()
-            ->whereIn('decharge_id', Decharge::where('cycle_id', $cycle->id)->select('id'))
+            ->whereIn('decharge_id', Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)->select('id'))
             ->where('a_type', 'destinataire')->where('a_id', $destinataire->id)
             ->where('statut', 'a_verifier')
             ->whereHas('lignes', fn ($q) => $q->where('materiel_id', $materiel->id))
@@ -137,7 +140,8 @@ class ArbitrageService
 
     /**
      * Reçu utilisable (reçu moins défectueux) retenu au destinataire final : déclarations retenues des remises
-     * non annulées adressées au destinataire, pour les décharges du cycle. La tâche des indicateurs reprendra
+     * non annulées adressées au destinataire, pour les décharges du cycle qui lui sont destinées (ce que le préfet
+     * détient pour un sous-préfet ne compte pas pour le préfet). La tâche des indicateurs reprendra
      * ce calcul.
      */
     private function recuUtilisableRetenu(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): int
@@ -146,7 +150,7 @@ class ArbitrageService
             ->join('declarations', 'declarations.id', '=', 'declaration_lignes.declaration_id')
             ->join('remises', 'remises.id', '=', 'declarations.remise_id')
             ->join('decharges', 'decharges.id', '=', 'remises.decharge_id')
-            ->where('decharges.cycle_id', $cycle->id)
+            ->where('decharges.cycle_id', $cycle->id)->where('decharges.destinataire_id', $destinataire->id)
             ->where('remises.a_type', 'destinataire')->where('remises.a_id', $destinataire->id)
             ->where('remises.statut', '!=', 'annulee')
             ->where('declarations.statut', 'retenue')

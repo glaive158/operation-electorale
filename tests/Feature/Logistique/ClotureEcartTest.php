@@ -15,9 +15,12 @@ use App\Models\Logistique\Remise;
 use App\Models\User;
 use App\Services\Logistique\ArbitrageService;
 use App\Services\Logistique\BesoinService;
+use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\EngagementService;
+use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Tests\Support\PlanApprouveFictif;
 use Tests\TestCase;
@@ -151,18 +154,48 @@ class ClotureEcartTest extends TestCase
         $this->assertSame(80, $engagement->besoin($this->cycle, $this->prefecture, $this->urnes));
     }
 
-    public function test_seules_les_declarations_retenues_au_destinataire_final_comptent(): void
+    public function test_ce_qui_attend_chez_le_prefet_pour_un_sous_prefet_ne_compte_pas_pour_le_prefet(): void
     {
-        // Décharge de la sous-préfecture 1 via le préfet : la livraison au préfet n'est pas une réception finale.
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->sousPrefecture1, $this->urnes, 200]]);
+        // Deux décharges via le préfet pour la sous-préfecture 1 : l'une reçue (100), l'autre à vérifier (excédent).
+        $recue = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($recue, [$this->urnes->id => 100]);
+        $aVerifier = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 50]);
+        $this->deposerRecue($aVerifier, [$this->urnes->id => 60]);
+        $this->assertSame('a_verifier', Remise::where('decharge_id', $aVerifier->id)->where('etape', 'livraison')->value('statut'));
+
+        // Les 100 reçues par le préfet pour le sous-préfet ne réduisent pas le reste du préfet, et la
+        // réception à vérifier de la sous-préfecture ne bloque pas l'abandon du préfet.
+        $this->cloturer(100, 0, $this->urnes, $this->prefecture);
+        $this->assertSame(1, Arbitrage::count());
+        $this->refus(fn () => $this->cloturer(1, 0, $this->urnes, $this->prefecture),
+            'Abandon supérieur au reste à réceptionner pour Urnes : reste 0.');
+    }
+
+    public function test_la_redistribution_retenue_reduit_le_reste_du_sous_prefet(): void
+    {
         $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->sousPrefecture1, $this->urnes, 100]]);
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
         $this->deposerRecue($decharge, [$this->urnes->id => 100]);
 
-        // Rien n'est encore reçu par la sous-préfecture : tout l'objectif reste à réceptionner.
-        $this->cloturer(100, 0, $this->urnes, $this->sousPrefecture1);
+        // Reçu par le préfet seulement : rien n'est encore reçu par la sous-préfecture.
+        $this->assertSame(0, Arbitrage::count());
+
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $this->actingAs($prefet);
+        $redistribution = app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 80]);
+        $this->actingAs($this->autoriteFictive($this->sousPrefecture1));
+        app(DeclarationService::class)->declarer(
+            $redistribution, 'compte', ['nom' => 'Ibrahima Ba', 'qualite' => 'Sous-préfet'],
+            [$this->urnes->id => ['recu' => 80, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        );
+        $this->actingAs($this->responsable);
+
+        // 100 de dotation, 80 retenus à la sous-préfecture : reste 20.
+        $this->refus(fn () => $this->cloturer(21, 0, $this->urnes, $this->sousPrefecture1),
+            'Abandon supérieur au reste à réceptionner pour Urnes : reste 20.');
+        $this->cloturer(20, 0, $this->urnes, $this->sousPrefecture1);
         $this->assertSame(1, Arbitrage::count());
-        $this->refus(fn () => $this->cloturer(1, 0, $this->urnes, $this->sousPrefecture1),
-            'Abandon supérieur au reste à réceptionner pour Urnes : reste 0.');
     }
 
     public function test_reserve_au_responsable(): void
