@@ -22,7 +22,7 @@
         'initial' => $decharge->statut_document !== 'brouillon',
         'annulation' => $annulee,
         'reception' => $decharge->documents->contains('exemplaire', 'reception')
-            || ($decharge->statut_document === 'validee' && $decharge->statut_acheminement === 'recue_destinataire'),
+            || app(\App\Services\Logistique\DechargePdfService::class)->receptionEmissible($decharge),
     ]);
     $documents = $decharge->documents->keyBy('exemplaire');
     $classesStatutRemise = ['en_attente' => 'bg-slate-100 text-slate-600', 'recue' => 'bg-green-100 text-green-700', 'a_verifier' => 'bg-amber-100 text-amber-700', 'annulee' => 'bg-red-100 text-red-700'];

@@ -3,9 +3,11 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
+use App\Models\Logistique\Remise;
 use chillerlan\QRCode\Output\QROutputInterface;
 use chillerlan\QRCode\QRCode;
 use chillerlan\QRCode\QROptions;
@@ -31,7 +33,10 @@ class DechargePdfService
 
     private const ALTERE = 'Fichier archivé altéré ou absent : réimpression refusée.';
 
-    public function __construct(private readonly DechargeService $decharges) {}
+    public function __construct(
+        private readonly DechargeService $decharges,
+        private readonly RemiseService $remises,
+    ) {}
 
     /** HTML du document. Un brouillon ne se rend qu'en aperçu filigrané ; les autres statuts, depuis donnees_gelees. */
     public function html(Decharge $decharge, string $exemplaire, bool $apercu = false): string
@@ -272,10 +277,40 @@ class DechargePdfService
         }
     }
 
-    /** Le destinataire final a une réception retenue : décharge validée, statut d'acheminement « reçue par le destinataire ». */
-    private function receptionEmissible(Decharge $decharge): bool
+    /**
+     * Le destinataire final a reçu sa part et rien n'est en cours : décharge validée, « reçue par le destinataire ».
+     * Pour une décharge livrée au préfet, l'exemplaire n'est émissible que lorsque le reliquat du préfet est soldé
+     * (ou couvert par un écart accepté pour le destinataire et l'article) et qu'aucune redistribution de la
+     * décharge n'attend sa déclaration ou une vérification : un exemplaire est archivé pour de bon.
+     */
+    public function receptionEmissible(Decharge $decharge): bool
     {
-        return $decharge->statut_document === 'validee' && $decharge->statut_acheminement === 'recue_destinataire';
+        if ($decharge->statut_document !== 'validee' || $decharge->statut_acheminement !== 'recue_destinataire') {
+            return false;
+        }
+        if ($decharge->remis_a_id === null || (int) $decharge->remis_a_id === (int) $decharge->destinataire_id) {
+            return true;
+        }
+
+        $enCours = Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
+            ->whereIn('statut', ['en_attente', 'a_verifier'])->exists();
+        if ($enCours) {
+            return false;
+        }
+
+        foreach ($this->remises->soldePrefet($decharge) as $materielId => $solde) {
+            if ($solde['reliquat'] <= 0) {
+                continue;
+            }
+            $abandonne = (int) Arbitrage::where('cycle_id', $decharge->cycle_id)->where('objet', 'cloture_ecart')
+                ->where('destinataire_id', $decharge->destinataire_id)->where('materiel_id', $materielId)
+                ->sum('quantite_abandon_reception');
+            if ($solde['reliquat'] > $abandonne) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function exigerExemplaire(string $exemplaire): void

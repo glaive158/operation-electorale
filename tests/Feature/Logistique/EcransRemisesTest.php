@@ -16,6 +16,7 @@ use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\ReclamationService;
+use App\Services\Logistique\RemiseService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Exceptions;
@@ -214,6 +215,30 @@ class EcransRemisesTest extends TestCase
         // La retenue amène la réception par le destinataire : l'exemplaire de réception est émis.
         $this->assertSame(1, DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', 'reception')->count());
         $this->get(route('logistique.declarations.a-verifier', $this->cycle))->assertOk()->assertSee('Aucune réception à vérifier');
+    }
+
+    public function test_retenue_sur_une_reception_partielle_n_emet_pas_et_n_avertit_pas(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 50]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 50]);
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $remise = $this->enTantQue($prefet, fn () => app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 20]));
+        $this->enTantQue($this->autoriteFictive($this->sousPrefecture1), fn () => app(DeclarationService::class)->declarer(
+            $remise, 'compte', ['nom' => 'Ibrahima Ba', 'qualite' => 'Sous-préfet'],
+            [$this->urnes->id => ['recu' => 20, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        ));
+        $this->enTantQue($prefet, fn () => app(DeclarationService::class)->declarer(
+            $remise->refresh(), 'tablette', ['nom' => 'Préfet', 'qualite' => 'Préfet'],
+            [$this->urnes->id => ['recu' => 15, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        ));
+        $tablette = Declaration::where('remise_id', $remise->id)->where('mode', 'tablette')->sole();
+        $this->actingAs($this->responsable);
+
+        $this->post(route('logistique.declarations.retenir', $tablette), ['motif' => 'Constat du préfet.'])
+            ->assertSessionHas('success')->assertSessionMissing('warning');
+
+        $this->assertSame('recue_destinataire', $decharge->fresh()->statut_acheminement);
+        $this->assertSame(0, DechargeDocument::count());
     }
 
     public function test_retenue_conservee_quand_l_emission_echoue(): void

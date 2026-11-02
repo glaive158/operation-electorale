@@ -72,7 +72,8 @@ class ArbitrageController extends Controller
 
         $retour = back()->with('success', $succes);
         $decharge = Decharge::find($declaration->decharge_id);
-        if ($decharge === null || $decharge->statut_document !== 'validee' || $decharge->statut_acheminement !== 'recue_destinataire') {
+        // Un état non émissible (réception partielle, redistribution en cours) est attendu : on n'émet pas, sans avertir.
+        if ($decharge === null || ! $this->pdf->receptionEmissible($decharge)) {
             return $retour;
         }
 

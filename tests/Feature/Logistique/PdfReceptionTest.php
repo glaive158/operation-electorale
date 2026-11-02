@@ -12,6 +12,7 @@ use App\Services\Logistique\DechargePdfService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\DonneesDecharge;
+use App\Services\Logistique\RemiseService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -119,6 +120,73 @@ class PdfReceptionTest extends TestCase
             $position = $trouve + mb_strlen($morceau);
         }
         $this->assertStringNotContainsString('Annexe de calcul', $texte);
+    }
+
+    /** Redistribution par le préfet à la sous-préfecture 1, déclarée reçue par elle ; renvoie la remise. */
+    private function redistribuerEtRecevoir(Decharge $decharge, int $quantite, bool $declarer = true): Remise
+    {
+        $this->actingAs($this->autoriteFictive($this->prefecture));
+        $remise = app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => $quantite]);
+        if ($declarer) {
+            $this->actingAs($this->autoriteFictive($this->sousPrefecture1));
+            app(DeclarationService::class)->declarer(
+                $remise, 'compte', ['nom' => 'Ibrahima Ba', 'qualite' => 'Sous-préfet'],
+                [$this->urnes->id => ['recu' => $quantite, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+            );
+        }
+        $this->actingAs($this->responsable);
+
+        return $remise;
+    }
+
+    public function test_reception_partielle_via_le_prefet_non_emissible_puis_emise_avec_le_total(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+
+        $this->redistribuerEtRecevoir($decharge, 40);
+        $decharge->refresh();
+        $this->assertSame('recue_destinataire', $decharge->statut_acheminement);
+        $this->assertFalse($this->pdf()->receptionEmissible($decharge));
+        try {
+            $this->pdf()->emettre($decharge, 'reception');
+            $this->fail('Une réception partielle ne doit pas être archivée.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Ce document ne peut pas être émis pour cette décharge.', $e->getMessage());
+        }
+        $this->assertSame(0, DechargeDocument::count());
+
+        $this->redistribuerEtRecevoir($decharge, 60);
+        $this->assertTrue($this->pdf()->receptionEmissible($decharge->refresh()));
+        $document = $this->pdf()->emettre($decharge, 'reception');
+
+        $texte = $this->texte($this->pdf()->html($decharge, 'reception'));
+        $this->assertSame('reception', $document->exemplaire);
+        $this->assertSame(100, DonneesDecharge::reception($decharge)['lignes'][0]['recu']);
+        $this->assertStringContainsString('100', $texte);
+    }
+
+    public function test_redistribution_en_attente_bloque_l_emission_meme_sans_reliquat(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $this->redistribuerEtRecevoir($decharge, 70);
+        $this->redistribuerEtRecevoir($decharge, 30, declarer: false);
+
+        $this->assertSame(0, app(RemiseService::class)->soldePrefet($decharge)->get($this->urnes->id)['reliquat']);
+        $this->assertFalse($this->pdf()->receptionEmissible($decharge->refresh()));
+    }
+
+    public function test_reliquat_couvert_par_un_abandon_accepte_rend_la_reception_emissible(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $this->redistribuerEtRecevoir($decharge, 40);
+        $this->assertFalse($this->pdf()->receptionEmissible($decharge->refresh()));
+
+        app(ArbitrageService::class)->cloturerAvecEcart($this->cycle, $this->sousPrefecture1, $this->urnes, 60, 0, 'Reliquat abandonné.');
+
+        $this->assertTrue($this->pdf()->receptionEmissible($decharge->refresh()));
     }
 
     public function test_reception_archivee_et_idempotente(): void
