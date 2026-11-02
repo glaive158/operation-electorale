@@ -2,6 +2,7 @@
 
 namespace App\Services\Logistique;
 
+use App\Exceptions\Logistique\DeclarationEnCours;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Cycle;
@@ -12,14 +13,16 @@ use App\Models\Logistique\DeclarationPiece;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
-use App\Models\Logistique\PieceJointe;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\RemiseLigne;
 use App\Models\User;
 use App\Support\Canonique;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
@@ -58,7 +61,7 @@ class DeclarationService
      * Pour une déclaration de tablette, `$preuve` porte le résultat de la vérification d'identité, déjà
      * obtenu hors de toute transaction (PreuveService::verifier garde ainsi son journal et son compteur
      * d'échecs même si l'enregistrement est refusé) : {verification, bloc_empreinte, signataire_user_id,
-     * delegation_id}. Sans `$preuve`, la déclaration est enregistrée comme au plan 4 (aucune vérification).
+     * delegation_id}. Sans `$preuve`, une déclaration de tablette est « non vérifiée » (comme le repli sans code).
      * Une vérification qui n'établit pas l'identité (échec, à vérifier, non vérifiée) ajoute l'anomalie
      * « identite » : la déclaration n'est jamais retenue automatiquement.
      *
@@ -163,7 +166,8 @@ class DeclarationService
                 foreach ($pieces as $empreintePiece => $role) {
                     DeclarationPiece::create([
                         'declaration_id' => $declaration->id, 'empreinte' => $empreintePiece, 'role' => $role,
-                        'piece_jointe_id' => PieceJointe::where('empreinte', $empreintePiece)->value('id'),
+                        // Liée seulement si l'auteur a lui-même envoyé (ou prouvé posséder) ces octets.
+                        'piece_jointe_id' => $this->pieceJointes->pieceDe($auteur, $empreintePiece)?->id,
                     ]);
                 }
 
@@ -266,15 +270,37 @@ class DeclarationService
         $empreinte = self::empreinte((int) $remise->id, 'tablette', $signataire, $lignes);
         $bloc = PreuveService::empreinteBloc($blocPreuve);
 
+        // Hors du périmètre de l'appelant, la remise n'existe pas : 404, avant même de prendre le verrou.
+        $this->exigerPerimetre($auteur, $remise);
+
+        // Toute la séquence (rejeu, contrôles, vérification du code, enregistrement) est sérialisée par remise :
+        // deux envois simultanés de la même clé ne comptent pas deux fois un mauvais code.
+        $verrou = Cache::lock('logistique:declaration-tablette:'.$remise->id, 30);
+        try {
+            return $verrou->block(
+                (int) config('logistique.declaration_attente_verrou', 10),
+                fn () => $this->sequenceTablette($remise, $signataire, $lignes, $cle, $horodatageTerminal, $horodatage, $signataireUserId, $blocPreuve, $bloc, $pieces, $gps, $empreinte, $auteur),
+            );
+        } catch (LockTimeoutException) {
+            throw new DeclarationEnCours;
+        }
+    }
+
+    /**
+     * @param  list<array{materiel_id: int, recu: int, defectueux: int, observation: ?string}>  $lignes
+     * @return array{0: Declaration, 1: bool}
+     */
+    private function sequenceTablette(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, int $signataireUserId, ?string $blocPreuve, ?string $bloc, array $pieces, ?array $gps, string $empreinte, User $auteur): array
+    {
+        // Le verrou tenu, ce qu'un envoi concurrent vient d'enregistrer est visible : on rejoue avant tout.
         $rejeu = $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur);
         if ($rejeu !== null) {
             return [$rejeu, false];
         }
 
-        $decharge = Decharge::findOrFail($remise->decharge_id);
         $actuelle = Remise::findOrFail($remise->id);
+        $this->exigerPerimetre($auteur, $actuelle);
         $this->controlerEtape($actuelle);
-        $this->controlerDroit($auteur, $actuelle, $decharge, 'tablette');
         $this->controlerStatut($actuelle, 'tablette');
 
         $preuve = $this->verifierIdentite(
@@ -286,7 +312,7 @@ class DeclarationService
                 $actuelle, 'tablette', $signataire, array_column($lignes, null, 'materiel_id'), $cle, $horodatage, $preuve, $pieces, $gps,
             );
         } catch (UniqueConstraintViolationException $e) {
-            // Deux envois simultanés de la même clé : le second retrouve le premier.
+            // Filet : une autre écriture de la même clé a échappé au verrou ; on retrouve celle qui a gagné.
             $rejeu = str_contains($e->getMessage(), 'cle_idempotence') ? $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur) : null;
             if ($rejeu === null) {
                 throw $e;
@@ -296,6 +322,18 @@ class DeclarationService
         }
 
         return [$declaration, $declaration->wasRecentlyCreated];
+    }
+
+    /** Une remise que l'appelant n'a pas à connaître est une remise inconnue (404), pas un refus de règle. */
+    private function exigerPerimetre(User $auteur, Remise $remise): void
+    {
+        $actuelle = Remise::findOrFail($remise->id);
+        $decharge = Decharge::findOrFail($actuelle->decharge_id);
+        try {
+            $this->controlerDroit($auteur, $actuelle, $decharge, 'tablette');
+        } catch (RegleLogistique) {
+            throw (new ModelNotFoundException)->setModel(Remise::class, [$remise->id]);
+        }
     }
 
     /**
@@ -389,7 +427,10 @@ class DeclarationService
     private function preuve(string $mode, ?array $preuve): ?array
     {
         if ($preuve === null) {
-            return null;
+            // Une déclaration de tablette sans vérification n'établit pas l'identité de son signataire.
+            return $mode === 'tablette'
+                ? ['verification' => 'non_verifiee', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null]
+                : null;
         }
         if ($mode !== 'tablette') {
             throw new InvalidArgumentException('La preuve ne concerne que les déclarations de tablette.');

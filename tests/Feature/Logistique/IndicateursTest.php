@@ -89,7 +89,8 @@ class IndicateursTest extends TestCase
             $lignes[$l->materiel_id] = ['recu' => $recu, 'defectueux' => $defectueux, 'observation' => null];
         }
         $this->en($auteur, fn () => app(DeclarationService::class)->declarer(
-            $remise, $mode, ['nom' => 'Signataire', 'qualite' => 'Autorité'], $lignes, (string) Str::uuid(),
+            $remise, $mode, ['nom' => 'Signataire', 'qualite' => 'Autorité'], $lignes, (string) Str::uuid(), null,
+            $mode === 'tablette' ? ['verification' => 'verifiee_code', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null] : null,
         ));
     }
 

@@ -33,6 +33,12 @@ return [
     */
     'disque_pieces' => env('LOGISTIQUE_DISQUE_PIECES', 'local'),
 
+    /*
+    | Attente maximale (secondes) du verrou qui sérialise les déclarations de tablette d'une même remise :
+    | passé ce délai, l'envoi reçoit 409 et la tablette réessaie.
+    */
+    'declaration_attente_verrou' => (int) env('LOGISTIQUE_DECLARATION_ATTENTE_VERROU', 10),
+
     'lieu_document' => 'Dakar',
 
     /*

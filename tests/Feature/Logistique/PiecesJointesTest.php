@@ -7,6 +7,7 @@ use App\Models\Logistique\PieceJointe;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -56,12 +57,20 @@ class PiecesJointesTest extends TestCase
             ->assertJsonPath('piece.empreinte', $empreinte)
             ->assertJsonPath('piece.type_mime', 'image/jpeg')
             ->assertJsonPath('piece.taille', strlen($octets));
-        $seconde = $this->envoyer($octets, null, 'autre-nom.jpg', User::factory()->create(['role' => 'agent_transport']))->assertOk();
+        $autre = User::factory()->create(['role' => 'agent_transport']);
+        $tiers = User::factory()->create(['role' => 'agent_transport']);
+        $seconde = $this->envoyer($octets, null, 'autre-nom.jpg', $autre)->assertOk();
         $troisieme = $this->envoyer($octets)->assertOk();
 
         $this->assertSame($premiere->json('piece'), $seconde->json('piece'));
         $this->assertSame($premiere->json('piece'), $troisieme->json('piece'));
         $this->assertSame(1, PieceJointe::count());
+        // Les deux comptes qui ont envoyé les octets les possèdent ; un tiers non.
+        $this->assertSame(2, DB::table('piece_possessions')->count());
+        Sanctum::actingAs($autre, ['terrain']);
+        $this->call('HEAD', '/api/terrain/pieces/'.$empreinte)->assertOk();
+        Sanctum::actingAs($tiers, ['terrain']);
+        $this->call('HEAD', '/api/terrain/pieces/'.$empreinte)->assertNotFound();
         $this->assertSame(1, JournalEntree::where('action', 'envoi_piece')->count());
         $piece = PieceJointe::firstOrFail();
         $this->assertSame('pieces/'.substr($empreinte, 0, 2).'/'.$empreinte.'.jpg', $piece->chemin);
@@ -109,6 +118,12 @@ class PiecesJointesTest extends TestCase
 
         $this->assertSame(0, PieceJointe::count());
         $this->assertSame([], Storage::disk('pieces')->allFiles());
+    }
+
+    public function test_fichier_vide_refuse(): void
+    {
+        $this->envoyer('', hash('sha256', ''))->assertStatus(422)->assertJsonPath('message', 'Le fichier est vide.');
+        $this->assertSame(0, PieceJointe::count());
     }
 
     public function test_taille_maximale_huit_mo(): void
@@ -171,6 +186,7 @@ class PiecesJointesTest extends TestCase
         $this->assertSame('image/jpeg', $reponse->headers->get('Content-Type'));
         $this->assertSame('nosniff', $reponse->headers->get('X-Content-Type-Options'));
         $this->assertStringContainsString('private', (string) $reponse->headers->get('Cache-Control'));
+        $this->assertStringContainsString('no-store', (string) $reponse->headers->get('Cache-Control'));
 
         $this->actingAs($gestionnaire)->get('/logistique/pieces/'.hash('sha256', 'inconnue'))->assertNotFound();
         $this->actingAs($this->agent)->get('/logistique/pieces/'.$empreinte)->assertForbidden();

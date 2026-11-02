@@ -54,7 +54,10 @@ class PieceJointeService
             throw new InvalidArgumentException('Fichier illisible.');
         }
         $taille = (int) filesize($chemin);
-        if ($taille === 0 || $taille > self::TAILLE_MAX) {
+        if ($taille === 0) {
+            throw new InvalidArgumentException('Le fichier est vide.');
+        }
+        if ($taille > self::TAILLE_MAX) {
             throw new InvalidArgumentException('Le fichier doit peser 8 Mo au plus.');
         }
         $mime = (new \finfo(FILEINFO_MIME_TYPE))->file($chemin);
@@ -68,6 +71,8 @@ class PieceJointeService
 
         $existante = PieceJointe::where('empreinte', $empreinte)->first();
         if ($existante !== null) {
+            // Les mêmes octets, envoyés par un autre compte : il prouve les posséder, sans les redéposer.
+            $this->enregistrerPossession($existante, $auteur);
             $this->rattacherEnAttente([$empreinte]);
 
             return ['piece' => $existante, 'creee' => false];
@@ -93,6 +98,7 @@ class PieceJointeService
                 $piece = PieceJointe::create([
                     'empreinte' => $empreinte, 'chemin' => $rangement, 'taille' => $taille, 'type_mime' => $mime, 'user_id' => $auteur->id,
                 ]);
+                $this->enregistrerPossession($piece, $auteur);
                 $this->rattacherEnAttente([$empreinte]);
                 Journal::noter('piece_jointe', $piece->id, 'envoi_piece', null, [
                     'empreinte' => $empreinte, 'taille' => $taille, 'type_mime' => $mime,
@@ -103,6 +109,8 @@ class PieceJointeService
         } catch (UniqueConstraintViolationException) {
             // Envoi simultané de la même image : l'autre a gagné, le fichier est identique.
             $piece = PieceJointe::where('empreinte', $empreinte)->firstOrFail();
+            $this->enregistrerPossession($piece, $auteur);
+            $this->rattacherEnAttente([$empreinte]);
 
             return ['piece' => $piece, 'creee' => false];
         }
@@ -111,25 +119,47 @@ class PieceJointeService
     }
 
     /**
-     * Rattache à leur fichier les pièces de déclaration qui l'attendaient (les empreintes données, ou toutes).
+     * Rattache à leur fichier les pièces de déclaration qui l'attendaient (les empreintes données, ou toutes) :
+     * seulement si l'auteur de la déclaration a lui-même envoyé ces octets (ou prouvé les posséder).
      *
      * @param  list<string>|null  $empreintes
      */
     public function rattacherEnAttente(?array $empreintes = null): void
     {
         $attendues = DeclarationPiece::whereNull('piece_jointe_id')
-            ->when($empreintes !== null, fn ($q) => $q->whereIn('empreinte', $empreintes))->get();
+            ->when($empreintes !== null, fn ($q) => $q->whereIn('empreinte', $empreintes))
+            ->with('declaration:id,user_id')->get();
         foreach ($attendues as $attendue) {
-            $id = PieceJointe::where('empreinte', $attendue->empreinte)->value('id');
+            $id = DB::table('pieces_jointes')
+                ->join('piece_possessions', 'piece_possessions.piece_jointe_id', '=', 'pieces_jointes.id')
+                ->where('pieces_jointes.empreinte', $attendue->empreinte)
+                ->where('piece_possessions.user_id', $attendue->declaration->user_id)
+                ->value('pieces_jointes.id');
             if ($id !== null) {
                 DeclarationPiece::whereKey($attendue->id)->whereNull('piece_jointe_id')->update(['piece_jointe_id' => $id]);
             }
         }
     }
 
-    public function existe(string $empreinte): bool
+    /** L'utilisateur a envoyé ces octets, ou prouvé les posséder en les renvoyant. */
+    public function enregistrerPossession(PieceJointe $piece, User $utilisateur): void
     {
-        return PieceJointe::where('empreinte', $empreinte)->exists();
+        DB::table('piece_possessions')->insertOrIgnore([
+            'piece_jointe_id' => $piece->id, 'user_id' => $utilisateur->id, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
+    /** La pièce de cette empreinte, si l'utilisateur en a envoyé (ou prouvé posséder) les octets. */
+    public function pieceDe(User $utilisateur, string $empreinte): ?PieceJointe
+    {
+        return PieceJointe::where('empreinte', $empreinte)
+            ->whereIn('id', DB::table('piece_possessions')->where('user_id', $utilisateur->id)->select('piece_jointe_id'))
+            ->first();
+    }
+
+    public function possede(User $utilisateur, string $empreinte): bool
+    {
+        return $this->pieceDe($utilisateur, $empreinte) !== null;
     }
 
     /** La pièce du gestionnaire central : toute pièce stockée. */
@@ -166,7 +196,7 @@ class PieceJointeService
             'Content-Type' => $piece->type_mime,
             'X-Content-Type-Options' => 'nosniff',
             'Content-Security-Policy' => "default-src 'none'; sandbox",
-            'Cache-Control' => 'private, max-age=3600',
+            'Cache-Control' => 'private, no-store',
         ], 'inline');
     }
 

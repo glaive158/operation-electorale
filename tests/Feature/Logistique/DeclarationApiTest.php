@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Logistique;
 
+use App\Exceptions\Logistique\DeclarationEnCours;
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
@@ -14,12 +15,16 @@ use App\Models\User;
 use App\Services\Logistique\CodeReceptionService;
 use App\Services\Logistique\DeclarationService;
 use App\Services\Logistique\DelegationService;
+use App\Services\Logistique\PerimetreTerrain;
+use App\Services\Logistique\PieceJointeService;
 use App\Services\Logistique\PreuveService;
 use App\Support\Canonique;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -47,6 +52,8 @@ class DeclarationApiTest extends TestCase
     private Decharge $chargee;
 
     private Remise $remise;
+
+    private array $corpsFige = [];
 
     protected function setUp(): void
     {
@@ -151,9 +158,9 @@ class DeclarationApiTest extends TestCase
         return $this->postJson('/api/terrain/remises/'.($remise ?? $this->remise)->id.'/declarations', $corps);
     }
 
-    private function televerser(string $octets)
+    private function televerser(string $octets, ?User $par = null)
     {
-        Sanctum::actingAs($this->agent, ['terrain']);
+        Sanctum::actingAs($par ?? $this->agent, ['terrain']);
 
         return $this->withHeaders(['Accept' => 'application/json'])->post('/api/terrain/pieces', [
             'fichier' => UploadedFile::fake()->createWithContent('piece.jpg', $octets),
@@ -201,26 +208,47 @@ class DeclarationApiTest extends TestCase
         $this->assertStringNotContainsString(self::CODE, JournalEntree::all()->toJson());
     }
 
-    public function test_verification_hors_de_toute_transaction(): void
+    /**
+     * Remplace PreuveService par une version qui appelle $avant (contenu, cle, bloc, signataire, instant) après
+     * chaque vérification (la vraie est exécutée).
+     */
+    private function surveillerVerifier(\Closure $avant): void
     {
-        $niveauAvant = DB::transactionLevel();
-        $vu = [];
-        $sonde = function () use (&$vu) {
-            $vu[] = DB::transactionLevel();
-        };
-        $this->app->bind(PreuveService::class, fn ($app) => new class($app->make(CodeReceptionService::class), $app->make(DelegationService::class), $sonde) extends PreuveService
+        $this->app->bind(PreuveService::class, fn ($app) => new class($app->make(CodeReceptionService::class), $app->make(DelegationService::class), $avant) extends PreuveService
         {
-            public function __construct(CodeReceptionService $codes, DelegationService $delegations, private \Closure $sonde)
+            public function __construct(CodeReceptionService $codes, DelegationService $delegations, private \Closure $avant)
             {
                 parent::__construct($codes, $delegations);
             }
 
             public function verifier(array $contenu, string $cle, string $blocBase64, User $signataire, CarbonInterface $horodatageTerminal, ?Delegation $delegation): array
             {
-                ($this->sonde)();
+                $resultat = parent::verifier($contenu, $cle, $blocBase64, $signataire, $horodatageTerminal, $delegation);
+                // Après la vérification, avant l'enregistrement : là où un envoi concurrent s'intercalerait.
+                ($this->avant)($contenu, $cle, $blocBase64, $signataire, $horodatageTerminal);
 
-                return parent::verifier($contenu, $cle, $blocBase64, $signataire, $horodatageTerminal, $delegation);
+                return $resultat;
             }
+        });
+    }
+
+    /** Ce qu'un envoi concurrent de la même clé aurait enregistré entre-temps (même contenu ; bloc au choix). */
+    private function declarerEnConcurrence(array $corps, ?string $blocEmpreinte): void
+    {
+        app(DeclarationService::class)->declarer(
+            Remise::findOrFail($this->remise->id), 'tablette', ['nom' => 'Awa Diop', 'qualite' => 'Préfète'],
+            [$this->urnes->id => ['recu' => 20, 'defectueux' => 1, 'observation' => 'Caisse écrasée']],
+            $corps['cle'], Carbon::parse($corps['horodatage_terminal']),
+            ['verification' => 'verifiee_code', 'bloc_empreinte' => $blocEmpreinte, 'signataire_user_id' => $this->prefet->id, 'delegation_id' => null],
+        );
+    }
+
+    public function test_verification_hors_de_toute_transaction(): void
+    {
+        $niveauAvant = DB::transactionLevel();
+        $vu = [];
+        $this->surveillerVerifier(function () use (&$vu) {
+            $vu[] = DB::transactionLevel();
         });
 
         $corps = $this->avecBloc($this->corps());
@@ -229,6 +257,114 @@ class DeclarationApiTest extends TestCase
 
         // Une seule vérification (le rejeu n'en lance pas), au niveau de transaction d'avant la requête.
         $this->assertSame([$niveauAvant], $vu);
+    }
+
+    public function test_envoi_concurrent_de_la_meme_cle_ne_compte_qu_un_echec(): void
+    {
+        config(['logistique.declaration_attente_verrou' => 0]);
+        $refuse = [];
+        $this->surveillerVerifier(function () use (&$refuse) {
+            // Pendant la vérification du premier envoi, un second envoi identique arrive : il attend le verrou.
+            try {
+                app(DeclarationService::class)->declarerParTablette(
+                    $this->remise, ['nom' => 'Awa Diop', 'qualite' => 'Préfète'], $this->corps()['lignes'], self::CLE,
+                    $this->corpsFige['horodatage_terminal'], $this->prefet->id, $this->corpsFige['bloc_preuve'],
+                );
+            } catch (DeclarationEnCours) {
+                $refuse[] = true;
+            }
+        });
+        $this->corpsFige = $this->avecBloc($this->corps(), '000111');
+
+        $this->envoyer($this->corpsFige)->assertCreated();
+
+        $this->assertSame([true], $refuse);
+        $this->assertSame(1, $this->echecs());
+        $this->assertSame(1, Declaration::count());
+        // Le second envoi, réessayé une fois le verrou rendu, retrouve la déclaration sans recompter.
+        $this->envoyer($this->corpsFige)->assertOk();
+        $this->assertSame(1, $this->echecs());
+    }
+
+    public function test_verrou_tenu_409_sans_compter_d_echec(): void
+    {
+        config(['logistique.declaration_attente_verrou' => 0]);
+        $verrou = Cache::lock('logistique:declaration-tablette:'.$this->remise->id, 30);
+        $this->assertTrue($verrou->get());
+
+        $this->envoyer($this->avecBloc($this->corps(), '000111'))->assertStatus(409)
+            ->assertExactJson(['message' => 'Déclaration en cours de traitement, réessayez.']);
+        $this->assertSame(0, Declaration::count());
+        $this->assertSame(0, $this->echecs());
+
+        $verrou->release();
+        $this->envoyer($this->avecBloc($this->corps()))->assertCreated();
+    }
+
+    public function test_rejeu_entre_la_verification_et_l_enregistrement_retrouve_la_declaration(): void
+    {
+        // Filet sous verrou du cycle (declarer) : un envoi identique enregistré entre-temps est rejoué, pas dupliqué.
+        $corps = $this->avecBloc($this->corps());
+        $empreinte = PreuveService::empreinteBloc($corps['bloc_preuve']);
+        $this->surveillerVerifier(fn () => $this->declarerEnConcurrence($corps, $empreinte));
+
+        $this->envoyer($corps)->assertOk()->assertJsonPath('declaration.verification_identite', 'verifiee_code');
+        $this->assertSame(1, Declaration::count());
+    }
+
+    public function test_enregistrement_concurrent_avec_un_autre_bloc_refuse(): void
+    {
+        $corps = $this->avecBloc($this->corps());
+        $this->surveillerVerifier(fn () => $this->declarerEnConcurrence($corps, hash('sha256', 'autre bloc')));
+
+        $this->envoyer($corps)->assertStatus(422)
+            ->assertJsonPath('message', "Clé d'idempotence déjà utilisée pour un autre contenu.");
+        $this->assertSame(1, Declaration::count());
+    }
+
+    public function test_violation_d_unicite_sur_la_cle_rejoue_l_enregistrement_gagnant(): void
+    {
+        $corps = $this->avecBloc($this->corps());
+        $empreinte = PreuveService::empreinteBloc($corps['bloc_preuve']);
+        $service = new class(app(PerimetreTerrain::class), app(DelegationService::class), app(PreuveService::class), app(PieceJointeService::class)) extends DeclarationService
+        {
+            public bool $fait = false;
+
+            public ?\Closure $concurrent = null;
+
+            public function declarer(Remise $remise, string $mode, array $signataire, array $lignes, string $cle, ?CarbonInterface $horodatageTerminal = null, ?array $preuve = null, array $pieces = [], ?array $gps = null): Declaration
+            {
+                if (! $this->fait) {
+                    $this->fait = true;
+                    // Un autre envoi de la même clé a gagné la course à l'insertion.
+                    parent::declarer($remise, $mode, $signataire, $lignes, $cle, $horodatageTerminal, $preuve, $pieces, $gps);
+
+                    throw new UniqueConstraintViolationException('sqlite', 'insert into "declarations" ...', [], new \PDOException('UNIQUE constraint failed: declarations.cle_idempotence'));
+                }
+
+                return parent::declarer($remise, $mode, $signataire, $lignes, $cle, $horodatageTerminal, $preuve, $pieces, $gps);
+            }
+        };
+        $this->app->instance(DeclarationService::class, $service);
+
+        $this->envoyer($corps)->assertOk()->assertJsonPath('declaration.statut', 'retenue');
+        $this->assertSame(1, Declaration::count());
+        $this->assertSame(0, $this->echecs());
+        $this->assertNotNull($empreinte);
+    }
+
+    public function test_declaration_de_tablette_sans_preuve_non_verifiee(): void
+    {
+        $this->actingAs($this->agent);
+        $declaration = app(DeclarationService::class)->declarer(
+            $this->remise, 'tablette', ['nom' => 'Awa Diop', 'qualite' => 'Préfète'],
+            [$this->urnes->id => ['recu' => 20, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+        );
+
+        $declaration = $declaration->fresh();
+        $this->assertSame('non_verifiee', $declaration->verification_identite);
+        $this->assertSame(['identite'], $declaration->anomalies);
+        $this->assertSame('a_verifier', $declaration->statut);
     }
 
     public function test_retransmission_identique_trois_fois(): void
@@ -292,7 +428,11 @@ class DeclarationApiTest extends TestCase
         $corps = $this->avecBloc($this->corps());
         $this->envoyer($corps)->assertCreated();
 
-        $this->envoyer($corps, $this->prefet)->assertStatus(422)
+        // Le nouvel agent de la décharge est dans le périmètre, mais la clé n'est pas la sienne.
+        $nouvel = User::factory()->create(['role' => 'agent_transport']);
+        $this->chargee->forceFill(['agent_id' => $nouvel->id])->save();
+
+        $this->envoyer($corps, $nouvel)->assertStatus(422)
             ->assertJsonPath('message', "Clé d'idempotence déjà utilisée pour un autre contenu.");
     }
 
@@ -394,8 +534,8 @@ class DeclarationApiTest extends TestCase
         $autreAgent = User::factory()->create(['role' => 'agent_transport']);
 
         // Un code faux d'un agent hors périmètre n'est même pas compté : la vérification n'a pas lieu.
-        $this->envoyer($this->avecBloc($this->corps(), '000111'), $autreAgent)->assertStatus(422)
-            ->assertExactJson(['message' => 'Déclaration hors de votre périmètre.']);
+        $this->envoyer($this->avecBloc($this->corps(), '000111'), $autreAgent)->assertNotFound()
+            ->assertExactJson(['message' => 'Ressource introuvable.']);
 
         $this->assertSame(0, Declaration::count());
         $this->assertSame(0, $this->echecs());
@@ -524,6 +664,7 @@ class DeclarationApiTest extends TestCase
         $this->assertSame($photo, $reponse->streamedContent());
         $this->assertSame('image/jpeg', $reponse->headers->get('Content-Type'));
         $this->assertSame('nosniff', $reponse->headers->get('X-Content-Type-Options'));
+        $this->assertStringContainsString('no-store', (string) $reponse->headers->get('Cache-Control'));
         $this->actingAs($this->prefet)->get('/terrain/pieces/'.$empreinte)->assertOk();
 
         // Hors périmètre : 404, comme pour une pièce qui n'existe pas.
@@ -546,7 +687,34 @@ class DeclarationApiTest extends TestCase
         $this->actingAs($this->agent)->get('/terrain/pieces/'.$empreinte)->assertNotFound();
     }
 
+    public function test_piece_d_un_autre_compte_attendue_jusqu_a_l_envoi_par_son_auteur(): void
+    {
+        $photo = $this->jpeg('x');
+        $empreinte = hash('sha256', $photo);
+        $autre = User::factory()->create(['role' => 'agent_transport']);
+        $this->televerser($photo, $autre)->assertCreated();
+
+        // L'agent annonce des octets que seul un autre compte a déposés : il ne peut pas se les attribuer.
+        $this->envoyer($this->avecBloc($this->corps(['pieces' => [['empreinte' => $empreinte, 'role' => 'photo']]])))->assertCreated();
+        $this->assertNull(DeclarationPiece::firstOrFail()->piece_jointe_id);
+        $this->call('HEAD', '/api/terrain/pieces/'.$empreinte)->assertNotFound();
+
+        // Il prouve les posséder en les envoyant : doublon (200), et la pièce attendue est liée.
+        $this->televerser($photo)->assertOk();
+        $this->assertSame(PieceJointe::firstOrFail()->id, DeclarationPiece::firstOrFail()->piece_jointe_id);
+        $this->call('HEAD', '/api/terrain/pieces/'.$empreinte)->assertOk();
+        $this->assertSame(1, PieceJointe::count());
+    }
+
     /* ── Service : mode compte et filet de concurrence ── */
+
+    public function test_disque_des_pieces_hors_de_public(): void
+    {
+        $racine = (string) config('filesystems.disks.'.(require config_path('logistique.php'))['disque_pieces'].'.root');
+        $this->assertNotSame('', $racine);
+        $this->assertStringStartsNotWith(realpath(public_path()) ?: public_path(), $racine);
+        $this->assertStringNotContainsString(DIRECTORY_SEPARATOR.'public'.DIRECTORY_SEPARATOR, $racine.DIRECTORY_SEPARATOR);
+    }
 
     public function test_mode_compte_verification_compte(): void
     {

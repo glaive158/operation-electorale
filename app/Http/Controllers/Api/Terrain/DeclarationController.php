@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Terrain;
 
+use App\Exceptions\Logistique\DeclarationEnCours;
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Remise;
@@ -48,17 +49,21 @@ class DeclarationController extends Controller
             $pieces[$piece['empreinte']] = $piece['role'];
         }
 
-        [$declaration, $creee] = $this->declarations->declarerParTablette(
-            $remise,
-            ['nom' => $donnees['signataire']['nom'], 'qualite' => $donnees['signataire']['qualite']],
-            $donnees['lignes'],
-            $donnees['cle'],
-            $donnees['horodatage_terminal'],
-            (int) $donnees['signataire']['user_id'],
-            $donnees['bloc_preuve'] ?? null,
-            $pieces,
-            $donnees['gps'] ?? null,
-        );
+        try {
+            [$declaration, $creee] = $this->declarations->declarerParTablette(
+                $remise,
+                ['nom' => $donnees['signataire']['nom'], 'qualite' => $donnees['signataire']['qualite']],
+                $donnees['lignes'],
+                $donnees['cle'],
+                $donnees['horodatage_terminal'],
+                (int) $donnees['signataire']['user_id'],
+                $donnees['bloc_preuve'] ?? null,
+                $pieces,
+                $donnees['gps'] ?? null,
+            );
+        } catch (DeclarationEnCours $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
 
         return response()->json(['declaration' => $this->representation($declaration)], $creee ? 201 : 200);
     }

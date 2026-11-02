@@ -287,7 +287,8 @@ class PdfReceptionTest extends TestCase
         try {
             app(DeclarationService::class)->declarer(
                 $remise->load('lignes'), 'tablette', ['nom' => 'Agent', 'qualite' => 'Transport'],
-                [$this->urnes->id => ['recu' => $recu, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+                [$this->urnes->id => ['recu' => $recu, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(), null,
+                ['verification' => 'verifiee_code', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null],
             );
         } finally {
             $this->actingAs($auteur);

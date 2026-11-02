@@ -26,6 +26,9 @@ class ArbitrageDeclarationTest extends TestCase
 
     private const SIGNATAIRE = ['nom' => 'Awa Fall', 'qualite' => 'Préfet'];
 
+    /** Une tablette dont l'identité est établie : sans preuve, une déclaration de tablette n'est jamais retenue d'office. */
+    private const PREUVE_VERIFIEE = ['verification' => 'verifiee_code', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -49,7 +52,7 @@ class ArbitrageDeclarationTest extends TestCase
         }
         $this->actingAs($auteur);
         try {
-            return app(DeclarationService::class)->declarer($remise, $mode, self::SIGNATAIRE, $lignes, (string) Str::uuid());
+            return app(DeclarationService::class)->declarer($remise, $mode, self::SIGNATAIRE, $lignes, (string) Str::uuid(), null, $mode === 'tablette' ? self::PREUVE_VERIFIEE : null);
         } finally {
             $this->actingAs($this->responsable);
         }

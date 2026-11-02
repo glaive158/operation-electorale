@@ -26,10 +26,10 @@ class PieceController extends Controller
         return response()->json(['piece' => $this->representation($piece)], $creee ? 201 : 200);
     }
 
-    /** 200 si la pièce est stockée, 404 sinon : la tablette ne renvoie que ce qui manque. */
-    public function show(string $empreinte): Response
+    /** 200 si l'appelant a envoyé (ou prouvé posséder) la pièce, 404 sinon : la tablette ne renvoie que ce qui manque. */
+    public function show(Request $request, string $empreinte): Response
     {
-        abort_unless($this->pieces->existe($empreinte), 404);
+        abort_unless($this->pieces->possede($request->user(), $empreinte), 404);
 
         return response('', 200);
     }
