@@ -103,7 +103,11 @@ class RemiseService
      */
     private function porteur(Decharge $decharge, array $transporteur): array
     {
-        $transporteur = array_filter($transporteur, fn ($valeur) => $valeur !== null && $valeur !== '');
+        // Un champ blanc compte comme absent.
+        $transporteur = array_filter(
+            array_map(fn ($valeur) => is_string($valeur) ? trim($valeur) : $valeur, $transporteur),
+            fn ($valeur) => $valeur !== null && $valeur !== '',
+        );
 
         if ($transporteur !== []) {
             if ($decharge->circuit !== 'etranger') {

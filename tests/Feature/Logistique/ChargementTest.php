@@ -3,6 +3,7 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Exceptions\Logistique\StockInsuffisant;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\JournalEntree;
 use App\Models\Logistique\MouvementStock;
@@ -258,6 +259,70 @@ class ChargementTest extends TestCase
         $this->assertSame('a_preparer', $decharge->refresh()->statut_acheminement);
         $this->assertSame(0, Remise::count());
         $this->assertSame(0, MouvementStock::where('type', 'sortie_expedition')->count());
+    }
+
+    public function test_chargement_atomique_si_une_consommation_ulterieure_echoue(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->prefecture, $this->isoloirs, 50]]);
+        $this->stockerFictif($this->urnes, 500, 100);
+        $this->stockerFictif($this->isoloirs, 500, 50);
+        $service = app(DechargeService::class);
+        $decharge = $service->preparer($this->cycle, $this->prefecture, 'materiel_lourd');
+        foreach ($decharge->lignes as $ligne) {
+            $service->modifierLigne($ligne, 20, null);
+        }
+        $service->valider($decharge);
+        $service->affecterAgent($decharge, User::factory()->create(['role' => 'agent_transport']), 'Tournée');
+        $lignes = $decharge->lignes()->orderBy('materiel_id')->get();
+
+        // La première consommation aboutit, la seconde échoue : tout doit être annulé.
+        $this->app->bind(StockService::class, fn () => new class extends StockService
+        {
+            private int $appels = 0;
+
+            public function consommer(ReservationStock $reservation): MouvementStock
+            {
+                if (++$this->appels === 2) {
+                    throw new StockInsuffisant('Stock insuffisant (simulé).');
+                }
+
+                return parent::consommer($reservation);
+            }
+        });
+
+        try {
+            app(RemiseService::class)->charger($decharge);
+            $this->fail('Le chargement aurait dû échouer.');
+        } catch (StockInsuffisant) {
+        }
+
+        $this->assertSame('active', ReservationStock::findOrFail($lignes[0]->reservation_id)->statut);
+        $this->assertSame('active', ReservationStock::findOrFail($lignes[1]->reservation_id)->statut);
+        $this->assertSame(0, MouvementStock::where('type', 'sortie_expedition')->count());
+        $this->assertSame(0, Remise::count());
+        $this->assertSame('a_preparer', $decharge->refresh()->statut_acheminement);
+    }
+
+    public function test_transporteur_aux_champs_blancs_est_ignore(): void
+    {
+        $this->approuverPlanFictif([[$this->poste, $this->urnes, 100]]);
+        $this->stockerFictif($this->urnes, 500, 100);
+        $decharge = $this->dechargeValidee(40, $this->poste, false);
+
+        // Des champs seulement blancs comptent comme absents : on retombe sur « Affectez un agent ».
+        try {
+            app(RemiseService::class)->charger($decharge, ['nom' => '   ', 'qualite' => " \t", 'societe' => '', 'bordereau' => null]);
+            $this->fail('Le chargement sans porteur aurait dû être refusé.');
+        } catch (RegleLogistique $e) {
+            $this->assertStringContainsString('Affectez un agent', $e->getMessage());
+        }
+        $this->assertSame(0, Remise::count());
+
+        // Même pour un circuit non étranger, un transporteur blanc n'est pas une erreur d'entrée.
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100]]);
+        $locale = $this->dechargeValidee(10);
+        app(RemiseService::class)->charger($locale, ['nom' => ' ', 'societe' => '  ']);
+        $this->assertSame('agent', $this->remises($locale, 'chargement')->a_type);
     }
 
     public function test_chargement_reserve_au_personnel_logistique(): void
