@@ -17,7 +17,9 @@ use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EngagementService;
 use App\Services\Logistique\LectureRecensement;
 use App\Services\Logistique\LibellesRemises;
+use App\Services\Logistique\PerimetreTerrain;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
 use InvalidArgumentException;
 use Throwable;
@@ -33,6 +35,7 @@ class DechargeController extends Controller
         private readonly CircuitService $circuits,
         private readonly LectureRecensement $recensement,
         private readonly LibellesRemises $libelles,
+        private readonly PerimetreTerrain $perimetre,
     ) {
     }
 
@@ -101,12 +104,23 @@ class DechargeController extends Controller
         ]);
     }
 
-    /** Cible du QR code imprimé sur le document : retrouve la décharge par son identifiant stable. */
+    /**
+     * Cible du QR code imprimé sur le document : retrouve la décharge par son identifiant stable, puis oriente
+     * selon le profil. Le personnel logistique va à la fiche centrale ; une autorité, un agent ou le gouverneur
+     * dont la décharge est dans le périmètre va à la page du terrain ; tout autre profil est refusé.
+     */
     public function qr(string $identifiant)
     {
         $decharge = Decharge::where('identifiant', $identifiant)->firstOrFail();
 
-        return redirect()->route('logistique.decharges.show', $decharge);
+        if (Gate::allows('logistique-gerer')) {
+            return redirect()->route('logistique.decharges.show', $decharge);
+        }
+        if (Gate::allows('logistique-terrain-lecture') && $this->perimetre->peutVoir(auth()->user(), $decharge)) {
+            return redirect()->route('terrain.decharges.show', $decharge);
+        }
+
+        abort(403);
     }
 
     public function store(Request $request, Cycle $cycle)

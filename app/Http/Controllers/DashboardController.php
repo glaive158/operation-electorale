@@ -16,6 +16,11 @@ class DashboardController extends Controller
             return redirect()->route('logistique.stock.index');
         }
 
+        /* Chefs de poste et agents de transport : leur seul espace est celui du terrain */
+        if ($user->isChefPoste() || $user->isAgentTransport()) {
+            return redirect()->route('terrain.decharges.index');
+        }
+
         /* Stats opérations locales */
         $query = Operation::query();
         if ($user->isCommission())   $query->where('commune_commission_id', $user->commune_id);

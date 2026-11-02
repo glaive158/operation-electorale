@@ -31,6 +31,11 @@ use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\ReclamationController;
 use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
+use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController;
+use App\Http\Controllers\Terrain\DeclarationController as TerrainDeclarationController;
+use App\Http\Controllers\Terrain\IndicateurController as TerrainIndicateurController;
+use App\Http\Controllers\Terrain\ReclamationController as TerrainReclamationController;
+use App\Http\Controllers\Terrain\RedistributionController as TerrainRedistributionController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
 use App\Http\Controllers\ListeEmargementController;
@@ -122,6 +127,24 @@ Route::middleware(['auth'])->group(function () {
         Route::resource('users', UserController::class)->middleware('role:admin');
     });
 
+    /* ── Logistique : cible du QR code des décharges, selon le profil (central, terrain ou refus) ── */
+    Route::get('logistique/d/{identifiant}', [DechargeController::class, 'qr'])->name('logistique.decharges.qr');
+
+    /* ── Espace terrain : autorités, agents de transport et gouverneur, dans leur périmètre ── */
+    Route::prefix('terrain')->name('terrain.')->group(function () {
+        Route::middleware('can:logistique-terrain-lecture')->group(function () {
+            Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
+            Route::get('decharges/{decharge}', [TerrainDechargeController::class, 'show'])->name('decharges.show');
+            Route::get('suivi', [TerrainIndicateurController::class, 'index'])->middleware('role:prefet,sous_prefet,chef_poste,gouverneur')->name('suivi');
+        });
+        Route::middleware('can:logistique-terrain')->group(function () {
+            Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
+            Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
+            Route::post('remises/{remise}/annulation', [TerrainRedistributionController::class, 'annuler'])->name('redistributions.annuler');
+            Route::post('decharges/{decharge}/reclamations', [TerrainReclamationController::class, 'store'])->name('reclamations.store');
+        });
+    });
+
     /* ── Logistique matériel électoral ── */
     Route::middleware('can:logistique-gerer')->prefix('logistique')->name('logistique.')->group(function () {
         Route::get('stock', [StockController::class, 'index'])->name('stock.index');
@@ -151,8 +174,6 @@ Route::middleware(['auth'])->group(function () {
         Route::post('cycles/{cycle}/plans', [PlanDotationController::class, 'store'])->name('plans.store');
         Route::get('plans/{plan}', [PlanDotationController::class, 'show'])->name('plans.show');
         Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
-
-        Route::get('d/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
 
         Route::get('cycles/{cycle}/circuit', [CircuitController::class, 'show'])->name('circuit.show');
         Route::get('cycles/{cycle}/expeditions', [ExpeditionController::class, 'index'])->name('expeditions.index');
