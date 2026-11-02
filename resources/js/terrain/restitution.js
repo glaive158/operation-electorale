@@ -89,9 +89,11 @@ export function etatRestitution(element, file, utilisateurId = null) {
 }
 
 /**
- * Prise en charge du retour par l'agent. En ligne, l'appel part tout de suite : un refus du serveur (déclaration à
- * vérifier, rien de retenu…) est rendu tel quel et rien n'est mis en file. Hors connexion ou sans réponse, la prise
- * en charge est mise en file et part à la prochaine synchronisation.
+ * Prise en charge du retour par l'agent. Tant que la déclaration de cette restitution faite sur la tablette attend
+ * encore dans la file, la prise en charge s'y met derrière elle, même en ligne (file.js l'envoie après la
+ * déclaration ; un refus du serveur la laisse « à vérifier »). Sinon, en ligne, l'appel part tout de suite : un refus
+ * du serveur (déclaration à vérifier, rien de retenu…) est rendu tel quel et rien n'est mis en file. Hors connexion
+ * ou sans réponse, la prise en charge est mise en file et part à la prochaine synchronisation.
  *
  * @returns {Promise<{etat: 'synchronise'|'en_attente'|'refusee', message?: string}>}
  */
