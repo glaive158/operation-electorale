@@ -67,4 +67,16 @@ class RestitutionDeclaration extends Model
     {
         return $this->belongsTo(Delegation::class);
     }
+
+    /** Libellé de la vérification d'identité : les mêmes que pour les déclarations de remise (Declaration::VERIFICATIONS). */
+    public function libelleVerification(): string
+    {
+        return Declaration::VERIFICATIONS[$this->verification_identite ?? 'non_verifiee'] ?? Declaration::VERIFICATIONS['non_verifiee'];
+    }
+
+    /** Vrai seulement si l'identité du signataire est établie (code, appareil ou connexion au compte). */
+    public function identiteEtablie(): bool
+    {
+        return in_array($this->verification_identite, Declaration::VERIFICATIONS_ETABLIES, true);
+    }
 }

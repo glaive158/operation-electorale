@@ -8,15 +8,8 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\Remise;
-use chillerlan\QRCode\Output\QROutputInterface;
-use chillerlan\QRCode\QRCode;
-use chillerlan\QRCode\QROptions;
-use Dompdf\Dompdf;
-use Dompdf\Options;
-use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use LogicException;
 use Throwable;
@@ -29,9 +22,9 @@ use ZipArchive;
  */
 class DechargePdfService
 {
-    private const NON_EMIS = 'Ce document ne peut pas être émis pour cette décharge.';
+    use ArchivePdf;
 
-    private const ALTERE = 'Fichier archivé altéré ou absent : réimpression refusée.';
+    private const NON_EMIS = 'Ce document ne peut pas être émis pour cette décharge.';
 
     public function __construct(
         private readonly DechargeService $decharges,
@@ -83,21 +76,6 @@ class DechargePdfService
         ])->render();
     }
 
-    /** PDF A4 portrait, sans ressource distante, en octets. */
-    public function pdf(string $html): string
-    {
-        $options = new Options;
-        $options->set('defaultFont', 'DejaVu Sans');
-        $options->set('isRemoteEnabled', false);
-
-        $dompdf = new Dompdf($options);
-        $dompdf->setPaper('A4', 'portrait');
-        $dompdf->loadHtml($html, 'UTF-8');
-        $dompdf->render();
-
-        return $dompdf->output();
-    }
-
     /**
      * URL absolue de vérification : l'hôte vient de la configuration (APP_URL), jamais de la requête,
      * car l'URL est imprimée sur un document officiel.
@@ -110,14 +88,7 @@ class DechargePdfService
     /** QR code (data URI PNG) de l'URL absolue de vérification de la décharge. */
     public function qr(Decharge $decharge): string
     {
-        $options = new QROptions([
-            'outputType' => QROutputInterface::GDIMAGE_PNG,
-            'outputBase64' => true,
-            'scale' => 4,
-            'quietzoneSize' => 1,
-        ]);
-
-        return (new QRCode($options))->render($this->urlQr($decharge));
+        return $this->qrDepuisUrl($this->urlQr($decharge));
     }
 
     /**
@@ -185,14 +156,7 @@ class DechargePdfService
             throw new RegleLogistique('Seul le personnel logistique peut télécharger les décharges.');
         }
 
-        $disque = $this->disque();
-        $octets = $disque->exists($document->chemin) ? $disque->get($document->chemin) : null;
-
-        if (! is_string($octets) || ! hash_equals($document->empreinte, hash('sha256', $octets))) {
-            throw new RegleLogistique(self::ALTERE);
-        }
-
-        return $octets;
+        return $this->octetsArchives($document->chemin, $document->empreinte);
     }
 
     /**
@@ -318,10 +282,5 @@ class DechargePdfService
         if (! in_array($exemplaire, DechargeDocument::EXEMPLAIRES, true)) {
             throw new InvalidArgumentException("Exemplaire inconnu : {$exemplaire}.");
         }
-    }
-
-    private function disque(): Filesystem
-    {
-        return Storage::disk(config('logistique.disque_decharges'));
     }
 }

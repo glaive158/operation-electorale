@@ -572,6 +572,109 @@ class RestitutionService
     }
 
     /**
+     * Écarts de restitution du cycle : une ligne par (détenteur, article), en cinq requêtes au plus quel que soit
+     * le volume. `non_restitue` (attendu − retour déclaré, jamais négatif) n'existe qu'une fois une déclaration
+     * retenue ; `perdu_en_retour` (retour déclaré − reçu au central, jamais négatif) seulement pour une restitution
+     * reçue au central ou contrôlée : avant la réception, un reçu à zéro ferait passer tout le retour pour perdu.
+     * Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante n'attend que le reliquat de la
+     * précédente) est cumulé : le retour déclaré et le reçu s'additionnent, l'attendu est ce qui avait déjà été
+     * déclaré avant la dernière restitution plus l'attendu de celle-ci. `ligne_id` est la ligne de la dernière
+     * restitution (celle qu'on justifie) ; la justification est la dernière écrite.
+     *
+     * @return Collection<int, array{detenteur_type: string, detenteur_id: int, detenteur_nom: string, materiel_id: int, materiel_libelle: string, restitution_id: int, ligne_id: int, attendu: int, declare_restitue: int, recu_central: int, non_restitue: ?int, perdu_en_retour: ?int, justification: ?string}>
+     */
+    public function ecarts(Cycle $cycle): Collection
+    {
+        $lignes = DB::table('restitution_lignes')
+            ->join('restitutions', 'restitutions.id', '=', 'restitution_lignes.restitution_id')
+            ->where('restitutions.cycle_id', $cycle->id)
+            ->orderBy('restitutions.id')->orderBy('restitution_lignes.materiel_id')
+            ->get([
+                'restitution_lignes.id as ligne_id', 'restitutions.id as restitution_id', 'restitutions.detenteur_type',
+                'restitutions.detenteur_id', 'restitutions.statut', 'restitution_lignes.materiel_id', 'restitution_lignes.attendu',
+                'restitution_lignes.declare_restitue', 'restitution_lignes.recu_central', 'restitution_lignes.justification',
+            ]);
+        if ($lignes->isEmpty()) {
+            return collect();
+        }
+
+        $retenues = DB::table('restitution_declarations')->where('statut', 'retenue')
+            ->whereIn('restitution_id', DB::table('restitutions')->where('cycle_id', $cycle->id)->select('id'))
+            ->pluck('restitution_id')->flip();
+        $agents = User::whereIn('id', $lignes->where('detenteur_type', 'agent')->pluck('detenteur_id')->unique()->all())->get()->keyBy('id');
+        $destinataires = Destinataire::whereIn('id', $lignes->where('detenteur_type', 'destinataire')->pluck('detenteur_id')->unique()->all())->pluck('libelle', 'id');
+        $materiels = Materiel::whereIn('id', $lignes->pluck('materiel_id')->unique()->all())->get()->keyBy('id');
+
+        $ecarts = [];
+        foreach ($lignes as $l) {
+            $cle = $l->detenteur_type.':'.$l->detenteur_id.':'.$l->materiel_id;
+            $declare = (int) $l->declare_restitue;
+            $recu = (int) $l->recu_central;
+            $recue = in_array($l->statut, ['recue_central', 'controlee'], true);
+
+            $precedent = $ecarts[$cle] ?? null;
+            $avant = $precedent['declare_restitue'] ?? 0;
+            $detenteur = $l->detenteur_type === 'agent'
+                ? (($agents->get($l->detenteur_id)?->nom_complet) ?: 'Agent')
+                : (string) $destinataires->get($l->detenteur_id, 'Destinataire');
+
+            $ecarts[$cle] = [
+                'detenteur_type' => $l->detenteur_type,
+                'detenteur_id' => (int) $l->detenteur_id,
+                'detenteur_nom' => $detenteur,
+                'materiel_id' => (int) $l->materiel_id,
+                'materiel_libelle' => $materiels->get($l->materiel_id)?->libelle ?? '',
+                'restitution_id' => (int) $l->restitution_id,
+                'ligne_id' => (int) $l->ligne_id,
+                'attendu' => $avant + (int) $l->attendu,
+                'declare_restitue' => $avant + $declare,
+                'recu_central' => ($precedent['recu_central'] ?? 0) + $recu,
+                'non_restitue' => $retenues->has($l->restitution_id) ? max(0, (int) $l->attendu - $declare) : null,
+                'perdu_en_retour' => $recue ? ($precedent['perdu_en_retour'] ?? 0) + max(0, $declare - $recu) : ($precedent['perdu_en_retour'] ?? null),
+                'justification' => $l->justification ?? ($precedent['justification'] ?? null),
+            ];
+        }
+
+        return collect($ecarts)
+            ->sort(fn (array $a, array $b) => $a['detenteur_type'] <=> $b['detenteur_type']
+                ?: TriLibelles::comparer($a['detenteur_nom'], $b['detenteur_nom'])
+                ?: $a['detenteur_id'] <=> $b['detenteur_id']
+                ?: ($materiels->get($a['materiel_id'])?->ordre <=> $materiels->get($b['materiel_id'])?->ordre)
+                ?: $a['materiel_id'] <=> $b['materiel_id'])
+            ->values();
+    }
+
+    /**
+     * Le gestionnaire justifie l'écart d'une ligne de restitution (500 caractères au plus, non vide) ; elle peut être
+     * réécrite, le journal garde l'ancienne justification. Possible à tout statut et sur un cycle clos.
+     */
+    public function justifier(RestitutionLigne $l, string $justification): void
+    {
+        $this->exigerAuteur();
+        $this->exigerGestionnaire('Seul le personnel logistique peut justifier un écart de restitution.');
+        $justification = trim($justification);
+        if ($justification === '' || mb_strlen($justification) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('La justification est obligatoire (500 caractères au plus).');
+        }
+        $restitution = Restitution::findOrFail(RestitutionLigne::whereKey($l->id)->value('restitution_id'));
+
+        DB::transaction(function () use ($restitution, $l, $justification) {
+            $this->verrouillerCycle($restitution);
+            $actuelle = Restitution::whereKey($restitution->id)->lockForUpdate()->firstOrFail();
+            $courante = RestitutionLigne::where('restitution_id', $actuelle->id)->whereKey($l->id)->lockForUpdate()->firstOrFail();
+
+            $avant = $courante->justification;
+            $courante->forceFill(['justification' => $justification])->save();
+
+            Journal::noter('restitution', $actuelle->id, 'justification_restitution', ['justification' => $avant], [
+                'ligne_id' => $courante->id, 'materiel_id' => $courante->materiel_id, 'justification' => $justification,
+            ]);
+        }, attempts: 3);
+
+        $l->refresh();
+    }
+
+    /**
      * @param  list<array{materiel_id: int, restitue: int, observation: ?string}>  $lignes
      */
     private function sequenceTablette(Restitution $r, array $signataire, array $lignes, string $cle, string $texte, CarbonInterface $instant, ?int $signataireUserId, ?string $blocPreuve, ?string $bloc, array $pieces, string $empreinte, User $auteur): RestitutionDeclaration

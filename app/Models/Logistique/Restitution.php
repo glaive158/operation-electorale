@@ -54,6 +54,11 @@ class Restitution extends Model
         return $this->hasMany(RestitutionDeclaration::class);
     }
 
+    public function documents(): HasMany
+    {
+        return $this->hasMany(RestitutionDocument::class);
+    }
+
     public function cycle(): BelongsTo
     {
         return $this->belongsTo(Cycle::class);
