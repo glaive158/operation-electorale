@@ -144,7 +144,7 @@ Route::middleware(['auth'])->group(function () {
         Route::get('plans/{plan}', [PlanDotationController::class, 'show'])->name('plans.show');
         Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
 
-        Route::get('decharges/qr/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
+        Route::get('d/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
         Route::get('decharges/{decharge}', [DechargeController::class, 'show'])->name('decharges.show');
 
         Route::middleware('can:logistique-administrer')->group(function () {

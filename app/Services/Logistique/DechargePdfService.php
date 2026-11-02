@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use LogicException;
+use ZipArchive;
 
 /**
  * Document officiel d'une décharge : rendu depuis les données figées à la validation, archivé avec
@@ -28,6 +29,8 @@ class DechargePdfService
     private const NON_EMIS = 'Ce document ne peut pas être émis pour cette décharge.';
 
     private const ALTERE = 'Fichier archivé altéré ou absent : réimpression refusée.';
+
+    public function __construct(private readonly DechargeService $decharges) {}
 
     /** HTML du document. Un brouillon ne se rend qu'en aperçu filigrané ; les autres statuts, depuis donnees_gelees. */
     public function html(Decharge $decharge, string $exemplaire, bool $apercu = false): string
@@ -144,6 +147,65 @@ class DechargePdfService
         }
 
         return $octets;
+    }
+
+    /**
+     * ZIP temporaire des documents archivés des décharges validées ou annulées du périmètre (filtre de
+     * preparerLot : un seul critère parmi departement_id, region_id, etranger ; vide = tout le cycle).
+     * Entrées par numéro : {numero}.pdf, puis {numero}-ANNULEE.pdf pour une décharge annulée. Tout
+     * destinataire du périmètre compte, actif ou non : les documents existent déjà. Les exemplaires
+     * manquants sont émis d'abord ; les octets viennent toujours de contenu(). Renvoie le chemin du ZIP,
+     * à supprimer par l'appelant.
+     */
+    public function lot(Cycle $cycle, array $filtre): string
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Opération sans auteur.');
+        }
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique('Seul le personnel logistique peut télécharger les décharges.');
+        }
+
+        $destinataires = $this->decharges->destinatairesDuPerimetre($this->decharges->filtreValide($filtre), true)->pluck('id');
+        $decharges = Decharge::where('cycle_id', $cycle->id)
+            ->whereIn('destinataire_id', $destinataires)
+            ->whereIn('statut_document', ['validee', 'annulee'])
+            ->orderBy('numero')
+            ->get();
+        if ($decharges->isEmpty()) {
+            throw new RegleLogistique('Aucune décharge validée dans ce périmètre.');
+        }
+
+        $entrees = [];
+        foreach ($decharges as $decharge) {
+            $exemplaires = ['initial' => "{$decharge->numero}.pdf"];
+            if ($decharge->statut_document === 'annulee') {
+                $exemplaires['annulation'] = "{$decharge->numero}-ANNULEE.pdf";
+            }
+            foreach ($exemplaires as $exemplaire => $nom) {
+                $entrees[$nom] = $this->contenu($this->emettre($decharge, $exemplaire));
+            }
+        }
+
+        $dossier = storage_path('app/tmp');
+        if (! is_dir($dossier) && ! mkdir($dossier, 0775, true) && ! is_dir($dossier)) {
+            throw new RegleLogistique("Création du dossier temporaire impossible : {$dossier}.");
+        }
+        $chemin = $dossier.'/decharges-'.bin2hex(random_bytes(8)).'.zip';
+
+        $zip = new ZipArchive;
+        if ($zip->open($chemin, ZipArchive::CREATE | ZipArchive::EXCL) !== true) {
+            throw new RegleLogistique('Création de l\'archive ZIP impossible.');
+        }
+        foreach ($entrees as $nom => $octets) {
+            $zip->addFromString($nom, $octets);
+        }
+        if (! $zip->close()) {
+            @unlink($chemin);
+            throw new RegleLogistique('Écriture de l\'archive ZIP impossible.');
+        }
+
+        return $chemin;
     }
 
     private function exigerEmissible(Decharge $decharge, string $exemplaire): void

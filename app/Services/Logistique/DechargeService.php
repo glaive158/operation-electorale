@@ -416,13 +416,7 @@ class DechargeService
         $this->exigerAuteur();
         $this->exigerDroit();
         $this->exigerCategorie($categorie);
-        $filtre = array_filter($filtre, fn ($v) => $v !== null && $v !== '');
-        if (count($filtre) > 1 || array_diff(array_keys($filtre), ['departement_id', 'region_id', 'etranger']) !== []) {
-            throw new InvalidArgumentException('Filtre inconnu : un seul critère parmi departement_id, region_id, etranger.');
-        }
-        if (isset($filtre['etranger']) && $filtre['etranger'] !== true) {
-            throw new InvalidArgumentException('Le filtre « etranger » ne vaut que pour true.');
-        }
+        $filtre = $this->filtreValide($filtre);
 
         return DB::transaction(function () use ($cycle, $categorie, $filtre) {
             $actuel = $this->verrouillerCycleOuvert($cycle->id, 'Cycle clôturé : préparation de décharge impossible.');
@@ -434,7 +428,7 @@ class DechargeService
 
             $creees = 0;
             $ignorees = 0;
-            foreach ($this->destinatairesDuLot($filtre) as $destinataire) {
+            foreach ($this->destinatairesDuPerimetre($filtre) as $destinataire) {
                 if (is_string($this->preparerPour($actuel, $plan, $destinataire, $categorie))) {
                     $ignorees++;
                 } else {
@@ -502,14 +496,40 @@ class DechargeService
     }
 
     /**
-     * Destinataires actifs du périmètre. Une sous-préfecture n'a pas de département propre : elle
-     * suit celui de sa préfecture. L'étranger se limite aux postes.
+     * Filtre géographique d'un lot, débarrassé de ses valeurs vides. Au plus un critère parmi
+     * departement_id, region_id, etranger (true seulement) ; vide = tout le périmètre.
      *
+     * @param  array<string, mixed>  $filtre
+     * @return array{departement_id?:int, region_id?:int, etranger?:bool}
+     */
+    public function filtreValide(array $filtre): array
+    {
+        $filtre = array_filter($filtre, fn ($v) => $v !== null && $v !== '');
+        if (count($filtre) > 1 || array_diff(array_keys($filtre), ['departement_id', 'region_id', 'etranger']) !== []) {
+            throw new InvalidArgumentException('Filtre inconnu : un seul critère parmi departement_id, region_id, etranger.');
+        }
+        if (isset($filtre['etranger']) && $filtre['etranger'] !== true) {
+            throw new InvalidArgumentException('Le filtre « etranger » ne vaut que pour true.');
+        }
+
+        return $filtre;
+    }
+
+    /**
+     * Destinataires du périmètre choisi (filtre déjà validé par filtreValide). Une sous-préfecture n'a pas
+     * de département propre : elle suit celui de sa préfecture. L'étranger se limite aux postes.
+     * Les inactifs sont exclus par défaut (préparation d'un lot) ; le téléchargement en lot les inclut,
+     * leurs documents existant déjà.
+     *
+     * @param  array{departement_id?:int, region_id?:int, etranger?:bool}  $filtre
      * @return Collection<int, Destinataire>
      */
-    private function destinatairesDuLot(array $filtre): Collection
+    public function destinatairesDuPerimetre(array $filtre, bool $inclureInactifs = false): Collection
     {
-        $requete = Destinataire::actifs()->orderBy('id');
+        $requete = Destinataire::query()->orderBy('id');
+        if (! $inclureInactifs) {
+            $requete->actifs();
+        }
 
         $departements = null;
         if (isset($filtre['departement_id'])) {
