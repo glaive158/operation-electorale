@@ -539,6 +539,23 @@ class DeclarationApiTest extends TestCase
         $this->assertSame(0, $this->echecs());
     }
 
+    public function test_repli_sans_code_ne_rattache_pas_un_compte_quelconque(): void
+    {
+        // Sans bloc de preuve, un identifiant qui n'est ni l'autorité ni un délégué actif n'est pas retenu.
+        $autre = User::factory()->create(['role' => 'sous_prefet', 'actif' => true]);
+        $corps = $this->corps(['signataire' => ['user_id' => $autre->id, 'nom' => 'Nom saisi', 'qualite' => 'Qualité saisie']]);
+
+        $this->envoyer($corps)->assertCreated()
+            ->assertJsonPath('declaration.verification_identite', 'non_verifiee')
+            ->assertJsonPath('declaration.statut', 'a_verifier');
+
+        $declaration = Declaration::firstOrFail();
+        $this->assertNull($declaration->signataire_user_id);
+        $this->assertNull($declaration->delegation_id);
+        $this->assertSame(['Nom saisi', 'Qualité saisie'], [$declaration->signataire_nom, $declaration->signataire_qualite]);
+        $this->assertSame(0, $this->echecs());
+    }
+
     public function test_repli_sans_autorite_rattachee_nom_et_qualite_saisis(): void
     {
         // Aucun compte rattaché au destinataire : la tablette n'a pas d'identifiant de signataire à envoyer.

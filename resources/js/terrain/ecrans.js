@@ -281,8 +281,8 @@ export async function ecranReception(ctx, id) {
                 }, signataires.map((s) => h('option', { value: String(s.user_id), selected: s.user_id === etat.signataire?.user_id }, `${s.titre} : ${s.nom} (${s.qualite})`))))
             : null;
 
-        const champNom = signataires.length ? null : h('input', { type: 'text', maxlength: '255', value: saisieSignataire.nom, class: CHAMP, 'aria-label': 'Nom du signataire', oninput: (e) => { saisieSignataire.nom = e.target.value; } });
-        const champQualite = signataires.length ? null : h('input', { type: 'text', maxlength: '255', value: saisieSignataire.qualite, class: CHAMP, 'aria-label': 'Qualité du signataire', oninput: (e) => { saisieSignataire.qualite = e.target.value; } });
+        const champNom = signataires.length ? null : h('input', { type: 'text', maxlength: '150', value: saisieSignataire.nom, class: CHAMP, 'aria-label': 'Nom du signataire', oninput: (e) => { saisieSignataire.nom = e.target.value; } });
+        const champQualite = signataires.length ? null : h('input', { type: 'text', maxlength: '150', value: saisieSignataire.qualite, class: CHAMP, 'aria-label': 'Qualité du signataire', oninput: (e) => { saisieSignataire.qualite = e.target.value; } });
 
         const bouton = signataires.length ? h('button', { type: 'button', class: BOUTON }, 'Valider la réception') : null;
         const boutonRepli = h('button', { type: 'button', class: BOUTON_SECONDAIRE }, 'Signer sans code (identité non vérifiée)');

@@ -427,7 +427,18 @@ class DeclarationService
         $utilisateur = $signataireUserId === null ? null : User::find($signataireUserId);
         $base = ['bloc_empreinte' => $bloc, 'signataire_user_id' => $utilisateur?->id, 'delegation_id' => null];
 
+        $destinataire = $remise->a_type === 'destinataire' && $remise->a_id !== null ? Destinataire::find($remise->a_id) : null;
+
         if ($blocPreuve === null || $blocPreuve === '') {
+            // Repli sans code : un compte ne reste rattaché que s'il est l'autorité attendue ou son délégué à cet instant,
+            // sinon la déclaration ouvrirait à un compte quelconque les droits du signataire (avis, contestation).
+            if ($utilisateur !== null) {
+                $titulaire = $destinataire !== null && $this->perimetre->estTitulaireDe($utilisateur, $destinataire);
+                $delegation = $destinataire !== null && ! $titulaire ? $this->delegations->activeA($destinataire, $utilisateur, $horodatage) : null;
+                $base['signataire_user_id'] = $titulaire || $delegation !== null ? $utilisateur->id : null;
+                $base['delegation_id'] = $delegation?->id;
+            }
+
             return ['verification' => 'non_verifiee'] + $base;
         }
         if ($utilisateur === null) {
@@ -436,7 +447,6 @@ class DeclarationService
 
         // Un délégué signe au titre de la délégation en vigueur à l'instant de sa signature, pas de celle d'aujourd'hui.
         $delegation = null;
-        $destinataire = $remise->a_type === 'destinataire' && $remise->a_id !== null ? Destinataire::find($remise->a_id) : null;
         if ($destinataire !== null && ! $this->perimetre->estTitulaireDe($utilisateur, $destinataire)) {
             $delegation = $this->delegations->activeA($destinataire, $utilisateur, $horodatage);
         }
