@@ -14,6 +14,7 @@ use App\Services\Logistique\BesoinService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EcartVersionService;
 use App\Services\Logistique\EngagementService;
+use App\Services\Logistique\IndicateurService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Tests\Support\PlanApprouveFictif;
@@ -213,6 +214,30 @@ class BesoinCumuleTest extends TestCase
         $this->assertSame(100 + 10 + 30 + 5 - 30, $besoin->besoinExpedition($this->cycle, $this->urnes));
         $this->assertSame(30, $besoin->besoinExpedition($this->cycle, $this->isoloirs));
         $this->assertSame(0, $besoin->besoinExpedition($this->cycle, $this->enveloppes));
+    }
+
+    public function test_toutes_les_lectures_du_besoin_concordent(): void
+    {
+        $this->approuverPlanFictif([[$this->prefecture, $this->urnes, 100], [$this->sousPrefecture1, $this->urnes, 30]]);
+        $this->remplacer($this->prefecture, $this->urnes, 10);
+        $this->clore($this->prefecture, $this->urnes, 20);
+        $this->stockerFictif($this->urnes, 1000, 300);
+        $this->dechargeValidee($this->prefecture, $this->urnes, 60);
+
+        // Dotation 100 + remplacement 10 - expédition annulée 20.
+        $this->assertSame(90, $this->engagements()->besoin($this->cycle, $this->prefecture, $this->urnes));
+        $this->assertSame(90, $this->engagements()->etat($this->cycle, $this->prefecture)[$this->urnes->id]['besoin']);
+        $this->assertSame(90, $this->engagements()->synthese($this->cycle)[$this->prefecture->id.'|materiel_lourd']['besoin']);
+        $ecart = app(EcartVersionService::class)->analyser($this->cycle)
+            ->first(fn (array $e) => $e['destinataire']->is($this->prefecture) && $e['materiel']->is($this->urnes));
+        $this->assertSame(90, $ecart['besoin']);
+        // La préfecture (90) et la sous-préfecture (30) : le besoin d'expédition de l'article les additionne.
+        $this->assertSame(120, app(BesoinService::class)->besoinExpedition($this->cycle, $this->urnes));
+        $indicateurs = app(IndicateurService::class)->parDestinataire($this->cycle)
+            ->first(fn (array $l) => $l['destinataire']->is($this->prefecture) && $l['materiel']->is($this->urnes));
+        $this->assertSame(90, $indicateurs['besoin_expedition']);
+        $this->assertSame(100, $indicateurs['dotation']);
+        $this->assertSame(120, app(IndicateurService::class)->parArticle($this->cycle)->first(fn (array $l) => $l['materiel']->is($this->urnes))['besoin_expedition']);
     }
 
     public function test_nombre_de_requetes_borne(): void
