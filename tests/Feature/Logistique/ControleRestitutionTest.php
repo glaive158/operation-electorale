@@ -16,6 +16,7 @@ use App\Services\Logistique\BesoinService;
 use App\Services\Logistique\RestitutionService;
 use App\Services\Logistique\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use Tests\Support\PlanApprouveFictif;
@@ -257,6 +258,13 @@ class ControleRestitutionTest extends TestCase
         $r = $this->recue([$this->urnes->id => 500]);
         $this->service()->controler($r, [$this->urnes->id => $this->controle(480, 0, 20)]);
 
+        // Le libre vaut exactement 100 + 480 : une unité de plus ne s'attribue pas.
+        $this->assertSame(580, $this->stock->libre($this->urnes));
+        try {
+            $this->stock->attribuer($suivant, $this->urnes, 581, 'Trop');
+            $this->fail('Attribution acceptée au-delà du libre.');
+        } catch (StockInsuffisant) {
+        }
         $this->stock->attribuer($suivant, $this->urnes, 480, 'Réemploi des urnes restituées');
 
         $this->assertSame($avant - 480, $besoins->approvisionnementRestant($suivant, $this->urnes));
@@ -435,28 +443,108 @@ class ControleRestitutionTest extends TestCase
         $this->assertSame(106, $this->stock->physique($this->urnes));
     }
 
-    public function test_controle_refuse_tant_qu_une_declaration_est_a_verifier(): void
+    /**
+     * Restitution de 100 urnes par la voie réelle : le sous-préfet déclare 90 au compte (retenue d'office), l'agent
+     * de retour déclare 80 à la tablette sans code : divergente, elle attend l'arbitrage, la retenue étant figée.
+     *
+     * @return array{0: Restitution, 1: User, 2: RestitutionDeclaration, 3: RestitutionDeclaration}
+     */
+    private function restitutionDivergente(): array
     {
-        $r = $this->recue([$this->urnes->id => 10]);
-        $declaration = (new RestitutionDeclaration([
-            'restitution_id' => $r->id, 'mode' => 'compte', 'signataire_nom' => 'Ibrahima Ba', 'signataire_qualite' => 'Sous-préfet',
-            'user_id' => $this->responsable->id, 'cle_idempotence' => 'cle-restitution-0001', 'empreinte_contenu' => str_repeat('a', 64),
-        ]))->forceFill(['statut' => 'a_verifier']);
-        $declaration->save();
+        $r = $this->restitution([$this->urnes->id => 100], 'a_preparer');
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $signataire = ['nom' => 'Ibrahima Ba', 'qualite' => 'Sous-préfet'];
+        $lignes = fn (int $restitue) => [['materiel_id' => $this->urnes->id, 'restitue' => $restitue, 'observation' => null]];
 
+        $this->service()->affecterAgent($r, $agent);
+        $this->actingAs($sousPrefet);
+        $compte = $this->service()->declarer($r, 'compte', $signataire, $lignes(90), (string) Str::uuid());
+        $this->actingAs($agent);
+        $tablette = $this->service()->declarer($r, 'tablette', $signataire, $lignes(80), (string) Str::uuid(), now()->toIso8601String(), null, $sousPrefet->id);
+        $this->actingAs($this->responsable);
+
+        $this->assertSame('retenue', $compte->refresh()->statut);
+        $this->assertSame('a_verifier', $tablette->refresh()->statut);
+        $this->assertSame(90, $this->ligne($r, $this->urnes)->declare_restitue);
+
+        return [$r, $agent, $compte, $tablette];
+    }
+
+    private function prendreEnCharge(Restitution $r, User $agent): void
+    {
+        $this->actingAs($agent);
         try {
-            $this->service()->controler($r, [$this->urnes->id => $this->controle(10, 0, 0)]);
-            $this->fail('Contrôle accepté avec une déclaration à vérifier.');
-        } catch (RegleLogistique $e) {
-            $this->assertSame("Une déclaration à vérifier attend l'arbitrage du responsable : le contrôle est impossible.", $e->getMessage());
+            $this->service()->prendreEnCharge($r, $agent);
+        } finally {
+            $this->actingAs($this->responsable);
         }
-        $this->assertSame('recue_central', $r->fresh()->statut);
-        $this->assertSame(0, MouvementStock::where('type', 'reintegration')->count());
+    }
 
-        // Arbitrée (écartée), la déclaration ne bloque plus.
-        $declaration->forceFill(['statut' => 'ecartee'])->save();
-        $this->service()->controler($r, [$this->urnes->id => $this->controle(10, 0, 0)]);
+    public function test_arbitrage_confirme_la_retenue_puis_le_retour_se_controle(): void
+    {
+        [$r, $agent, $compte, $tablette] = $this->restitutionDivergente();
+
+        // La divergence attend l'arbitrage : le retour ne se prend pas en charge.
+        try {
+            $this->prendreEnCharge($r, $agent);
+            $this->fail('Prise en charge acceptée avec une déclaration à vérifier.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Une déclaration de restitution est à vérifier : le responsable doit arbitrer avant la prise en charge.', $e->getMessage());
+        }
+        $this->assertSame('a_preparer', $r->fresh()->statut);
+
+        // Seul le responsable confirme la retenue ; l'autre déclaration est écartée.
+        $this->actingAs(User::factory()->create(['role' => 'logistique_gestionnaire']));
+        try {
+            $this->service()->retenirDeclaration($compte, 'Comptage confirmé');
+            $this->fail('Un gestionnaire ne devait pas pouvoir arbitrer.');
+        } catch (RegleLogistique) {
+        }
+        $this->actingAs($this->responsable);
+        $this->service()->retenirDeclaration($compte, 'Comptage du sous-préfet confirmé');
+
+        $this->assertSame('retenue', $compte->refresh()->statut);
+        $this->assertSame('ecartee', $tablette->refresh()->statut);
+        $this->assertSame(90, $this->ligne($r, $this->urnes)->declare_restitue);
+        $arbitrage = JournalEntree::where('action', 'arbitrage_restitution')->sole();
+        $this->assertSame([$tablette->id], $arbitrage->apres['ecartees']);
+        $this->assertSame('Comptage du sous-préfet confirmé', $arbitrage->motif);
+
+        // Plus rien à arbitrer : confirmer de nouveau la retenue est refusé.
+        try {
+            $this->service()->retenirDeclaration($compte, 'Encore');
+            $this->fail('Confirmation acceptée sans rien à arbitrer.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Rien à arbitrer pour cette déclaration.', $e->getMessage());
+        }
+
+        $this->prendreEnCharge($r, $agent);
+        $this->assertSame('en_retour', $r->fresh()->statut);
+        $this->service()->receptionner($r, [$this->urnes->id => 90]);
+        $this->service()->controler($r, [$this->urnes->id => $this->controle(85, 5, 0)]);
+
         $this->assertSame('controlee', $r->fresh()->statut);
+        $this->assertSame(185, $this->stock->physique($this->urnes));
+        $this->assertSame(5, $this->stock->physique($this->urnes, 'a_reparer'));
+    }
+
+    public function test_arbitrage_retient_la_declaration_divergente_puis_le_retour_se_controle(): void
+    {
+        [$r, $agent, $compte, $tablette] = $this->restitutionDivergente();
+
+        $this->service()->retenirDeclaration($tablette, 'Comptage de l\'agent au déchargement');
+
+        $this->assertSame('retenue', $tablette->refresh()->statut);
+        $this->assertSame('ecartee', $compte->refresh()->statut);
+        $this->assertSame(80, $this->ligne($r, $this->urnes)->declare_restitue);
+
+        $this->prendreEnCharge($r, $agent);
+        $this->service()->receptionner($r, [$this->urnes->id => 80]);
+        $this->service()->controler($r, [$this->urnes->id => $this->controle(80, 0, 0)]);
+
+        $this->assertSame('controlee', $r->fresh()->statut);
+        $this->assertSame(180, $this->stock->physique($this->urnes));
     }
 
     public function test_restitution_apres_cloture(): void

@@ -298,7 +298,8 @@ class RestitutionService
 
     /**
      * Le responsable retient une déclaration à vérifier (divergence, excédent, identité non établie) : les autres
-     * déclarations actives de la restitution sont écartées et le retour déclaré des lignes devient le sien.
+     * déclarations actives de la restitution sont écartées et le retour déclaré des lignes devient le sien. Il peut
+     * aussi confirmer la retenue en cours face à une déclaration divergente : elle reste retenue, l'autre est écartée.
      */
     public function retenirDeclaration(RestitutionDeclaration $d, string $motif): void
     {
@@ -321,7 +322,11 @@ class RestitutionService
             if ($actuelle->statut !== 'a_preparer') {
                 throw new RegleLogistique(self::DEJA_PRISE_EN_CHARGE.' La déclaration retenue ne change plus.');
             }
-            if ($retenue === null || ! in_array($retenue->statut, ['a_verifier', 'valide'], true)) {
+            // La retenue en cours se confirme tant qu'une déclaration divergente attend l'arbitrage (R28) : elle reste
+            // retenue, l'autre est écartée. Sans rien à vérifier, il n'y a rien à arbitrer.
+            $confirmation = $retenue !== null && $retenue->statut === 'retenue'
+                && $declarations->contains(fn (RestitutionDeclaration $autre) => $autre->statut === 'a_verifier');
+            if ($retenue === null || (! $confirmation && ! in_array($retenue->statut, ['a_verifier', 'valide'], true))) {
                 throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
             }
 
@@ -381,6 +386,11 @@ class RestitutionService
             $retenue = RestitutionDeclaration::where('restitution_id', $actuelle->id)->where('statut', 'retenue')->lockForUpdate()->first();
             if ($retenue === null) {
                 throw new RegleLogistique('Aucune déclaration retenue : le retour ne peut pas être pris en charge.');
+            }
+            // Une divergence (R20) laisse la retenue en place mais attend l'arbitrage : une fois le retour pris en charge,
+            // plus rien ne permettrait de l'arbitrer, et le contrôle au central serait bloqué.
+            if (RestitutionDeclaration::where('restitution_id', $actuelle->id)->where('statut', 'a_verifier')->lockForUpdate()->exists()) {
+                throw new RegleLogistique('Une déclaration de restitution est à vérifier : le responsable doit arbitrer avant la prise en charge.');
             }
 
             $avant = ['statut' => $actuelle->statut, 'agent_id' => $actuelle->agent_id];
