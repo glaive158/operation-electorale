@@ -82,7 +82,8 @@ class CodeReceptionTest extends TestCase
 
         $chef->refresh();
         $this->assertNotSame(self::CODE, $chef->code_reception_hash);
-        $this->assertTrue(Hash::check(self::CODE, $chef->code_reception_hash));
+        $this->assertTrue($this->service()->correspond($chef, self::CODE, $chef->code_reception_hash));
+        $this->assertFalse($this->service()->correspond($chef, '730184', $chef->code_reception_hash));
         $this->assertFalse($chef->doit_choisir_code);
         $this->assertSame(0, (int) $chef->code_echecs);
         $this->assertNull($chef->code_verrouille_le);
@@ -100,7 +101,7 @@ class CodeReceptionTest extends TestCase
         $this->assertCount(2, $historique);
         $this->assertNotNull($historique[0]->valide_au);
         $this->assertNull($historique[1]->valide_au);
-        $this->assertTrue(Hash::check('730184', $chef->fresh()->code_reception_hash));
+        $this->assertTrue($this->service()->correspond($chef, '730184', $chef->fresh()->code_reception_hash));
 
         $entree = JournalEntree::where('action', 'choix_code_reception')->orderBy('id')->first();
         $this->assertSame('utilisateur', $entree->objet_type);
@@ -397,5 +398,161 @@ class CodeReceptionTest extends TestCase
         $agent = User::where('email', 'agent_transport@exemple.sn')->sole();
         $this->put(route('users.update', $agent), ['name' => 'Diallo', 'email' => $agent->email, 'role' => 'logistique_gestionnaire'])->assertSessionHasNoErrors();
         $this->assertFalse($agent->fresh()->doit_choisir_code);
+    }
+
+    public function test_l_agent_de_transport_n_a_pas_de_page_de_code(): void
+    {
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $this->actingAs($agent);
+
+        $this->get(route('terrain.code.edit'))->assertForbidden();
+        $this->post(route('terrain.code.update'), $this->formulaire())->assertForbidden();
+        $this->assertNull($agent->fresh()->code_reception_hash);
+
+        // Au niveau du service aussi.
+        try {
+            $this->service()->choisir($agent, self::CODE, 'password');
+            $this->fail('Un agent de transport ne choisit pas de code.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Ce compte n\'a pas de code de réception.', $e->getMessage());
+        }
+        $this->expectException(LogicException::class);
+        $this->service()->enregistrerEchec($agent);
+    }
+
+    public function test_le_nouveau_mot_de_passe_trop_court_est_refuse_par_le_service(): void
+    {
+        $chef = $this->autorite();
+        $this->actingAs($chef);
+
+        try {
+            $this->service()->choisir($chef, self::CODE, 'password', 'court');
+            $this->fail('Un mot de passe de moins de 10 caractères aurait dû être refusé.');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame('Le nouveau mot de passe doit comporter au moins 10 caractères.', $e->getMessage());
+        }
+        $this->assertNull($chef->fresh()->code_reception_hash);
+        $this->assertTrue(Hash::check('password', $chef->fresh()->password));
+    }
+
+    public function test_code_jamais_en_clair_apres_un_echec_de_validation(): void
+    {
+        $chef = $this->autorite();
+        $this->actingAs($chef);
+
+        $this->post(route('terrain.code.update'), $this->formulaire(['code_confirmation' => '111222']))
+            ->assertSessionHasErrors('code');
+
+        $this->assertStringNotContainsString(self::CODE, json_encode(session()->all()));
+        $this->assertStringNotContainsString('111222', json_encode(session()->all()));
+        $this->assertStringNotContainsString('NouveauSecret2026', json_encode(session()->all()));
+        $this->assertStringNotContainsString(self::CODE, json_encode(session()->get('errors')?->getBag('default')->toArray() ?? []));
+        $this->assertStringNotContainsString(self::CODE, $this->get(route('terrain.code.edit'))->getContent());
+    }
+
+    public function test_le_middleware_repond_en_json_a_une_requete_json(): void
+    {
+        $this->actingAs($this->autorite());
+
+        $this->getJson(route('terrain.decharges.index'))->assertForbidden()
+            ->assertExactJson(['message' => 'Choisissez d\'abord votre code personnel de réception.']);
+    }
+
+    public function test_un_compte_qui_n_est_plus_autorite_n_est_plus_redirige(): void
+    {
+        $chef = $this->autorite();
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, self::CODE, 'password');
+
+        $this->actingAs(User::factory()->create(['role' => 'admin']));
+        $this->put(route('users.update', $chef), ['name' => 'Diallo', 'email' => $chef->email, 'role' => 'agent_transport', 'actif' => '1'])
+            ->assertSessionHasNoErrors();
+
+        $chef->refresh();
+        $this->assertSame('agent_transport', $chef->role);
+        $this->assertNull($chef->code_reception_hash);
+        $this->assertFalse($chef->doit_choisir_code);
+        $this->assertSame(0, (int) $chef->code_echecs);
+        $this->assertNotNull(CodeReception::where('user_id', $chef->id)->sole()->valide_au);
+        $this->assertSame(1, JournalEntree::where('action', 'changement_role_code_reception')->count());
+
+        $this->actingAs($chef)->get(route('terrain.decharges.index'))->assertOk();
+
+        // Même un indicateur resté à vrai ne bloque pas un compte sans rôle d'autorité.
+        $chef->forceFill(['doit_choisir_code' => true])->save();
+        $this->get(route('terrain.decharges.index'))->assertOk();
+    }
+
+    public function test_un_changement_de_role_annule_l_ancien_code(): void
+    {
+        $chef = $this->autorite();
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, self::CODE, 'password');
+        $chef->forceFill(['code_echecs' => 2])->save();
+        $this->assertNotNull($this->service()->codeActuel($chef));
+
+        $this->actingAs(User::factory()->create(['role' => 'admin']));
+        $this->put(route('users.update', $chef), ['name' => 'Diallo', 'email' => $chef->email, 'role' => 'prefet'])->assertSessionHasNoErrors();
+
+        $chef->refresh();
+        $this->assertSame('prefet', $chef->role);
+        $this->assertNull($this->service()->codeActuel($chef));
+        $this->assertTrue($chef->doit_choisir_code);
+        $this->assertSame(0, (int) $chef->code_echecs);
+        $this->assertNull($chef->code_verrouille_le);
+        $this->assertNull(CodeReception::where('user_id', $chef->id)->whereNull('valide_au')->first());
+
+        // L'ancien code reste vérifiable à l'instant où il était valide, jamais après.
+        $this->assertNull($this->service()->codeValideA($chef, now()->addMinute()));
+
+        // Une modification sans changement de rôle laisse le code en place.
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, '730184', 'password');
+        $this->actingAs(User::factory()->create(['role' => 'admin']));
+        $this->put(route('users.update', $chef), ['name' => 'Diallo Bis', 'email' => $chef->email, 'role' => 'prefet'])->assertSessionHasNoErrors();
+        $this->assertNotNull($this->service()->codeActuel($chef));
+        $this->assertFalse($chef->fresh()->doit_choisir_code);
+    }
+
+    public function test_un_compte_verrouille_ne_choisit_pas_de_code_avant_la_reinitialisation(): void
+    {
+        $chef = $this->autorite();
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, self::CODE, 'password');
+        $chef->forceFill(['code_echecs' => 3, 'code_verrouille_le' => now()])->save();
+        $ancien = $chef->fresh()->code_reception_hash;
+
+        try {
+            $this->service()->choisir($chef, '730184', 'password');
+            $this->fail('Un compte verrouillé ne choisit pas de code.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Code verrouillé : demandez une réinitialisation au responsable logistique.', $e->getMessage());
+        }
+        $this->assertSame($ancien, $chef->fresh()->code_reception_hash);
+        $this->assertNotNull($chef->fresh()->code_verrouille_le);
+
+        $this->actingAs(User::factory()->create(['role' => 'logistique_responsable']));
+        $this->service()->reinitialiser($chef, 'Compte verrouillé');
+
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, '730184', 'password');
+        $chef->refresh();
+        $this->assertNull($chef->code_verrouille_le);
+        $this->assertTrue($this->service()->correspond($chef, '730184', $chef->code_reception_hash));
+    }
+
+    public function test_correspond_lie_le_code_au_compte(): void
+    {
+        $chef = $this->autorite();
+        $autre = $this->autorite('prefet');
+        $this->actingAs($chef);
+        $this->service()->choisir($chef, self::CODE, 'password');
+        $hash = $chef->fresh()->code_reception_hash;
+
+        $this->assertTrue($this->service()->correspond($chef, self::CODE, $hash));
+        $this->assertFalse($this->service()->correspond($chef, '730184', $hash));
+        // Le haché d'un compte ne vaut pas pour un autre, et le code brut n'est pas ce qui est haché.
+        $this->assertFalse($this->service()->correspond($autre, self::CODE, $hash));
+        $this->assertFalse(Hash::check(self::CODE, $hash));
     }
 }

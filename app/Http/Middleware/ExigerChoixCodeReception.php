@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Services\Logistique\CodeReceptionService;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -16,7 +17,10 @@ class ExigerChoixCodeReception
     {
         $utilisateur = $request->user();
 
-        if ($utilisateur !== null && $utilisateur->doit_choisir_code && ! $request->routeIs('terrain.code.*')) {
+        if ($utilisateur !== null
+            && $utilisateur->doit_choisir_code
+            && $utilisateur->hasRole(CodeReceptionService::ROLES_AUTORITE)
+            && ! $request->routeIs('terrain.code.*')) {
             if ($request->expectsJson()) {
                 return response()->json(['message' => 'Choisissez d\'abord votre code personnel de réception.'], 403);
             }

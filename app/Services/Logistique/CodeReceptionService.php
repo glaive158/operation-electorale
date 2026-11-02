@@ -31,11 +31,18 @@ class CodeReceptionService
 
     private const MAX_MOTIF = 500;
 
+    private const MIN_MOT_DE_PASSE = 10;
+
+    private const SANS_CODE = 'Ce compte n\'a pas de code de réception.';
+
     public function choisir(User $u, string $code, string $motDePasse, ?string $nouveauMotDePasse = null): void
     {
         $this->exigerAuteur();
         if ((int) auth()->id() !== (int) $u->id) {
             throw new RegleLogistique('Vous ne pouvez choisir que votre propre code.');
+        }
+        if (! in_array($u->role, self::ROLES_AUTORITE, true)) {
+            throw new RegleLogistique(self::SANS_CODE);
         }
         if (! Hash::check($motDePasse, (string) $u->password)) {
             throw new RegleLogistique('Mot de passe incorrect.');
@@ -53,14 +60,24 @@ class CodeReceptionService
         if ($nouveauMotDePasse !== null && $nouveauMotDePasse === $motDePasse) {
             throw new InvalidArgumentException('Le nouveau mot de passe doit être différent de l\'actuel.');
         }
+        if ($nouveauMotDePasse !== null && mb_strlen($nouveauMotDePasse) < self::MIN_MOT_DE_PASSE) {
+            throw new InvalidArgumentException('Le nouveau mot de passe doit comporter au moins '.self::MIN_MOT_DE_PASSE.' caractères.');
+        }
 
         DB::transaction(function () use ($u, $code, $nouveauMotDePasse) {
             $actuel = $this->verrouillerCompte($u);
+            if (! in_array($actuel->role, self::ROLES_AUTORITE, true)) {
+                throw new RegleLogistique(self::SANS_CODE);
+            }
+            // Seule la réinitialisation par un responsable lève le verrou.
+            if ($actuel->code_verrouille_le !== null) {
+                throw new RegleLogistique('Code verrouillé : demandez une réinitialisation au responsable logistique.');
+            }
             $maintenant = now();
             $aUnCode = $actuel->code_reception_hash !== null;
 
             $this->cloreEntreeActive($actuel->id, $maintenant);
-            $hash = Hash::make($code);
+            $hash = $this->hacher($actuel, $code);
             CodeReception::create([
                 'user_id' => $actuel->id, 'hash' => $hash, 'valide_du' => $maintenant, 'cree_par' => auth()->id(),
             ]);
@@ -98,7 +115,7 @@ class CodeReceptionService
             throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
         }
         if (! in_array($u->role, self::ROLES_AUTORITE, true)) {
-            throw new RegleLogistique('Ce compte n\'a pas de code de réception.');
+            throw new RegleLogistique(self::SANS_CODE);
         }
 
         DB::transaction(function () use ($u, $motif) {
@@ -125,6 +142,43 @@ class CodeReceptionService
         $u->refresh();
     }
 
+    /**
+     * Après un changement de rôle (dans la transaction qui enregistre le compte) : l'ancien code ne vaut plus,
+     * et une autorité doit en choisir un nouveau. Un compte qui cesse d'être autorité n'a plus de code.
+     */
+    public function apresChangementDeRole(User $u): void
+    {
+        $this->exigerAuteur();
+
+        DB::transaction(function () use ($u) {
+            $actuel = $this->verrouillerCompte($u);
+            $autorite = in_array($actuel->role, self::ROLES_AUTORITE, true);
+            $avant = [
+                'code_defini' => $actuel->code_reception_hash !== null,
+                'verrouille' => $actuel->code_verrouille_le !== null,
+                'doit_choisir_code' => (bool) $actuel->doit_choisir_code,
+            ];
+
+            $this->cloreEntreeActive($actuel->id, now());
+            $actuel->forceFill([
+                'code_reception_hash' => null,
+                'code_echecs' => 0,
+                'code_verrouille_le' => null,
+                'doit_choisir_code' => $autorite,
+            ])->save();
+
+            Journal::noter('utilisateur', $actuel->id, 'changement_role_code_reception', $avant, [
+                'code_defini' => false, 'verrouille' => false, 'doit_choisir_code' => $autorite,
+            ]);
+        }, attempts: 3);
+    }
+
+    /** Le code saisi est-il celui dont $hash est l'empreinte ? Seul point de comparaison d'un code. */
+    public function correspond(User $u, string $code, string $hash): bool
+    {
+        return Hash::check($this->empreinte($u, $code), $hash);
+    }
+
     /** Le haché du code qui était valide à cet instant (null si l'autorité n'avait pas de code). */
     public function codeValideA(User $u, CarbonInterface $instant): ?string
     {
@@ -145,6 +199,9 @@ class CodeReceptionService
     public function enregistrerEchec(User $u): void
     {
         $this->exigerAuteur();
+        if (! in_array($u->role, self::ROLES_AUTORITE, true)) {
+            throw new LogicException('Échec de code enregistré pour un compte sans code de réception.');
+        }
 
         DB::transaction(function () use ($u) {
             $actuel = $this->verrouillerCompte($u);
@@ -172,6 +229,17 @@ class CodeReceptionService
                 }
             }
         }, attempts: 3);
+    }
+
+    /** Le code seul (un million de valeurs) serait trop facile à retrouver d'un haché volé : on le lie au compte et à la clé de l'application. */
+    private function empreinte(User $u, string $code): string
+    {
+        return hash_hmac('sha256', $u->id.':'.$code, (string) config('app.key'));
+    }
+
+    private function hacher(User $u, string $code): string
+    {
+        return Hash::make($this->empreinte($u, $code));
     }
 
     private function verrouillerCompte(User $u): User

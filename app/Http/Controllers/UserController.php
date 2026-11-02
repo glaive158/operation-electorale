@@ -63,11 +63,10 @@ class UserController extends Controller
         $data['password'] = Hash::make($data['password']);
         $data['actif']    = $request->boolean('actif', true);
 
-        $user = User::create($data);
         // Une autorité de terrain choisit son code personnel de réception à sa première connexion.
-        if (in_array($user->role, CodeReceptionService::ROLES_AUTORITE, true)) {
-            $user->forceFill(['doit_choisir_code' => true])->save();
-        }
+        (new User($data))->forceFill([
+            'doit_choisir_code' => in_array($data['role'], CodeReceptionService::ROLES_AUTORITE, true),
+        ])->save();
         return redirect()->route('users.index')->with('success', 'Utilisateur créé avec succès.');
     }
 
@@ -120,12 +119,15 @@ class UserController extends Controller
         }
         $data['actif'] = $request->boolean('actif');
 
-        $ancienRole = $user->role;
-        $user->update($data);
-        // Un compte qui devient autorité, ou change d'autorité, choisit un nouveau code de réception.
-        if ($user->role !== $ancienRole && in_array($user->role, CodeReceptionService::ROLES_AUTORITE, true)) {
-            $user->forceFill(['doit_choisir_code' => true])->save();
-        }
+        // Un changement de rôle, dans un sens ou dans l'autre, annule le code de réception : le compte est
+        // enregistré et son code annulé ensemble.
+        DB::transaction(function () use ($user, $data) {
+            $ancienRole = $user->role;
+            $user->update($data);
+            if ($user->role !== $ancienRole) {
+                app(CodeReceptionService::class)->apresChangementDeRole($user);
+            }
+        });
         return redirect()->route('users.index')->with('success', 'Utilisateur mis à jour.');
     }
 
