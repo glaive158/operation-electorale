@@ -1,0 +1,64 @@
+[
+    {
+        "note": "contenu de base : lignes dans le désordre, observation vide => null, observation rognée",
+        "entree": {
+            "decharge_id": 4,
+            "decharge_identifiant": "DCH-2026-0004",
+            "remise_id": 7,
+            "cle": "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab",
+            "signataire": {
+                "user_id": 12,
+                "nom": "Awa Diop",
+                "qualite": "Préfète"
+            },
+            "lignes": [
+                {
+                    "materiel_id": 5,
+                    "recu": 4,
+                    "defectueux": 0,
+                    "observation": "   "
+                },
+                {
+                    "materiel_id": 3,
+                    "recu": 10,
+                    "defectueux": 2,
+                    "observation": " Caisse écrasée / vérifiée "
+                },
+                {
+                    "materiel_id": 9,
+                    "recu": 0,
+                    "defectueux": 0,
+                    "observation": null
+                }
+            ],
+            "horodatage_terminal": "2026-11-05T10:00:00+00:00"
+        },
+        "json": "{\"cle\":\"a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab\",\"decharge_id\":4,\"decharge_identifiant\":\"DCH-2026-0004\",\"horodatage_terminal\":\"2026-11-05T10:00:00+00:00\",\"lignes\":[{\"defectueux\":2,\"materiel_id\":3,\"observation\":\"Caisse écrasée / vérifiée\",\"recu\":10},{\"defectueux\":0,\"materiel_id\":5,\"observation\":null,\"recu\":4},{\"defectueux\":0,\"materiel_id\":9,\"observation\":null,\"recu\":0}],\"remise_id\":7,\"signataire\":{\"nom\":\"Awa Diop\",\"qualite\":\"Préfète\",\"user_id\":12}}",
+        "empreinte": "cdb8e1af193564adaffd9a18734a4ad4431b70c9939197d3f0972b85d85cd06b"
+    },
+    {
+        "note": "unicode, décalage horaire négatif, une seule ligne, observation avec guillemets et barre inversée",
+        "entree": {
+            "decharge_id": 31,
+            "decharge_identifiant": "DCH-2026-0031",
+            "remise_id": 112,
+            "cle": "Zz9-Yy8-Xx7-Ww6-Vv5",
+            "signataire": {
+                "user_id": 2048,
+                "nom": "Éléonore Çelik",
+                "qualite": "Sous-préfète de Thiès"
+            },
+            "lignes": [
+                {
+                    "materiel_id": 1,
+                    "recu": 10000000,
+                    "defectueux": 2,
+                    "observation": "Fissure \"côté\" gauche\\n"
+                }
+            ],
+            "horodatage_terminal": "2026-11-06T09:30:15-03:30"
+        },
+        "json": "{\"cle\":\"Zz9-Yy8-Xx7-Ww6-Vv5\",\"decharge_id\":31,\"decharge_identifiant\":\"DCH-2026-0031\",\"horodatage_terminal\":\"2026-11-06T09:30:15-03:30\",\"lignes\":[{\"defectueux\":2,\"materiel_id\":1,\"observation\":\"Fissure \\\"côté\\\" gauche\\\\n\",\"recu\":10000000}],\"remise_id\":112,\"signataire\":{\"nom\":\"Éléonore Çelik\",\"qualite\":\"Sous-préfète de Thiès\",\"user_id\":2048}}",
+        "empreinte": "96108f489dd053e45827d99b2bbca8130d73e6eb84c5dd69830d5e4bcff93d7e"
+    }
+]

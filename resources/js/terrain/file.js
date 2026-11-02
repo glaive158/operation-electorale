@@ -175,7 +175,13 @@ export function creerFile({ stockage, horloge = () => Date.now(), delaiReessaiMs
             return structuredClone(stocke);
         }),
 
-        /** Le prochain élément à envoyer (copie), ou null : file suspendue, rien en attente, ou tout est bloqué. */
+        /**
+         * Le prochain élément à envoyer (copie), ou null : file suspendue, rien en attente, ou tout est bloqué.
+         *
+         * L'appelant (sync.js) doit être « single-flight » : un seul envoi à la fois, il attend marquer() avant de
+         * redemander prochain(). Aucun marqueur « en cours » n'est tenu ici : deux envois simultanés du même élément
+         * seraient absorbés par l'idempotence du serveur (même clé, même bloc, même contenu), mais on les évite.
+         */
         async prochain() {
             if (suspendue) return null;
             const maintenant = horloge();

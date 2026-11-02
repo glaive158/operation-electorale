@@ -133,7 +133,7 @@
         "empreinte": "84fe3f40e66519dbc3db78ab7a9a1d98ac4e97d88e9d9eb94a31b68373f631be"
     },
     {
-        "note": "objet dont les clés \"1\",\"0\" trient en 0..n-1 : encodé comme une LISTE [\"b\",\"a\"] (PHP array_is_list après tri) ; le JS doit faire de même",
+        "note": "objet dont les clés \"1\",\"0\" trient en 0..n-1 : encodé comme une LISTE [\"b\",\"a\"] (PHP array_is_list après tri) ; le JS doit faire de même. Les objets à clés entières de 11 clés ou plus ne sont pas pris en charge (PHP décide selon l'ordre d'insertion)",
         "entree": {
             "1": "a",
             "0": "b"

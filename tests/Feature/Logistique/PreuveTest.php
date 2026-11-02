@@ -650,6 +650,38 @@ class PreuveTest extends TestCase
         $this->assertSame('verifiee_code', $this->verifier($contenu, $this->bloc($contenu))['verification']);
     }
 
+    /**
+     * Vecteurs partagés avec la tablette (tests/js/preuve.test.js) : même entrée, même JSON canonique, même empreinte.
+     * Les identifiants de décharge et de remise viennent de la base : ils sont remplacés par ceux du vecteur après
+     * avoir vérifié qu'ils sont bien ceux de la remise.
+     */
+    public function test_vecteurs_partages_du_contenu_de_preuve(): void
+    {
+        $vecteurs = json_decode(file_get_contents(base_path('tests/fixtures/contenu-preuve.json')), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertGreaterThanOrEqual(2, count($vecteurs));
+
+        foreach ($vecteurs as $i => $vecteur) {
+            $e = $vecteur['entree'];
+            $contenu = $this->service()->contenuPreuve(
+                $this->remise,
+                ['nom' => $e['signataire']['nom'], 'qualite' => $e['signataire']['qualite']],
+                $e['signataire']['user_id'],
+                $e['lignes'],
+                $e['cle'],
+                $e['horodatage_terminal'],
+            );
+
+            $this->assertSame($this->chargee->id, $contenu['decharge_id']);
+            $this->assertSame($this->remise->id, $contenu['remise_id']);
+            $contenu['decharge_id'] = $e['decharge_id'];
+            $contenu['decharge_identifiant'] = $e['decharge_identifiant'];
+            $contenu['remise_id'] = $e['remise_id'];
+
+            $this->assertSame($vecteur['json'], Canonique::json($contenu), "JSON du vecteur {$i}");
+            $this->assertSame($vecteur['empreinte'], Canonique::empreinte($contenu), "Empreinte du vecteur {$i}");
+        }
+    }
+
     public function test_colonnes_de_preuve_et_valeurs_par_defaut(): void
     {
         foreach (['verification_identite', 'contestation', 'bloc_empreinte', 'gps_lat', 'gps_lng', 'gps_precision', 'signataire_user_id', 'delegation_id'] as $colonne) {

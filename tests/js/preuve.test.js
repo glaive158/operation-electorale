@@ -1,10 +1,11 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { construireBloc, contenuPreuve, importerCle } from '../../resources/js/terrain/preuve.js';
 import { empreinte, json } from '../../resources/js/terrain/canonique.js';
 
 const subtle = globalThis.crypto.subtle;
-const CODE = 'Zq-482915!';
+const CODE = '908173';
 const CLE = 'a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab';
 
 function enBase64(octets) {
@@ -66,7 +67,6 @@ test('preuve : le code n\'est pas dans l\'objet renvoyé', async () => {
     const resultat = await construireBloc({ code: CODE, cle: CLE, contenu: contenu(), clePublique: await importerCle(pem) });
     assert.deepEqual(Object.keys(resultat).sort(), ['bloc', 'empreinte']);
     assert.ok(!JSON.stringify(resultat).includes(CODE));
-    assert.ok(!JSON.stringify(resultat).includes('Zq-'));
 });
 
 test('preuve : deux blocs du même clair diffèrent (OAEP aléatoire) : le bloc doit donc être conservé tel quel', async () => {
@@ -78,27 +78,44 @@ test('preuve : deux blocs du même clair diffèrent (OAEP aléatoire) : le bloc 
     assert.equal(a.empreinte, b.empreinte);
 });
 
-test('preuve : l\'empreinte porte sur le contenu normalisé (chaînes rognées, observation vide = null)', async () => {
+test('preuve : contenuPreuve rogne les saisies (nom, qualité, observations) et normalise les lignes', () => {
     const c = contenu();
     assert.equal(c.signataire.nom, 'Awa Diop');
     assert.deepEqual(c.lignes.map((l) => l.materiel_id), [3, 5], 'lignes triées par article');
     assert.equal(c.lignes[1].observation, null);
     assert.equal(c.lignes[0].observation, 'Caisse écrasée / vérifiée');
+});
 
+test('preuve : construireBloc empreinte le contenu tel que reçu, sans le rogner', async () => {
     const { pem } = await genererPaire();
     const cle = await importerCle(pem);
-    const brut = structuredClone(c);
-    brut.signataire.nom = '  Awa Diop  ';
-    const a = await construireBloc({ code: CODE, cle: CLE, contenu: c, clePublique: cle });
-    const b = await construireBloc({ code: CODE, cle: CLE, contenu: brut, clePublique: cle });
-    assert.equal(a.empreinte, b.empreinte);
+    const c = contenu();
+    // Un identifiant de décharge vient du serveur, qui ne le rogne pas : il est empreinté tel quel.
+    c.decharge_identifiant = '  DCH-2026-0004\n';
+    const { empreinte: emp } = await construireBloc({ code: CODE, cle: CLE, contenu: c, clePublique: cle });
+    assert.equal(emp, await empreinte(c));
+    assert.notEqual(emp, await empreinte({ ...c, decharge_identifiant: 'DCH-2026-0004' }));
+});
+
+test('preuve : vecteurs partagés avec PHP (contenuPreuve, json et empreinte)', async () => {
+    const vecteurs = JSON.parse(readFileSync(new URL('../fixtures/contenu-preuve.json', import.meta.url), 'utf8'));
+    assert.ok(vecteurs.length >= 2);
+    for (const v of vecteurs) {
+        const c = contenuPreuve(v.entree);
+        assert.equal(json(c), v.json, v.note);
+        assert.equal(await empreinte(c), v.empreinte, v.note);
+    }
 });
 
 test('preuve : entrées invalides refusées sans produire de bloc', async () => {
     const { pem } = await genererPaire();
     const clePublique = await importerCle(pem);
-    await assert.rejects(construireBloc({ code: '', cle: CLE, contenu: contenu(), clePublique }), /code/i);
-    await assert.rejects(construireBloc({ code: 1234, cle: CLE, contenu: contenu(), clePublique }), /code/i);
+    for (const mauvais of ['', '12345', '1234567', 'abcdef', '12 456', '１２３４５６', 482915, null]) {
+        await assert.rejects(
+            construireBloc({ code: mauvais, cle: CLE, contenu: contenu(), clePublique }),
+            (e) => /code/i.test(e.message) && (typeof mauvais !== 'string' || mauvais === '' || !e.message.includes(mauvais)),
+        );
+    }
     await assert.rejects(construireBloc({ code: CODE, cle: 'court', contenu: contenu(), clePublique }), /cl[ée]/i);
     await assert.rejects(construireBloc({ code: CODE, cle: CLE, contenu: contenu(), clePublique: null }), /cl[ée]/i);
     await assert.rejects(importerCle('pas une clé'), Error);

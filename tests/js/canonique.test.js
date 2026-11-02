@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { json, empreinte, normaliser } from '../../resources/js/terrain/canonique.js';
+import { json, empreinte, normaliser, rogner } from '../../resources/js/terrain/canonique.js';
 
 const vecteurs = JSON.parse(readFileSync(new URL('../fixtures/canonique.json', import.meta.url), 'utf8'));
 
@@ -20,10 +20,11 @@ test('canonique : les clés sont triées par octets UTF-8, pas par unités UTF-1
     assert.equal(json(entree), '{"～":2,"\u{1F600}":1}');
 });
 
-test('canonique : une liste de dix éléments et un objet aux clés 0..10 ne se confondent pas', () => {
+test('canonique : objet à clés entières de 11 clés ou plus : non pris en charge, le JS applique le tri en chaînes', () => {
     const objet = {};
     for (let i = 0; i <= 10; i++) objet[String(i)] = i;
-    // Triées comme des chaînes : 0,1,10,2,... ce n'est pas une liste (array_is_list est faux côté PHP).
+    // Hors contrat : le PHP décide selon l'ordre d'insertion du fil (array_is_list avant ksort), ce que JavaScript
+    // ne conserve pas. Triées comme des chaînes : 0,1,10,2,... ce n'est pas une liste. Le domaine n'en contient aucun.
     assert.equal(json(objet), '{"0":0,"1":1,"10":10,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9}');
     assert.equal(json({ 0: 'a', 1: 'b', 2: 'c' }), '["a","b","c"]');
 });
@@ -42,6 +43,7 @@ test('canonique : nombres non entiers, valeurs non représentables et chaînes i
     assert.throws(() => json({ a: NaN }), TypeError);
     assert.throws(() => json({ a: Infinity }), TypeError);
     assert.throws(() => json({ a: 2 ** 60 }), TypeError);
+    assert.throws(() => json({ a: 10n }), TypeError);
     assert.throws(() => json({ a: undefined }), TypeError);
     assert.throws(() => json({ a: () => 1 }), TypeError);
     assert.throws(() => json({ a: new Date() }), TypeError);
@@ -58,5 +60,6 @@ test('canonique : normaliser retire les blancs de bord comme le serveur et laiss
     const brut = { nom: '  Awa Diop \n', obs: ' x​', n: 3, liste: [' a ', { k: ' b' }], nul: null, ok: true };
     assert.deepEqual(normaliser(brut), { nom: 'Awa Diop', obs: 'x', n: 3, liste: ['a', { k: 'b' }], nul: null, ok: true });
     assert.equal(normaliser('a  b'), 'a  b');
+    assert.equal(rogner('\u0085 y \u0085'), 'y');
     assert.equal(brut.nom, '  Awa Diop \n', 'l\'entrée n\'est pas modifiée');
 });

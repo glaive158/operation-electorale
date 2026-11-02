@@ -10,6 +10,10 @@ namespace App\Support;
  * Règles : clés d'objet triées récursivement comme des chaînes (octets), ordre des listes conservé,
  * JSON sans espace, UTF-8 et barres obliques non échappés. Un tableau PHP vide est une liste : il
  * s'encode « [] », jamais « {} ».
+ *
+ * Non pris en charge : un objet à clés entières de 11 clés ou plus (« 0 » à « 10 » et au-delà) reçu du fil. La liste
+ * est testée avant le tri (array_is_list puis ksort SORT_STRING) : l'ordre d'insertion décide, ce qu'un objet JavaScript
+ * ne conserve pas. Le domaine n'en contient aucun (les lignes sont des listes) ; la logique reste juste pour les vraies listes.
  */
 final class Canonique
 {

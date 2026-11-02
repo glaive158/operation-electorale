@@ -11,6 +11,10 @@
  * - chaînes écrites comme json_encode(JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : « / » et les
  *   caractères non ASCII restent tels quels, seuls « " », « \ », les contrôles et U+2028/U+2029 sont échappés ;
  * - entiers uniquement (aucun flottant dans le domaine) ; null, true, false.
+ *
+ * Non pris en charge : un objet à clés entières de 11 clés ou plus (« 0 » à « 10 » et au-delà). Le PHP décide alors
+ * selon l'ordre d'insertion (array_is_list avant ksort), que JavaScript ne conserve pas ; le domaine n'en a aucun
+ * (les lignes sont des listes). Le JS suit la règle des clés triées comme des chaînes.
  */
 
 const encodeur = new TextEncoder();
@@ -82,8 +86,6 @@ function encoder(valeur) {
             }
 
             return String(valeur);
-        case 'bigint':
-            return valeur.toString();
         case 'string':
             return chaine(valeur);
         case 'object': {
@@ -122,7 +124,7 @@ export async function empreinte(valeur) {
 // Même ensemble que Illuminate\Support\Str::trim (caractères blancs et invisibles), appliqué aux saisies
 // par le middleware TrimStrings : le serveur rogne les chaînes reçues avant de recalculer l'empreinte.
 const BLANCS = '\\s\\t\\n\\r\\v\\0'
-    + '\\u0009\\u0020\\u00A0\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180E'
+    + '\\u0009\\u0020\\u0085\\u00A0\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180E'
     + '\\u2000-\\u200F\\u202F\\u205F\\u2060-\\u2065\\u206A-\\u206F\\u3000\\u2800\\u3164\\uFEFF\\uFFA0'
     + '\\u{1D159}\\u{1D173}-\\u{1D17A}\\u{E0020}';
 const BORDS = new RegExp(`^[${BLANCS}]+|[${BLANCS}]+$`, 'gu');

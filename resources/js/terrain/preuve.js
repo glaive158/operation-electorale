@@ -6,10 +6,11 @@
  * re-chiffrement du même clair donne un autre bloc, que le serveur refuserait comme un autre envoi).
  */
 
-import { empreinte, json, normaliser, rogner } from './canonique.js';
+import { empreinte, json, rogner } from './canonique.js';
 
 const ALGORITHME = { name: 'RSA-OAEP', hash: 'SHA-1' };
 const FORMAT_CLE = /^[A-Za-z0-9-]{16,64}$/;
+const FORMAT_CODE = /^[0-9]{6}$/;
 
 function enBase64(octets) {
     let binaire = '';
@@ -81,15 +82,15 @@ export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cl
  * Construit le bloc de preuve.
  *
  * @param {object} p
- * @param {string} p.code          code personnel saisi (jamais renvoyé ni conservé)
+ * @param {string} p.code          code personnel saisi, 6 chiffres (jamais renvoyé ni conservé)
  * @param {string} p.cle           clé d'idempotence de la déclaration (16 à 64 [A-Za-z0-9-])
- * @param {object} p.contenu       contenu de la déclaration (voir contenuPreuve) ; son empreinte entre dans le bloc
+ * @param {object} p.contenu       contenu de la déclaration (voir contenuPreuve) ; son empreinte (sans autre transformation) entre dans le bloc
  * @param {CryptoKey|string} p.clePublique  clé importée par importerCle(), ou son PEM
  * @returns {Promise<{bloc: string, empreinte: string}>}  bloc en base64 (taille du module RSA) et empreinte du contenu
  */
 export async function construireBloc({ code, cle, contenu, clePublique }) {
-    if (typeof code !== 'string' || code === '') {
-        throw new TypeError('Code personnel manquant.');
+    if (typeof code !== 'string' || !FORMAT_CODE.test(code)) {
+        throw new TypeError('Code personnel invalide : 6 chiffres attendus.');
     }
     if (typeof cle !== 'string' || !FORMAT_CLE.test(cle)) {
         throw new TypeError('Clé d\'idempotence invalide (16 à 64 caractères A-Z a-z 0-9 -).');
@@ -102,9 +103,15 @@ export async function construireBloc({ code, cle, contenu, clePublique }) {
         throw new TypeError('Clé publique de preuve manquante : synchroniser avant de signer.');
     }
 
-    const empreinteContenu = await empreinte(normaliser(contenu));
+    // Le contenu est empreinté tel qu'il est reçu : seules les saisies de l'utilisateur sont rognées, et
+    // seulement dans contenuPreuve (le serveur ne rogne que ce qu'il reçoit, pas ses propres données).
+    const empreinteContenu = await empreinte(contenu);
     const clair = new TextEncoder().encode(json({ code, cle, empreinte: empreinteContenu }));
-    const chiffre = new Uint8Array(await globalThis.crypto.subtle.encrypt(ALGORITHME, publique, clair));
+    try {
+        const chiffre = new Uint8Array(await globalThis.crypto.subtle.encrypt(ALGORITHME, publique, clair));
 
-    return { bloc: enBase64(chiffre), empreinte: empreinteContenu };
+        return { bloc: enBase64(chiffre), empreinte: empreinteContenu };
+    } finally {
+        clair.fill(0);
+    }
 }
