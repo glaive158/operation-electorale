@@ -574,7 +574,7 @@ class RestitutionService
     /**
      * Écarts de restitution du cycle : une ligne par (détenteur, article), en cinq requêtes au plus quel que soit
      * le volume. `non_restitue` (attendu − retour déclaré, jamais négatif) n'existe qu'une fois une déclaration
-     * retenue ; `perdu_en_retour` (retour déclaré − reçu au central, jamais négatif) seulement pour une restitution
+     * retenue (tant que la dernière restitution n'en a pas, c'est le reliquat des précédentes, null s'il n'y en a aucune) ; `perdu_en_retour` (retour déclaré − reçu au central, jamais négatif) seulement pour une restitution
      * reçue au central ou contrôlée : avant la réception, un reçu à zéro ferait passer tout le retour pour perdu.
      * Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante n'attend que le reliquat de la
      * précédente) est cumulé : le retour déclaré et le reçu s'additionnent, l'attendu est ce qui avait déjà été
@@ -629,7 +629,8 @@ class RestitutionService
                 'attendu' => $avant + (int) $l->attendu,
                 'declare_restitue' => $avant + $declare,
                 'recu_central' => ($precedent['recu_central'] ?? 0) + $recu,
-                'non_restitue' => $retenues->has($l->restitution_id) ? max(0, (int) $l->attendu - $declare) : null,
+                // Sans déclaration retenue sur la dernière restitution, le reliquat des précédentes reste dû.
+                'non_restitue' => $retenues->has($l->restitution_id) ? max(0, (int) $l->attendu - $declare) : ($precedent['non_restitue'] ?? null),
                 'perdu_en_retour' => $recue ? ($precedent['perdu_en_retour'] ?? 0) + max(0, $declare - $recu) : ($precedent['perdu_en_retour'] ?? null),
                 'justification' => $l->justification ?? ($precedent['justification'] ?? null),
             ];

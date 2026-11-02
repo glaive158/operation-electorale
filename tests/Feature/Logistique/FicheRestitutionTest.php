@@ -14,6 +14,7 @@ use App\Models\User;
 use App\Services\Logistique\RestitutionPdfService;
 use App\Services\Logistique\RestitutionService;
 use App\Services\Logistique\StockService;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -290,6 +291,7 @@ class FicheRestitutionTest extends TestCase
 
     public function test_contenu_de_la_fiche(): void
     {
+        Carbon::setTestNow('2026-11-10 08:00:00');
         $sousPrefet = User::factory()->create(['role' => 'sous_prefet', 'name' => 'Ba', 'prenom' => 'Mamadou']);
         $adjoint = User::factory()->create(['role' => 'sous_prefet', 'name' => 'Sow', 'prenom' => 'Awa']);
         $this->sousPrefecture1->forceFill(['autorite_user_id' => $sousPrefet->id])->save();
@@ -298,37 +300,48 @@ class FicheRestitutionTest extends TestCase
             'du' => now()->subDay(), 'au' => now()->addDay(), 'motif' => 'Intérim', 'cree_par' => $this->responsable->id,
         ]);
         $agent = User::factory()->create(['role' => 'agent_transport', 'name' => 'Ndiaye', 'prenom' => 'Ibrahima']);
-        $gestionnaire = User::factory()->create(['role' => 'logistique_gestionnaire', 'name' => 'Faye', 'prenom' => 'Fatou']);
+        $receptionnaire = User::factory()->create(['role' => 'logistique_gestionnaire', 'name' => 'Faye', 'prenom' => 'Fatou']);
+        $controleur = User::factory()->create(['role' => 'logistique_gestionnaire', 'name' => 'Sy', 'prenom' => 'Moussa']);
 
         $r = $this->restitution([$this->urnes->id => [100, 90], $this->isoloirs->id => [20, 20]], 'a_preparer', false);
         $this->declaration($r, [
             'signataire_user_id' => $adjoint->id, 'delegation_id' => $delegation->id, 'verification_identite' => 'compte',
             'horodatage_terminal' => '2026-11-10 08:15:00',
         ]);
+        Carbon::setTestNow('2026-11-10 14:20:00');
         $this->service()->affecterAgent($r, $agent);
         $this->service()->prendreEnCharge($r, $agent);
 
-        $this->actingAs($gestionnaire);
+        Carbon::setTestNow('2026-11-12 09:30:00');
+        $this->actingAs($receptionnaire);
         $this->service()->receptionner($r, [$this->urnes->id => 88, $this->isoloirs->id => 20]);
+        Carbon::setTestNow('2026-11-12 11:45:00');
+        $this->actingAs($controleur);
         $this->service()->controler($r, [
             $this->urnes->id => ['bon' => 80, 'a_reparer' => 5, 'reforme' => 3],
             $this->isoloirs->id => ['bon' => 20, 'a_reparer' => 0, 'reforme' => 0],
         ]);
+        Carbon::setTestNow('2026-11-13 16:05:00');
         $this->actingAs($this->responsable);
         $this->service()->deciderReforme($this->ligne($r, $this->urnes->id), 'Urnes brisées, irréparables');
         $this->assertSame('controlee', $r->fresh()->statut);
+
+        // Cellules bornées : un chiffre égaré ailleurs dans la page ne peut pas satisfaire l'ordre attendu.
+        $nom = fn (string $libelle) => "<td>{$libelle}</td>";
+        $n = fn (int $v) => '<td class="num">'.$v.'</td>';
 
         $declaration = $this->pdf()->html($r->fresh(), 'declaration');
         $this->seeInOrder($declaration, [
             'FICHE DE RESTITUTION DU MATÉRIEL ÉLECTORAL RÉUTILISABLE',
             'Exemplaire de déclaration',
-            'Sous-préfecture de Sindia', 'Cycle A',
-            'Article', 'Attendu', 'Restitué',
-            'Urnes', '100', '90',
-            'Isoloirs', '20', '20',
-            'Awa Sow', 'par délégation de Mamadou Ba', 'Confirmée depuis le compte',
-            'Ibrahima Ndiaye',
-        ]);
+            '<td>Sous-préfecture de Sindia</td>', 'Cycle A',
+            '<th>Article</th>', '<th>Attendu</th>', '<th>Restitué</th>',
+            $nom('Urnes'), $n(100), $n(90),
+            $nom('Isoloirs'), $n(20), $n(20),
+            'Awa Sow, par délégation de Mamadou Ba', 'Confirmée depuis le compte',
+            'terminal : 10/11/2026 08:15 ; serveur : 10/11/2026 08:00',
+            'Ibrahima Ndiaye — le 10/11/2026 14:20',
+        ], false);
         foreach (['Reçu au central', 'Bon', 'À réparer', 'Réformé', 'Urnes brisées'] as $absent) {
             $this->assertStringNotContainsString($absent, $declaration, "« {$absent} » n'a pas sa place sur l'exemplaire de déclaration.");
         }
@@ -337,18 +350,55 @@ class FicheRestitutionTest extends TestCase
         $this->seeInOrder($controle, [
             'FICHE DE RESTITUTION DU MATÉRIEL ÉLECTORAL RÉUTILISABLE',
             'Exemplaire de contrôle',
-            'Sous-préfecture de Sindia', 'Cycle A',
-            'Article', 'Attendu', 'Restitué', 'Reçu au central', 'Bon', 'À réparer', 'Réformé',
-            'Urnes', '100', '90', '88', '80', '5', '3',
-            'Isoloirs', '20', '20', '20', '20', '0', '0',
-            'Awa Sow', 'par délégation de Mamadou Ba',
-            'Ibrahima Ndiaye',
-            'Fatou Faye',
-            'Urnes brisées, irréparables',
-        ]);
+            '<td>Sous-préfecture de Sindia</td>', 'Cycle A',
+            '<th>Article</th>', '<th>Attendu</th>', '<th>Restitué</th>', '<th>Reçu au central</th>', '<th>Bon</th>', '<th>À réparer</th>', '<th>Réformé</th>',
+            $nom('Urnes'), $n(100), $n(90), $n(88), $n(80), $n(5), $n(3),
+            $nom('Isoloirs'), $n(20), $n(20), $n(20), $n(20), $n(0), $n(0),
+            'Awa Sow, par délégation de Mamadou Ba',
+            'Ibrahima Ndiaye — le 10/11/2026 14:20',
+            'Réception : Fatou Faye — le 12/11/2026 09:30',
+            'Contrôle : Moussa Sy — le 12/11/2026 11:45',
+            "Urnes : 3 réformé(s) — {$this->responsable->nom_complet}, le 13/11/2026 16:05 — motif : Urnes brisées, irréparables",
+        ], false);
         $this->assertStringContainsString('/logistique/restitutions/'.$r->id, $this->pdf()->urlQr($r));
         $this->assertStringStartsWith(rtrim((string) config('app.url'), '/'), $this->pdf()->urlQr($r));
         $this->assertStringContainsString('data:image/png;base64,', $controle);
+    }
+
+    public function test_ecarts_cumules_sur_deux_restitutions_du_meme_detenteur(): void
+    {
+        $r1 = $this->restitution([$this->urnes->id => [100, 90]], 'en_retour');
+        $this->service()->receptionner($r1, [$this->urnes->id => 85]);
+        $this->service()->controler($r1, [$this->urnes->id => ['bon' => 85, 'a_reparer' => 0, 'reforme' => 0]]);
+        $this->assertSame('controlee', $r1->fresh()->statut);
+        $this->service()->justifier($this->ligne($r1, $this->urnes->id), 'Cinq urnes détruites.');
+
+        $r2 = $this->restitution([$this->urnes->id => [10, 4]], 'a_preparer');
+
+        $this->assertCount(1, $this->service()->ecarts($this->cycle));
+        $ecart = $this->ecart($r2, $this->urnes->id);
+        $this->assertSame(100, $ecart['attendu']);
+        $this->assertSame(94, $ecart['declare_restitue']);
+        $this->assertSame(85, $ecart['recu_central']);
+        $this->assertSame(6, $ecart['non_restitue']);
+        $this->assertSame(5, $ecart['perdu_en_retour'], 'Le perdu de la première restitution est conservé tant que la seconde n\'est pas reçue.');
+        $this->assertSame('Cinq urnes détruites.', $ecart['justification'], 'Sans justification sur la ligne récente, celle de la plus ancienne.');
+        $this->assertSame($this->ligne($r2, $this->urnes->id)->id, $ecart['ligne_id']);
+        $this->assertSame($r2->id, $ecart['restitution_id']);
+    }
+
+    public function test_non_restitue_reporte_tant_que_la_derniere_restitution_n_a_pas_de_declaration(): void
+    {
+        $r1 = $this->restitution([$this->urnes->id => [100, 90]], 'en_retour');
+        $this->service()->receptionner($r1, [$this->urnes->id => 90]);
+        $this->service()->controler($r1, [$this->urnes->id => ['bon' => 90, 'a_reparer' => 0, 'reforme' => 0]]);
+        $this->restitution([$this->urnes->id => [10, 0]], 'a_preparer', false);
+
+        $this->assertSame(10, $this->ecart($r1, $this->urnes->id)['non_restitue']);
+
+        // Aucune restitution de la paire n'a de déclaration retenue : toujours inconnu.
+        $autre = $this->restitution([$this->isoloirs->id => [10, 0]], 'a_preparer', false);
+        $this->assertNull($this->ecart($autre, $this->isoloirs->id)['non_restitue']);
     }
 
     public function test_identite_non_etablie_jamais_imprimee_comme_confirmee(): void
@@ -364,8 +414,8 @@ class FicheRestitutionTest extends TestCase
     }
 
     /** Ordre des valeurs dans le HTML rendu (les valeurs sont échappées comme le rendu). */
-    private function seeInOrder(string $html, array $valeurs): void
+    private function seeInOrder(string $html, array $valeurs, bool $echapper = true): void
     {
-        TestResponse::fromBaseResponse(response($html))->assertSeeInOrder($valeurs);
+        TestResponse::fromBaseResponse(response($html))->assertSeeInOrder($valeurs, $echapper);
     }
 }
