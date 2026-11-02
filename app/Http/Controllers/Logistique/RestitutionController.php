@@ -68,6 +68,12 @@ class RestitutionController extends Controller
         );
     }
 
+    /** Remet les attendus au solde courant du détenteur, tant que rien n'est déclaré (P6-R41). */
+    public function recalculer(Restitution $restitution)
+    {
+        return $this->executer(fn () => $this->restitutions->recalculer($restitution), 'Attendus recalculés.');
+    }
+
     public function show(Restitution $restitution)
     {
         $restitution->load([
@@ -91,6 +97,9 @@ class RestitutionController extends Controller
             'retenue' => $retenue,
             'aVerifier' => $aVerifier,
             'administrer' => Gate::allows('logistique-administrer'),
+            // Les attendus ne bougent plus sous une déclaration active (même à vérifier).
+            'peutRecalculer' => Gate::allows('logistique-administrer') && $restitution->statut === 'a_preparer'
+                && ! $declarations->contains(fn (RestitutionDeclaration $d) => ! in_array($d->statut, ['ecartee', 'remplacee'], true)),
             'agents' => $restitution->statut === 'a_preparer'
                 ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
                 : collect(),

@@ -292,6 +292,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('remises/{remise}/arbitrage', [RemiseController::class, 'arbitrer'])->whereNumber('remise')->name('remises.arbitrage');
 
             Route::post('cycles/{cycle}/restitutions/ouverture', [RestitutionController::class, 'ouvrir'])->name('restitutions.ouvrir');
+            Route::post('restitutions/{restitution}/recalcul', [RestitutionController::class, 'recalculer'])->whereNumber('restitution')->name('restitutions.recalcul');
             Route::post('restitution-lignes/{ligne}/reforme', [RestitutionController::class, 'reforme'])->whereNumber('ligne')->name('restitutions.reforme');
             Route::post('restitution-declarations/{declaration}/retenue', [RestitutionController::class, 'retenir'])->whereNumber('declaration')->name('restitutions.retenir');
         });

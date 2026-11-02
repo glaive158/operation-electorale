@@ -72,7 +72,16 @@
     @endif
 
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-        <div class="px-6 py-4 border-b border-slate-100"><h3 class="font-semibold text-slate-800">Matériel attendu en retour</h3></div>
+        <div class="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+            <h3 class="font-semibold text-slate-800">Matériel attendu en retour</h3>
+            @if($peutRecalculer)
+                <form method="POST" action="{{ route('logistique.restitutions.recalcul', $restitution) }}"
+                      onsubmit="return confirm('Recalculer les attendus d\'après le solde actuel du détenteur ?');">
+                    @csrf
+                    <button type="submit" class="{{ $bouton }}" style="background:#0284c7;">Recalculer les attendus</button>
+                </form>
+            @endif
+        </div>
         <div class="overflow-x-auto">
             <table class="w-full text-sm">
                 <thead>

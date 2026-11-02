@@ -214,6 +214,31 @@ class EcransRestitutionTest extends TestCase
         $this->assertSame($this->agentRetour->id, $restitution->fresh()->agent_id);
     }
 
+    public function test_recalcul_depuis_l_ecran(): void
+    {
+        $restitution = $this->ouverte();
+        $page = route('logistique.restitutions.show', $restitution);
+        $recalcul = route('logistique.restitutions.recalcul', $restitution);
+        $this->ligne($restitution)->forceFill(['attendu' => 7])->save();
+
+        // Réservé au responsable : le gestionnaire ne voit pas le bouton et l'envoi lui est interdit.
+        $this->actingAs($this->gestionnaire)->get($page)->assertOk()->assertDontSee($recalcul, false);
+        $this->post($recalcul)->assertForbidden();
+        $this->assertSame(7, $this->ligne($restitution)->attendu);
+
+        $this->actingAs($this->responsable)->get($page)->assertOk()->assertSee($recalcul, false)->assertSee('Recalculer les attendus');
+        $this->from($page)->post($recalcul)->assertRedirect($page)->assertSessionHas('success', 'Attendus recalculés.');
+        $this->assertSame(100, $this->ligne($restitution)->attendu);
+        $this->assertSame(1, JournalEntree::where('action', 'recalcul_restitution')->where('objet_id', $restitution->id)->count());
+
+        // Une fois déclarée, les attendus ne bougent plus : plus de bouton, et le refus du service revient en message.
+        $this->actingAs($this->sousPrefet);
+        app(RestitutionService::class)->declarer($restitution, 'compte', self::SIGNATAIRE, [$this->urnes->id => ['restitue' => 100]], (string) Str::uuid());
+        $this->actingAs($this->responsable)->get($page)->assertOk()->assertDontSee($recalcul, false);
+        $this->from($page)->post($recalcul)->assertRedirect($page)
+            ->assertSessionHas('error', 'Cette restitution a déjà une déclaration : ses attendus ne peuvent plus être recalculés.');
+    }
+
     public function test_detenteur_declare_depuis_son_compte(): void
     {
         $restitution = $this->ouverte();
@@ -457,6 +482,7 @@ class EcransRestitutionTest extends TestCase
         ];
         $administrer = [
             ['logistique.restitutions.ouvrir', [$this->cycle]],
+            ['logistique.restitutions.recalcul', [$restitution]],
             ['logistique.restitutions.reforme', [$ligne]],
             ['logistique.restitutions.retenir', [$declaration]],
         ];
