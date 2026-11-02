@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\Terrain\DeclarationController;
 use App\Http\Controllers\Api\Terrain\JetonController;
 use App\Http\Controllers\Api\Terrain\PieceController;
 use App\Http\Controllers\Api\Terrain\RedistributionController;
+use App\Http\Controllers\Api\Terrain\RestitutionController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('terrain')->group(function () {
@@ -30,5 +31,7 @@ Route::prefix('terrain')->group(function () {
         Route::delete('decharges/{decharge}/reserve', [AppareilController::class, 'liberer'])->whereNumber('decharge');
         Route::post('decharges/{decharge}/redistributions', [RedistributionController::class, 'store'])->whereNumber('decharge');
         Route::post('declarations/{declaration}/contestation', [ContestationController::class, 'store'])->whereNumber('declaration');
+        Route::post('restitutions/{restitution}/declarations', [RestitutionController::class, 'declarer'])->whereNumber('restitution');
+        Route::post('restitutions/{restitution}/prise-en-charge', [RestitutionController::class, 'prendreEnCharge'])->whereNumber('restitution');
     });
 });

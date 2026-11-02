@@ -8,6 +8,8 @@ use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\Restitution;
+use App\Models\Logistique\RestitutionDeclaration;
 use App\Models\User;
 use App\Support\Canonique;
 use Illuminate\Database\Eloquent\Builder;
@@ -183,6 +185,80 @@ class AffectationsTerrain
         }
 
         return $elements;
+    }
+
+    /**
+     * Les restitutions de matériel réutilisable que la tablette montre à l'utilisateur, à côté des éléments de
+     * remise (clé `restitutions` de l'API) : celles dont il est l'agent de retour désigné, et celles dont il est le
+     * détenteur (autorité titulaire ou déléguée du destinataire, ou l'agent détenteur lui-même), tant qu'elles sont
+     * à préparer ou en retour. Chacune porte son empreinte.
+     *
+     * `peut_declarer_tablette` : seul l'agent désigné, tant que la restitution est à préparer, et seulement pour un
+     * destinataire (un agent détenteur déclare depuis son compte, P6-R16). `peut_prendre_en_charge` : l'agent qui
+     * prendrait le retour en charge (le désigné, ou l'agent détenteur sans agent désigné), une fois une déclaration
+     * retenue ; une déclaration à vérifier (`arbitrage_en_attente`) n'est pas anticipée : le serveur refuse alors
+     * avec son message.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function restitutions(User $utilisateur): array
+    {
+        if (! $utilisateur->actif) {
+            return [];
+        }
+
+        $detenus = $this->perimetre->autoriteDe($utilisateur)->all();
+        $agent = $utilisateur->role === 'agent_transport';
+        $restitutions = Restitution::query()->whereIn('statut', ['a_preparer', 'en_retour'])
+            ->where(function (Builder $q) use ($utilisateur, $detenus, $agent) {
+                $q->whereRaw('1 = 0');
+                if ($agent) {
+                    $q->orWhere('agent_id', $utilisateur->id)
+                        ->orWhere(fn (Builder $a) => $a->where('detenteur_type', 'agent')->where('detenteur_id', $utilisateur->id));
+                }
+                if ($detenus !== []) {
+                    $q->orWhere(fn (Builder $d) => $d->where('detenteur_type', 'destinataire')->whereIn('detenteur_id', $detenus));
+                }
+            })
+            ->with('lignes', 'cycle')->orderBy('id')->get();
+        if ($restitutions->isEmpty()) {
+            return [];
+        }
+
+        $declarations = RestitutionDeclaration::whereIn('restitution_id', $restitutions->pluck('id'))
+            ->whereIn('statut', ['retenue', 'a_verifier'])->get(['restitution_id', 'statut'])->groupBy('restitution_id');
+        $materiels = Materiel::whereIn('id', $restitutions->flatMap->lignes->pluck('materiel_id')->unique()->all())->pluck('libelle', 'id');
+        $agents = User::whereIn('id', $restitutions->where('detenteur_type', 'agent')->pluck('detenteur_id')->unique()->all())->get()->keyBy('id');
+        $destinataireIds = $restitutions->where('detenteur_type', 'destinataire')->pluck('detenteur_id')->unique()->all();
+        $libelles = Destinataire::whereIn('id', $destinataireIds)->pluck('libelle', 'id');
+        $autorites = $this->autorites($destinataireIds);
+
+        return $restitutions->map(function (Restitution $r) use ($utilisateur, $agent, $declarations, $materiels, $agents, $libelles, $autorites) {
+            $statuts = $declarations->get($r->id, collect())->pluck('statut');
+            $retenue = $statuts->contains('retenue');
+            $estDestinataire = $r->detenteur_type === 'destinataire';
+            $detenteurAgent = $estDestinataire ? null : $agents->get($r->detenteur_id);
+            $nom = $estDestinataire ? (string) $libelles->get($r->detenteur_id, 'Destinataire') : ($detenteurAgent?->nom_complet ?: 'Agent');
+            $designe = $r->agent_id !== null && (int) $r->agent_id === (int) $utilisateur->id;
+            $preneur = $r->agent_id !== null ? $designe : ! $estDestinataire && (int) $r->detenteur_id === (int) $utilisateur->id;
+
+            return $this->empreinter([
+                'id' => $r->id,
+                'statut' => $r->statut,
+                'cycle' => (string) $r->cycle?->libelle,
+                'detenteur' => ['type' => $r->detenteur_type, 'id' => (int) $r->detenteur_id, 'nom' => $nom],
+                'autorite_attendue' => $estDestinataire
+                    ? ($autorites->get($r->detenteur_id) ?? $this->autoriteInconnue())
+                    : ['user_id' => $detenteurAgent?->id, 'nom' => $detenteurAgent?->nom_complet, 'qualite' => 'Agent de transport', 'delegues' => []],
+                'lignes' => $r->lignes->sortBy('materiel_id')->map(fn ($l) => [
+                    'materiel_id' => (int) $l->materiel_id, 'libelle' => (string) $materiels->get($l->materiel_id, ''), 'attendu' => (int) $l->attendu,
+                ])->values()->all(),
+                'declaration_retenue' => $retenue,
+                'arbitrage_en_attente' => $statuts->contains('a_verifier'),
+                'peut_declarer_tablette' => $agent && $designe && $estDestinataire && $r->statut === 'a_preparer',
+                'peut_prendre_en_charge' => $agent && $preneur && $retenue && $r->statut === 'a_preparer',
+            ]);
+        })->values()->all();
     }
 
     /** @return array<string, mixed> */
