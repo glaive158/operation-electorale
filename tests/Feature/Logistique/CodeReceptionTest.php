@@ -575,4 +575,37 @@ class CodeReceptionTest extends TestCase
         $this->assertFalse($this->service()->correspond($autre, self::CODE, $hash));
         $this->assertFalse(Hash::check(self::CODE, $hash));
     }
+
+    /**
+     * Sous MySQL, la première colonne TIMESTAMP NOT NULL d'une table peut recevoir ON UPDATE CURRENT_TIMESTAMP
+     * (explicit_defaults_for_timestamp désactivé) : une simple clôture de l'entrée (valide_au) réécrirait alors
+     * valide_du. Les dates métier de l'historique des codes sont donc des DATETIME, sans fuseau ni mise à jour
+     * automatique. Le SQL est compilé sans être joué (pretend), sans jamais joindre de serveur MySQL.
+     */
+    public function test_dates_des_codes_en_datetime_sous_mysql(): void
+    {
+        config(['database.connections.mysql_apercu' => [
+            'driver' => 'mysql', 'host' => 'aucun-hote.invalid', 'port' => 1, 'database' => 'apercu',
+            'username' => 'aucun_acces', 'password' => '', 'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci', 'prefix' => '',
+        ]]);
+        $migration = require database_path('migrations/2026_11_05_100001_add_code_reception_to_users.php');
+        $defaut = config('database.default');
+        config(['database.default' => 'mysql_apercu']);
+        try {
+            // Une base SQLite en mémoire sert seulement à échapper les valeurs du journal : aucune requête n'est jouée.
+            $apercu = DB::connection('mysql_apercu')->setPdo(new \PDO('sqlite::memory:'))->setReadPdo(new \PDO('sqlite::memory:'));
+            $requetes = $apercu->pretend(fn () => $migration->up());
+        } finally {
+            config(['database.default' => $defaut]);
+            DB::purge('mysql_apercu');
+        }
+        $sql = implode("\n", array_column($requetes, 'query'));
+
+        $this->assertMatchesRegularExpression('/`valide_du` datetime not null/', $sql);
+        $this->assertMatchesRegularExpression('/`valide_au` datetime null/', $sql);
+        $this->assertMatchesRegularExpression('/`code_verrouille_le` datetime null/', $sql);
+        // Seules les colonnes created_at / updated_at restent des TIMESTAMP (nullables : pas de mise à jour automatique).
+        preg_match_all('/`(\w+)` timestamp/', $sql, $colonnes);
+        $this->assertSame(['created_at', 'updated_at'], array_values(array_unique($colonnes[1])));
+    }
 }

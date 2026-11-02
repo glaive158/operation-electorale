@@ -248,14 +248,69 @@ class PreuveTest extends TestCase
         $this->assertSame(0, $this->prefet->fresh()->code_echecs);
     }
 
-    public function test_code_reinitialise_pas_encore_rechoisi_echec_sans_compter(): void
+    public function test_code_reinitialise_pas_encore_rechoisi_ancien_code_a_verifier(): void
+    {
+        // Signé hors ligne avec le code alors valide ; réinitialisé ensuite, pas encore rechoisi au dépôt.
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(30)->toIso8601String()]);
+        $bloc = $this->bloc($contenu);
+        Carbon::setTestNow(now()->addHour());
+        app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
+        $this->assertTrue((bool) $this->prefet->fresh()->doit_choisir_code);
+
+        $this->assertSame('a_verifier', $this->verifier($contenu, $bloc)['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_code_reinitialise_pas_encore_rechoisi_code_faux_echec_sans_compter(): void
+    {
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(30)->toIso8601String()]);
+        $bloc = $this->bloc($contenu, '135790');
+        Carbon::setTestNow(now()->addHour());
+        app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
+
+        $this->assertSame('echec', $this->verifier($contenu, $bloc)['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+        $this->assertNull($this->prefet->fresh()->code_verrouille_le);
+    }
+
+    public function test_aucun_code_a_l_instant_de_la_signature_echec_sans_compter(): void
     {
         $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(30)->toIso8601String()]);
         $bloc = $this->bloc($contenu);
         Carbon::setTestNow(now()->addHour());
         app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
+        // Aucun code dans l'historique à l'instant de la signature : rien à comparer.
+        DB::table('codes_reception')->where('user_id', $this->prefet->id)->delete();
 
         $this->assertSame('echec', $this->verifier($contenu, $bloc)['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_code_reinitialise_puis_compte_verrouille_reste_un_echec(): void
+    {
+        // Verrouillé : même l'ancien code juste n'est pas comparé, et rien n'est compté (R17/R32).
+        $contenu = $this->contenu(null, ['horodatage_terminal' => now()->addMinutes(30)->toIso8601String()]);
+        $bloc = $this->bloc($contenu);
+        Carbon::setTestNow(now()->addHour());
+        app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
+        $this->prefet->forceFill(['code_verrouille_le' => now(), 'code_echecs' => 3])->save();
+
+        $this->assertSame('echec', $this->verifier($contenu, $bloc)['verification']);
+        $this->assertSame(3, $this->prefet->fresh()->code_echecs);
+    }
+
+    public function test_tablette_a_une_heure_pres_d_un_code_reinitialise(): void
+    {
+        // La tablette signe 40 minutes après l'instant présent, à l'heure de Paris (+01:00), puis le code est réinitialisé.
+        $signe = now()->addMinutes(40)->startOfSecond()->setTimezone('+01:00');
+        $contenu = $this->contenu(null, ['horodatage_terminal' => $signe->format('Y-m-d\TH:i:sP')]);
+        $bloc = $this->bloc($contenu);
+        Carbon::setTestNow(now()->addMinutes(50));
+        app(CodeReceptionService::class)->reinitialiser($this->prefet, 'Code oublié');
+        Carbon::setTestNow(now()->addMinutes(5));
+
+        // Lue comme une heure UTC, la signature tomberait après la réinitialisation : aucun code alors valide.
+        $this->assertSame('a_verifier', $this->verifier($contenu, $bloc, null, $signe)['verification']);
         $this->assertSame(0, $this->prefet->fresh()->code_echecs);
     }
 
@@ -421,6 +476,35 @@ class PreuveTest extends TestCase
 
         $this->assertSame('echec', $resultat['verification']);
         // Le code était bon : pas de compteur.
+        $this->assertSame(0, $adjoint->fresh()->code_echecs);
+    }
+
+    public function test_tablette_a_une_heure_pres_de_la_fin_d_une_delegation(): void
+    {
+        // La délégation finit dans une heure (UTC) ; la tablette signe 50 minutes après son début, à l'heure de Paris
+        // (+01:00) : l'heure murale lue comme une heure UTC tomberait après la fin.
+        $debut = now()->startOfSecond();
+        [$adjoint, $delegation] = $this->deleguer($debut, $debut->copy()->addHour());
+        $signe = $debut->copy()->addMinutes(50)->setTimezone('+01:00');
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => $signe->format('Y-m-d\TH:i:sP')]);
+        Carbon::setTestNow($debut->copy()->addMinutes(55));
+
+        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, $signe, $delegation);
+
+        $this->assertSame('verifiee_code', $resultat['verification']);
+    }
+
+    public function test_tablette_a_une_heure_pres_du_debut_d_une_delegation(): void
+    {
+        // Signé 30 minutes avant le début de la délégation : l'heure murale +01:00 la croirait commencée.
+        $debut = now()->addMinutes(20)->startOfSecond();
+        [$adjoint, $delegation] = $this->deleguer($debut);
+        $signe = $debut->copy()->subMinutes(30)->setTimezone('+01:00');
+        $contenu = $this->contenu($adjoint, ['horodatage_terminal' => $signe->format('Y-m-d\TH:i:sP')]);
+
+        $resultat = $this->verifier($contenu, $this->bloc($contenu, '864209'), $adjoint, $signe, $delegation);
+
+        $this->assertSame('echec', $resultat['verification']);
         $this->assertSame(0, $adjoint->fresh()->code_echecs);
     }
 

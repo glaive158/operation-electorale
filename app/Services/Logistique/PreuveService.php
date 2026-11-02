@@ -128,10 +128,11 @@ class PreuveService
      *
      * Rejets (RegleLogistique, journal « anomalie_preuve ») : bloc déjà porté par une déclaration ; bloc qui
      * n'atteste pas ce contenu ou dont l'horodatage n'est pas celui du contenu. Sinon l'état d'identité :
-     * « verifiee_code », « a_verifier » (code changé ou délégation révoquée depuis la signature hors ligne) ou
-     * « echec » (bloc vide, mal formé ou indéchiffrable ; signataire qui n'est pas l'autorité attendue de la
-     * remise ; horodatage hors bornes ; signataire sans code utilisable ou verrouillé ; code faux ; délégation
-     * jamais en vigueur). Seul un code faux est compté (trois échecs verrouillent le compte).
+     * « verifiee_code », « a_verifier » (code changé ou réinitialisé, même pas encore rechoisi, ou délégation
+     * révoquée depuis la signature hors ligne) ou « echec » (bloc vide, mal formé ou indéchiffrable ; signataire qui
+     * n'est pas l'autorité attendue de la remise ; horodatage hors bornes ; compte verrouillé ; aucun code valide à
+     * l'instant de la signature ; code faux ; délégation jamais en vigueur). Seul un code faux face à un code en
+     * vigueur est compté (trois échecs verrouillent le compte).
      *
      * bloc_empreinte vaut null quand le bloc est vide ou n'est pas du base64 : rien n'est à mémoriser.
      *
@@ -140,6 +141,9 @@ class PreuveService
      */
     public function verifier(array $contenu, string $cle, string $blocBase64, User $signataire, CarbonInterface $horodatageTerminal, ?Delegation $delegation): array
     {
+        // Les comparaisons en base (codes, délégations) lisent des dates sans fuseau, dans celui de l'application :
+        // l'instant de la tablette y est ramené. Le décalage d'origine ne sert qu'au contenu attesté (memeInstant).
+        $horodatageTerminal = Carbon::instance($horodatageTerminal)->setTimezone((string) config('app.timezone'));
         $chiffre = base64_decode($blocBase64, true);
         if ($chiffre === false || $chiffre === '') {
             return $this->resultat('echec', null);
@@ -231,13 +235,18 @@ class PreuveService
         if ($compte === null || ! in_array($compte->role, CodeReceptionService::ROLES_AUTORITE, true)) {
             return 'echec';
         }
-        // Verrouillé, sans code choisi ou à réinitialiser : rien à comparer, et rien à compter.
-        if ($compte->code_verrouille_le !== null || $compte->doit_choisir_code) {
+        // Verrouillé : rien à comparer, et rien à compter.
+        if ($compte->code_verrouille_le !== null) {
             return 'echec';
         }
-        $actuel = $this->codes->codeActuel($compte);
+        $actuel = $compte->doit_choisir_code ? null : $this->codes->codeActuel($compte);
         if ($actuel === null) {
-            return 'echec';
+            // Code réinitialisé et pas encore rechoisi (ou jamais choisi) : seul le code valide à l'instant de la
+            // signature peut être comparé. Juste, l'identité est à vérifier ; faux, c'est un échec, jamais compté
+            // (il n'y a pas de code en vigueur à protéger).
+            $alors = $this->codes->codeValideA($compte, $horodatage);
+
+            return $alors !== null && $this->codes->correspond($compte, $code, $alors) ? 'a_verifier' : 'echec';
         }
 
         if ($this->codes->correspond($compte, $code, $actuel)) {

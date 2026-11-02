@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Logistique;
 
 use App\Http\Controllers\Controller;
 use App\Models\Logistique\Appareil;
+use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
 use App\Services\Logistique\AppareilService;
@@ -52,6 +53,17 @@ class AppareilController extends Controller
         return $this->executer(
             fn () => $this->appareils->designer($destinataire, $donnees['identifiant'], $donnees['nom'], isset($donnees['jeton_id']) ? (int) $donnees['jeton_id'] : null),
             'Appareil désigné : il peut préparer les redistributions hors ligne. L\'appareil précédent, le cas échéant, est révoqué.',
+        );
+    }
+
+    /** Depuis la fiche centrale d'une décharge : libère la réserve de la tablette (responsable, avec un motif). */
+    public function libererReserve(Request $request, Decharge $decharge)
+    {
+        $donnees = $request->validate(['motif' => 'required|string|max:500']);
+
+        return $this->executer(
+            fn () => $this->appareils->libererReserveDecharge($decharge, $donnees['motif']),
+            'Réserve de la tablette libérée : la quantité redevient mobilisable par le préfet.',
         );
     }
 

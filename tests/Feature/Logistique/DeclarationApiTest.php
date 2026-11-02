@@ -499,6 +499,32 @@ class DeclarationApiTest extends TestCase
         $this->assertSame(0, DeclarationPiece::whereNull('piece_jointe_id')->count());
     }
 
+    public function test_signature_et_photo_envoyees_apres_la_declaration_rattachees(): void
+    {
+        // Signature et photo interrompues : la déclaration est enregistrée sans les attendre, avec leurs empreintes.
+        $signature = $this->jpeg('s');
+        $photo = $this->jpeg('p');
+        $corps = $this->avecBloc($this->corps(['pieces' => [
+            ['empreinte' => hash('sha256', $signature), 'role' => 'signature'],
+            ['empreinte' => hash('sha256', $photo), 'role' => 'photo'],
+        ]]));
+        $this->envoyer($corps)->assertCreated()->assertJsonPath('declaration.statut', 'retenue')
+            ->assertJsonPath('declaration.verification_identite', 'verifiee_code');
+        $this->assertSame(2, DeclarationPiece::whereNull('piece_jointe_id')->count());
+
+        // Les pièces arrivent plus tard, dans n'importe quel ordre ; le rejeu de la déclaration n'y change rien.
+        $this->televerser($photo)->assertCreated();
+        $this->envoyer($corps)->assertOk();
+        $this->televerser($signature)->assertCreated();
+
+        $this->assertSame(0, DeclarationPiece::whereNull('piece_jointe_id')->count());
+        $this->assertSame(
+            PieceJointe::where('empreinte', hash('sha256', $signature))->value('id'),
+            DeclarationPiece::where('role', 'signature')->value('piece_jointe_id'),
+        );
+        $this->assertSame(1, Declaration::count());
+    }
+
     public function test_repli_sans_code_a_verifier(): void
     {
         $reponse = $this->envoyer($this->corps())->assertCreated();
@@ -511,6 +537,92 @@ class DeclarationApiTest extends TestCase
         $this->assertSame($this->prefet->id, $declaration->signataire_user_id);
         $this->assertSame('a_verifier', $this->remise->fresh()->statut);
         $this->assertSame(0, $this->echecs());
+    }
+
+    public function test_repli_sans_autorite_rattachee_nom_et_qualite_saisis(): void
+    {
+        // Aucun compte rattaché au destinataire : la tablette n'a pas d'identifiant de signataire à envoyer.
+        $this->prefecture->forceFill(['autorite_user_id' => null])->save();
+        $corps = $this->corps(['signataire' => ['nom' => 'Mame Diarra Fall', 'qualite' => 'Préfet par intérim']]);
+
+        $this->envoyer($corps)->assertCreated()
+            ->assertJsonPath('declaration.verification_identite', 'non_verifiee')
+            ->assertJsonPath('declaration.statut', 'a_verifier')
+            ->assertJsonPath('declaration.anomalies', ['identite']);
+
+        $declaration = Declaration::firstOrFail();
+        $this->assertNull($declaration->signataire_user_id);
+        $this->assertNull($declaration->bloc_empreinte);
+        $this->assertSame(['Mame Diarra Fall', 'Préfet par intérim'], [$declaration->signataire_nom, $declaration->signataire_qualite]);
+        $this->assertSame(0, $this->echecs());
+
+        // Rejeu identique : le même résultat ; identifiant explicitement nul : accepté de même.
+        $this->envoyer($corps)->assertOk();
+        $this->envoyer($this->corps(['cle' => 'cle-idempotence-0003', 'signataire' => ['user_id' => null, 'nom' => 'X', 'qualite' => 'Y']]))
+            ->assertStatus(422)->assertJsonPath('message', 'Une déclaration tablette existe déjà pour cette remise.');
+    }
+
+    public function test_bloc_de_preuve_sans_signataire_identifie_refuse(): void
+    {
+        $corps = $this->avecBloc($this->corps());
+        unset($corps['signataire']['user_id']);
+
+        $this->envoyer($corps)->assertStatus(422)->assertJsonValidationErrors('signataire.user_id');
+        $this->assertSame(0, Declaration::count());
+    }
+
+    public function test_lignes_controlees_avant_le_code(): void
+    {
+        // Défectueux supérieur au reçu : refusé dès la validation, le code faux n'est pas compté.
+        $defectueux = $this->corps(['lignes' => [['materiel_id' => $this->urnes->id, 'recu' => 5, 'defectueux' => 9, 'observation' => null]]]);
+        $this->envoyer($this->avecBloc($defectueux, '000111'))->assertStatus(422)->assertJsonValidationErrors('lignes.0.defectueux');
+
+        // Un article absent de la remise : refusé par le service avant toute vérification du code.
+        $autreArticle = $this->corps(['lignes' => [
+            ['materiel_id' => $this->urnes->id, 'recu' => 20, 'defectueux' => 0, 'observation' => null],
+            ['materiel_id' => $this->isoloirs->id, 'recu' => 3, 'defectueux' => 0, 'observation' => null],
+        ]]);
+        $this->envoyer($this->avecBloc($autreArticle, '000111'))->assertStatus(422)
+            ->assertExactJson(['message' => 'Chaque ligne de la remise doit être déclarée.']);
+
+        // Directement au service : défectueux supérieur au reçu, refusé avant le code.
+        $this->actingAs($this->agent);
+        $corps = $this->avecBloc($defectueux, '000111');
+        try {
+            app(DeclarationService::class)->declarerParTablette(
+                $this->remise, ['nom' => 'Awa Diop', 'qualite' => 'Préfète'], $corps['lignes'], self::CLE,
+                $corps['horodatage_terminal'], $this->prefet->id, $corps['bloc_preuve'],
+            );
+            $this->fail('Une ligne incohérente devait être refusée.');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringStartsWith('Défectueux supérieur au reçu', $e->getMessage());
+        }
+
+        $this->assertSame(0, Declaration::count());
+        $this->assertSame(0, $this->echecs());
+        $this->assertSame(0, JournalEntree::where('action', 'echec_code_reception')->count());
+    }
+
+    public function test_horodatage_de_la_tablette_ramene_au_fuseau_avant_la_delegation(): void
+    {
+        // La délégation finit dans une heure ; l'adjoint signe 50 minutes après son début, à l'heure de Paris
+        // (+01:00) : lue comme une heure du serveur, la signature tomberait après la fin.
+        $debut = now()->startOfSecond();
+        $adjoint = User::factory()->create(['role' => 'sous_prefet']);
+        $this->definirCode($adjoint, '864209');
+        $this->actingAs($this->prefet);
+        $delegation = app(DelegationService::class)->deleguer($this->prefecture, $adjoint, $debut, $debut->copy()->addHour(), 'Mission');
+        $this->actingAs($this->responsable);
+        Carbon::setTestNow($debut->copy()->addMinutes(55));
+
+        $corps = $this->corps(['horodatage_terminal' => $debut->copy()->addMinutes(50)->setTimezone('+01:00')->format('Y-m-d\TH:i:sP')], null, $adjoint);
+        $this->envoyer($this->avecBloc($corps, '864209'))->assertCreated()
+            ->assertJsonPath('declaration.verification_identite', 'verifiee_code')
+            ->assertJsonPath('declaration.statut', 'retenue');
+
+        $declaration = Declaration::firstOrFail();
+        $this->assertSame($delegation->id, $declaration->delegation_id);
+        $this->assertSame($debut->copy()->addMinutes(50)->getTimestamp(), $declaration->horodatage_terminal->getTimestamp());
     }
 
     public function test_mauvais_code_echec_a_verifier(): void
@@ -647,8 +759,9 @@ class DeclarationApiTest extends TestCase
         $this->envoyer($this->corps(['lignes' => []]))->assertStatus(422);
         $doublon = ['materiel_id' => $this->urnes->id, 'recu' => 1, 'defectueux' => 0];
         $this->envoyer($this->corps(['lignes' => [$doublon, $doublon]]))->assertStatus(422);
+        // Défectueux supérieur au reçu : refusé dès la validation de la requête (le service le refuse aussi).
         $this->envoyer($this->corps(['lignes' => [['materiel_id' => $this->urnes->id, 'recu' => 5, 'defectueux' => 9]]]))->assertStatus(422)
-            ->assertJsonPath('message', fn ($m) => str_starts_with($m, 'Défectueux supérieur au reçu'));
+            ->assertJsonValidationErrors('lignes.0.defectueux');
         $this->assertSame(0, Declaration::count());
     }
 

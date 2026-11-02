@@ -352,6 +352,7 @@ class EcransIdentiteTest extends TestCase
             ['logistique.appareils.designer', [$this->prefecture]],
             ['logistique.appareils.revoquer', [$appareil]],
             ['logistique.remises.arbitrage', [$remise]],
+            ['logistique.decharges.reserve.liberer', [$this->decharge]],
             ['logistique.utilisateurs.code.reinitialiser', [$this->prefet]],
             ['logistique.declarations.contestation.levee', [$this->declaration]],
         ];

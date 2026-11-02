@@ -12,7 +12,8 @@ return new class extends Migration
         Schema::table('users', function (Blueprint $table) {
             $table->string('code_reception_hash')->nullable();
             $table->unsignedTinyInteger('code_echecs')->default(0);
-            $table->timestamp('code_verrouille_le')->nullable();
+            // DATETIME, comme les dates métier qui suivent : ni fuseau, ni mise à jour automatique sous MySQL.
+            $table->dateTime('code_verrouille_le')->nullable();
             $table->boolean('doit_choisir_code')->default(false);
         });
 
@@ -24,8 +25,10 @@ return new class extends Migration
             $table->id();
             $table->foreignId('user_id')->constrained('users');
             $table->string('hash');
-            $table->timestamp('valide_du');
-            $table->timestamp('valide_au')->nullable();
+            // DATETIME et non TIMESTAMP : sous MySQL, une première colonne TIMESTAMP NOT NULL peut recevoir
+            // ON UPDATE CURRENT_TIMESTAMP, et clore une entrée (valide_au) réécrirait alors son début.
+            $table->dateTime('valide_du');
+            $table->dateTime('valide_au')->nullable();
             $table->foreignId('cree_par')->constrained('users');
             $table->timestamps();
 

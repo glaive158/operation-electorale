@@ -140,5 +140,53 @@
         },
         "json": "[\"b\",\"a\"]",
         "empreinte": "02d8bc3008a9bb0dcc4b86d7fd3428ced792355c733c19756bec5a56dc61b2c5"
+    },
+    {
+        "note": "élément d'affectation de la tablette (sans son empreinte)",
+        "entree": {
+            "remise": {
+                "id": 112,
+                "etape": "redistribution",
+                "statut": "en_attente",
+                "de": "Préfecture de Thiès",
+                "a": "Sous-préfecture de Sindia"
+            },
+            "decharge": {
+                "id": 31,
+                "identifiant": "01JC8W2X3Y4Z5A6B7C8D9E0F1G",
+                "numero": "DCH-2026-0031",
+                "categorie": "materiel_lourd",
+                "nature": "initiale",
+                "statut_document": "validee",
+                "statut_acheminement": "recue_intermediaire"
+            },
+            "autorite_attendue": {
+                "user_id": 2048,
+                "nom": "Éléonore Çelik",
+                "qualite": "Sous-préfète",
+                "delegues": [
+                    {
+                        "user_id": 2051,
+                        "nom": "Moussa Fall",
+                        "qualite": "Sous-préfet"
+                    }
+                ]
+            },
+            "lignes": [
+                {
+                    "materiel_id": 3,
+                    "libelle": "Urnes",
+                    "quantite": 60
+                },
+                {
+                    "materiel_id": 5,
+                    "libelle": "Isoloirs",
+                    "quantite": 0
+                }
+            ],
+            "peut_declarer_tablette": false
+        },
+        "json": "{\"autorite_attendue\":{\"delegues\":[{\"nom\":\"Moussa Fall\",\"qualite\":\"Sous-préfet\",\"user_id\":2051}],\"nom\":\"Éléonore Çelik\",\"qualite\":\"Sous-préfète\",\"user_id\":2048},\"decharge\":{\"categorie\":\"materiel_lourd\",\"id\":31,\"identifiant\":\"01JC8W2X3Y4Z5A6B7C8D9E0F1G\",\"nature\":\"initiale\",\"numero\":\"DCH-2026-0031\",\"statut_acheminement\":\"recue_intermediaire\",\"statut_document\":\"validee\"},\"lignes\":[{\"libelle\":\"Urnes\",\"materiel_id\":3,\"quantite\":60},{\"libelle\":\"Isoloirs\",\"materiel_id\":5,\"quantite\":0}],\"peut_declarer_tablette\":false,\"remise\":{\"a\":\"Sous-préfecture de Sindia\",\"de\":\"Préfecture de Thiès\",\"etape\":\"redistribution\",\"id\":112,\"statut\":\"en_attente\"}}",
+        "empreinte": "4f6b0883cb0dcb3d78374754dedb0e1e6d2bdadae6c2247cd2b0c3fbedb90faf"
     }
 ]

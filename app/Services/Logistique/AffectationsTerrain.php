@@ -28,6 +28,7 @@ class AffectationsTerrain
         private readonly PerimetreTerrain $perimetre,
         private readonly RemiseService $remises,
         private readonly LibellesRemises $libelles,
+        private readonly DeclarationService $declarations,
     ) {}
 
     /**
@@ -48,7 +49,7 @@ class AffectationsTerrain
             ->with('lignes')->orderBy('id')->get();
         $preparations = in_array($utilisateur->role, CodeReceptionService::ROLES_AUTORITE, true) ? $this->preparations($utilisateur, $decharges) : collect();
 
-        return $this->elements($remises, $preparations);
+        return $this->elements($utilisateur, $remises, $preparations);
     }
 
     /** @return Builder<Remise> */
@@ -130,11 +131,15 @@ class AffectationsTerrain
     }
 
     /**
+     * `peut_declarer_tablette` : l'utilisateur peut envoyer la déclaration depuis sa tablette (même règle que
+     * l'envoi) ; sinon la tablette montre la remise sans la proposer (à signer sur la tablette de l'agent ou du
+     * préfet, ou à confirmer depuis son compte). Toujours faux pour une préparation de redistribution.
+     *
      * @param  Collection<int, Remise>  $remises
      * @param  Collection<int, array{decharge: Decharge, reliquats: array<int, int>}>  $preparations
      * @return list<array<string, mixed>>
      */
-    private function elements(Collection $remises, Collection $preparations): array
+    private function elements(User $utilisateur, Collection $remises, Collection $preparations): array
     {
         $decharges = Decharge::whereIn('id', $remises->pluck('decharge_id')->all())->get()->keyBy('id')
             ->union($preparations->mapWithKeys(fn (array $p) => [$p['decharge']->id => $p['decharge']]));
@@ -163,6 +168,7 @@ class AffectationsTerrain
                 'decharge' => $this->decharge($decharges[$remise->decharge_id]),
                 'autorite_attendue' => $autorite ?? $this->autoriteInconnue(),
                 'lignes' => $lignes($remise->lignes->mapWithKeys(fn ($l) => [(int) $l->materiel_id => (int) $l->quantite])),
+                'peut_declarer_tablette' => $this->declarations->peutDeclarerParTablette($utilisateur, $remise, $decharges[$remise->decharge_id]),
             ]);
         }
         foreach ($preparations as $preparation) {
@@ -172,6 +178,7 @@ class AffectationsTerrain
                 'decharge' => $this->decharge($decharge),
                 'autorite_attendue' => $autorites[$decharge->destinataire_id] ?? $this->autoriteInconnue(),
                 'lignes' => $lignes($preparation['reliquats']),
+                'peut_declarer_tablette' => false,
             ]);
         }
 

@@ -48,6 +48,8 @@ class AppareilService
 
     private const NON_DESIGNE = "Cet appareil n'est pas l'appareil désigné de la préfecture.";
 
+    private const MAX_MOTIF = 500;
+
     public function __construct(
         private readonly RemiseService $remises,
         private readonly PerimetreTerrain $perimetre,
@@ -245,16 +247,16 @@ class AppareilService
     /**
      * Libère le reste de la réserve de l'appareil pour la décharge : il redevient mobilisable. Le préfet (ou son
      * adjoint) le fait à la synchronisation ; le responsable logistique peut le faire à tout moment. Sans effet s'il
-     * ne reste rien. Renvoie les lignes libérées.
+     * ne reste rien. Renvoie les lignes libérées. Le motif éventuel est journalisé.
      *
      * @return Collection<int, ReserveAppareil>
      */
-    public function liberer(Appareil $appareil, Decharge $decharge): Collection
+    public function liberer(Appareil $appareil, Decharge $decharge, ?string $motif = null): Collection
     {
         $this->exigerAuteur();
         $auteur = auth()->user();
 
-        return DB::transaction(function () use ($appareil, $decharge, $auteur) {
+        return DB::transaction(function () use ($appareil, $decharge, $auteur, $motif) {
             // Libérer ne touche à aucun stock : possible aussi sur un cycle clos.
             Cycle::whereKey($decharge->cycle_id)->lockForUpdate()->first();
             $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
@@ -281,9 +283,43 @@ class AppareilService
             }
             Journal::noter('appareil', $courant->id, 'liberation_reserve_appareil', [
                 'decharge_id' => $actuelle->id, 'reserve' => $lignes->pluck('quantite', 'materiel_id')->all(),
-            ], ['decharge_id' => $actuelle->id, 'reserve' => []]);
+            ], ['decharge_id' => $actuelle->id, 'reserve' => []], $motif);
 
             return $lignes;
+        }, attempts: 3);
+    }
+
+    /**
+     * Depuis le central : libère la réserve active de toute tablette sur cette décharge (en pratique, celle de
+     * l'appareil désigné de la préfecture), par exemple pour pouvoir arbitrer une réception déjà mise en réserve.
+     * Responsable logistique seulement, avec un motif. Renvoie les lignes libérées.
+     *
+     * @return Collection<int, ReserveAppareil>
+     */
+    public function libererReserveDecharge(Decharge $decharge, string $motif): Collection
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique("Seul le responsable logistique libère la réserve d'une tablette depuis le central.");
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_MOTIF) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        return DB::transaction(function () use ($decharge, $motif) {
+            // Ordre des verrous : cycle, décharge, puis (dans liberer) appareil et réserves.
+            Cycle::whereKey($decharge->cycle_id)->lockForUpdate()->first();
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+
+            $appareils = ReserveAppareil::where('decharge_id', $actuelle->id)->where('statut', 'active')
+                ->distinct()->orderBy('appareil_id')->pluck('appareil_id');
+            if ($appareils->isEmpty()) {
+                throw new RegleLogistique('Aucune réserve de tablette active sur cette décharge.');
+            }
+
+            return Appareil::whereIn('id', $appareils->all())->orderBy('id')->get()
+                ->flatMap(fn (Appareil $appareil) => $this->liberer($appareil, $actuelle, $motif))->values();
         }, attempts: 3);
     }
 

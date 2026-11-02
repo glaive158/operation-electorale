@@ -276,6 +276,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('cycles/{cycle}/clotures-ecart', [ArbitrageController::class, 'cloturer'])->name('clotures-ecart.store');
             Route::post('prefectures/{destinataire}/appareil', [AppareilController::class, 'designer'])->whereNumber('destinataire')->name('appareils.designer');
             Route::post('appareils/{appareil}/revocation', [AppareilController::class, 'revoquer'])->whereNumber('appareil')->name('appareils.revoquer');
+            Route::post('decharges/{decharge}/reserve/liberation', [AppareilController::class, 'libererReserve'])->whereNumber('decharge')->name('decharges.reserve.liberer');
             Route::post('remises/{remise}/arbitrage', [RemiseController::class, 'arbitrer'])->whereNumber('remise')->name('remises.arbitrage');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);

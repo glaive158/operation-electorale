@@ -10,6 +10,7 @@ use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\ReserveAppareil;
 use App\Models\User;
 use App\Services\Logistique\CircuitService;
 use App\Services\Logistique\DechargePdfService;
@@ -98,6 +99,9 @@ class DechargeController extends Controller
             'etat' => $etat,
             'remises' => $remises,
             'parties' => $this->libelles->pour($remises),
+            // Réserve hors ligne de la tablette de la préfecture sur cette décharge (libérable par le responsable).
+            'reserves' => ReserveAppareil::where('decharge_id', $decharge->id)->where('statut', 'active')
+                ->with(['appareil', 'materiel'])->orderBy('appareil_id')->orderBy('materiel_id')->get(),
             'agents' => $affectable
                 ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
                 : collect(),

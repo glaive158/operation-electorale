@@ -356,6 +356,54 @@ class AffectationsTest extends TestCase
         $this->assertSame($redistribution->id, $elements[0]['remise']['id']);
     }
 
+    public function test_peut_declarer_tablette_suit_le_controle_des_droits(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $agent = $this->agentTransport('Agent A');
+        $d1 = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100], $agent);
+
+        // L'agent constate sa livraison sur sa tablette ; le préfet, qui la reçoit, la confirme depuis son compte.
+        $this->assertSame([true], array_column($this->elements($agent), 'peut_declarer_tablette'));
+        $this->assertSame([false], array_column($this->elements($prefet), 'peut_declarer_tablette'));
+
+        $this->deposerRecue($d1, []);
+        $redistribution = $this->redistribuer($d1->refresh(), [$this->urnes->id => 60]);
+
+        // Le préfet signe le départ de sa redistribution sur sa tablette ; une préparation n'est pas une déclaration.
+        $elements = $this->elements($prefet);
+        $this->assertSame(['redistribution:en_attente:'.$d1->id, 'preparer:'.$d1->id], $this->resume($elements));
+        $this->assertSame([true, false], array_column($elements, 'peut_declarer_tablette'));
+
+        // Le sous-préfet, à l'arrivée, signe sur la tablette du préfet ou depuis son compte, pas sur la sienne :
+        // le serveur refuserait sa déclaration de tablette comme hors périmètre.
+        $this->assertSame([false], array_column($this->elements($sousPrefet), 'peut_declarer_tablette'));
+        $this->terrain($sousPrefet)->postJson('/api/terrain/remises/'.$redistribution->id.'/declarations', [
+            'mode' => 'tablette', 'cle' => 'cle-idempotence-0001', 'horodatage_terminal' => now()->format('Y-m-d\TH:i:sP'),
+            'signataire' => ['nom' => 'Sous-préfet', 'qualite' => 'Sous-préfet'],
+            'lignes' => [['materiel_id' => $this->urnes->id, 'recu' => 60, 'defectueux' => 0]],
+        ])->assertNotFound();
+    }
+
+    public function test_forme_de_l_element_celle_du_vecteur_partage(): void
+    {
+        $vecteurs = json_decode(file_get_contents(base_path('tests/fixtures/canonique.json')), true, 512, JSON_THROW_ON_ERROR);
+        $vecteur = collect($vecteurs)->firstWhere('note', "élément d'affectation de la tablette (sans son empreinte)")['entree'] ?? null;
+        $this->assertIsArray($vecteur);
+        $agent = $this->agentTransport('Agent A');
+        $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100], $agent);
+
+        $element = Arr::except($this->elements($agent)[0], 'empreinte_element');
+
+        $cles = fn (array $a) => collect($a)->keys()->sort()->values()->all();
+        $this->assertSame($cles($vecteur), $cles($element));
+        foreach (['remise', 'decharge', 'autorite_attendue'] as $partie) {
+            $this->assertSame($cles($vecteur[$partie]), $cles($element[$partie]), $partie);
+        }
+        $this->assertSame($cles($vecteur['lignes'][0]), $cles($element['lignes'][0]));
+        $this->assertIsBool($element['peut_declarer_tablette']);
+    }
+
     public function test_canonique_vecteurs(): void
     {
         $vecteurs = json_decode(file_get_contents(base_path('tests/fixtures/canonique.json')), true, 512, JSON_THROW_ON_ERROR);

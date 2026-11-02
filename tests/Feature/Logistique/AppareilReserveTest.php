@@ -806,9 +806,43 @@ class AppareilReserveTest extends TestCase
         $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60, 'reserve_appareil' => 60, 'mobilisable' => 0], $this->solde($decharge));
     }
 
+    public function test_liberation_centrale_de_la_reserve_d_une_decharge(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $appareil = $this->designer();
+        $this->reserver($appareil, $decharge, [$this->urnes->id => 60]);
+        $url = route('logistique.decharges.reserve.liberer', $decharge);
+        $gestionnaire = User::factory()->create(['role' => 'logistique_gestionnaire']);
+
+        // La fiche centrale montre la réserve à tous ; le bouton, au responsable seulement.
+        $this->actingAs($gestionnaire)->get(route('logistique.decharges.show', $decharge))->assertOk()
+            ->assertSee('Réserve de la tablette')->assertSee('Tablette de la préfecture')->assertDontSee($url, false);
+        $this->post($url, ['motif' => 'Essai'])->assertForbidden();
+        $this->refus(fn () => $this->en($gestionnaire, fn () => app(AppareilService::class)->libererReserveDecharge($decharge, 'Essai')),
+            'Seul le responsable logistique libère la réserve d\'une tablette depuis le central.');
+
+        $this->actingAs($this->responsable);
+        $this->get(route('logistique.decharges.show', $decharge))->assertOk()->assertSee($url, false);
+        $this->post($url, [])->assertSessionHasErrors('motif');
+        $this->assertSame(60, $this->solde($decharge)['reserve_appareil']);
+
+        $this->post($url, ['motif' => 'Réception à arbitrer'])->assertSessionHas('success');
+
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 0, 'reliquat' => 100, 'reserve_appareil' => 0, 'mobilisable' => 100], $this->solde($decharge));
+        $this->assertSame(['liberee'], ReserveAppareil::where('decharge_id', $decharge->id)->pluck('statut')->unique()->values()->all());
+        $journal = JournalEntree::where('action', 'liberation_reserve_appareil')->sole();
+        $this->assertSame('Réception à arbitrer', $journal->motif);
+        $this->assertSame($this->responsable->id, $journal->user_id);
+
+        // Plus de réserve active : plus de bouton, et une nouvelle demande est refusée sans rien changer.
+        $this->get(route('logistique.decharges.show', $decharge))->assertOk()->assertDontSee($url, false);
+        $this->post($url, ['motif' => 'Encore'])->assertSessionHas('error', 'Aucune réserve de tablette active sur cette décharge.');
+        $this->assertSame(1, JournalEntree::where('action', 'liberation_reserve_appareil')->count());
+    }
+
     public function test_ecritures_centrales_reservees_aux_responsables(): void
     {
-        foreach (['logistique.appareils.designer', 'logistique.appareils.revoquer', 'logistique.remises.arbitrage'] as $nom) {
+        foreach (['logistique.appareils.designer', 'logistique.appareils.revoquer', 'logistique.remises.arbitrage', 'logistique.decharges.reserve.liberer'] as $nom) {
             $this->assertContains('can:logistique-administrer', Route::getRoutes()->getByName($nom)->gatherMiddleware(), $nom);
         }
         $this->assertContains('can:logistique-gerer', Route::getRoutes()->getByName('logistique.appareils.index')->gatherMiddleware());

@@ -258,7 +258,7 @@ class DeclarationService
         array $lignes,
         string $cle,
         string $horodatageTerminal,
-        int $signataireUserId,
+        ?int $signataireUserId,
         ?string $blocPreuve,
         array $pieces = [],
         ?array $gps = null,
@@ -306,7 +306,7 @@ class DeclarationService
      * @param  list<array{materiel_id: int, recu: int, defectueux: int, observation: ?string}>  $lignes
      * @return array{0: Declaration, 1: bool}
      */
-    private function sequenceTablette(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, int $signataireUserId, ?string $blocPreuve, ?string $bloc, array $pieces, ?array $gps, string $empreinte, User $auteur): array
+    private function sequenceTablette(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, ?int $signataireUserId, ?string $blocPreuve, ?string $bloc, array $pieces, ?array $gps, string $empreinte, User $auteur): array
     {
         // Le verrou tenu, ce qu'un envoi concurrent vient d'enregistrer est visible : on rejoue avant tout.
         $rejeu = $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur);
@@ -318,6 +318,8 @@ class DeclarationService
         $this->exigerPerimetre($auteur, $actuelle);
         $this->controlerEtape($actuelle);
         $this->controlerStatut($actuelle, 'tablette');
+        // Les lignes avant le code : une déclaration incohérente n'est jamais l'occasion de compter un échec de code.
+        $this->controlerLignes($actuelle, $lignes);
 
         $preuve = $this->verifierIdentite(
             $actuelle, $signataire, $lignes, $cle, $horodatageTerminal, $horodatage, $signataireUserId, $blocPreuve, $bloc,
@@ -338,6 +340,24 @@ class DeclarationService
         }
 
         return [$declaration, $declaration->wasRecentlyCreated];
+    }
+
+    /**
+     * L'utilisateur peut-il envoyer depuis sa tablette la déclaration de cette remise ? La même règle que celle
+     * appliquée à l'envoi (controlerDroit, mode tablette) : la tablette ne propose que ce que le serveur acceptera.
+     */
+    public function peutDeclarerParTablette(User $utilisateur, Remise $remise, Decharge $decharge): bool
+    {
+        if (! in_array($remise->etape, ['livraison', 'redistribution'], true)) {
+            return false;
+        }
+        try {
+            $this->controlerDroit($utilisateur, $remise, $decharge, 'tablette');
+        } catch (RegleLogistique) {
+            return false;
+        }
+
+        return true;
     }
 
     /** Une remise que l'appelant n'a pas à connaître est une remise inconnue (404), pas un refus de règle. */
@@ -394,16 +414,17 @@ class DeclarationService
     }
 
     /**
-     * Résultat de la vérification d'identité d'une déclaration de tablette. Sans bloc (repli : tablette qui n'a
-     * pu chiffrer), l'identité n'est pas vérifiée ; signataire inconnu, elle est en échec.
+     * Résultat de la vérification d'identité d'une déclaration de tablette. Sans bloc (repli : code oublié ou
+     * verrouillé, ou destinataire sans compte rattaché, auquel cas le signataire n'a pas d'identifiant), l'identité
+     * n'est pas vérifiée ; signataire inconnu, elle est en échec.
      *
      * @param  array{nom: string, qualite: string}  $signataire
      * @param  list<array{materiel_id: int, recu: int, defectueux: int, observation: ?string}>  $lignes
      * @return array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}
      */
-    private function verifierIdentite(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, int $signataireUserId, ?string $blocPreuve, ?string $bloc): array
+    private function verifierIdentite(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, ?int $signataireUserId, ?string $blocPreuve, ?string $bloc): array
     {
-        $utilisateur = User::find($signataireUserId);
+        $utilisateur = $signataireUserId === null ? null : User::find($signataireUserId);
         $base = ['bloc_empreinte' => $bloc, 'signataire_user_id' => $utilisateur?->id, 'delegation_id' => null];
 
         if ($blocPreuve === null || $blocPreuve === '') {
@@ -426,6 +447,10 @@ class DeclarationService
         return ['verification' => $resultat['verification'], 'bloc_empreinte' => $resultat['bloc_empreinte'], 'delegation_id' => $delegation?->id] + $base;
     }
 
+    /**
+     * L'instant de la tablette, ramené au fuseau de l'application : les comparaisons en base (délégations, codes)
+     * lisent des dates sans fuseau. Le texte d'origine, avec son décalage, reste celui du contenu attesté.
+     */
     private function horodatage(string $texte): Carbon
     {
         $instant = Carbon::createFromFormat('Y-m-d\TH:i:sP', $texte);
@@ -433,7 +458,7 @@ class DeclarationService
             throw new InvalidArgumentException("L'horodatage doit être au format ISO 8601 avec décalage, par exemple 2026-11-05T10:00:00+00:00.");
         }
 
-        return $instant;
+        return $instant->setTimezone((string) config('app.timezone'));
     }
 
     /**
