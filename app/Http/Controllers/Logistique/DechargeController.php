@@ -88,7 +88,8 @@ class DechargeController extends Controller
         $etat = $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie);
 
         $remises = Remise::where('decharge_id', $decharge->id)
-            ->with(['lignes.materiel', 'declarations.lignes.materiel'])->orderBy('id')->get();
+            ->with(['lignes.materiel', 'declarations.lignes.materiel', 'declarations.signataireUser', 'declarations.delegation.autorite', 'declarations.pieces'])
+            ->orderBy('id')->get();
         $affectable = $decharge->statut_document === 'validee' && ! $decharge->estPartie();
 
         return view('logistique.decharges.show', [

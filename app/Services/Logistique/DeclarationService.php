@@ -48,9 +48,6 @@ class DeclarationService
 
     private const REFUS_BLOC_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
 
-    /** Vérifications qui établissent l'identité du signataire : les autres ajoutent l'anomalie « identite ». */
-    private const IDENTITES_ETABLIES = ['verifiee_code', 'verifiee_appareil', 'compte'];
-
     public function __construct(
         private readonly PerimetreTerrain $perimetre,
         private readonly DelegationService $delegations,
@@ -142,7 +139,7 @@ class DeclarationService
                 if ($decharge->statut_document === 'annulee') {
                     $anomalies[] = 'version_annulee';
                 }
-                if ($preuve !== null && ! in_array($preuve['verification'], self::IDENTITES_ETABLIES, true)) {
+                if ($preuve !== null && ! in_array($preuve['verification'], Declaration::VERIFICATIONS_ETABLIES, true)) {
                     $anomalies[] = 'identite';
                 }
                 $anomalies = array_values(array_unique($anomalies));

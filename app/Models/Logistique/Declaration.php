@@ -30,21 +30,27 @@ class Declaration extends Model
         'remplacee' => 'Remplacée',
     ];
 
-    /** Vérification de l'identité du signataire (le code personnel de réception, ou la connexion au compte). */
+    /**
+     * Vérification de l'identité du signataire (le code personnel de réception, ou la connexion au compte) :
+     * libellés affichés par tous les écrans.
+     */
     public const VERIFICATIONS = [
-        'en_attente' => 'En attente',
-        'verifiee_code' => 'Vérifiée par le code',
+        'en_attente' => 'Vérification en attente',
+        'verifiee_code' => 'Vérifiée par code',
         'verifiee_appareil' => 'Vérifiée par l\'appareil',
         'non_verifiee' => 'Non vérifiée',
-        'a_verifier' => 'À vérifier',
-        'echec' => 'Échec',
-        'compte' => 'Connexion au compte',
+        'a_verifier' => 'Identité à vérifier',
+        'echec' => 'Échec du code',
+        'compte' => 'Confirmée depuis le compte',
     ];
+
+    /** Les seules vérifications qui établissent l'identité du signataire. */
+    public const VERIFICATIONS_ETABLIES = ['verifiee_code', 'verifiee_appareil', 'compte'];
 
     public const CONTESTATIONS = [
         'aucune' => 'Aucune',
         'contestee' => 'Contestée',
-        'levee' => 'Levée',
+        'levee' => 'Contestation levée',
     ];
 
     public const ANOMALIES = [
@@ -114,6 +120,18 @@ class Declaration extends Model
     public function delegation(): BelongsTo
     {
         return $this->belongsTo(Delegation::class);
+    }
+
+    /** Libellé de la vérification d'identité ; une déclaration sans valeur (ancienne) est « Non vérifiée ». */
+    public function libelleVerification(): string
+    {
+        return self::VERIFICATIONS[$this->verification_identite ?? 'non_verifiee'] ?? self::VERIFICATIONS['non_verifiee'];
+    }
+
+    /** Vrai seulement si l'identité du signataire est établie (code, appareil ou connexion au compte). */
+    public function identiteEtablie(): bool
+    {
+        return in_array($this->verification_identite, self::VERIFICATIONS_ETABLIES, true);
     }
 
     /** Vrai tant que la déclaration compte dans le rapprochement (ni écartée ni remplacée). */

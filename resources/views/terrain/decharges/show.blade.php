@@ -151,6 +151,21 @@
                         @foreach($declaration->lignes as $l)
                             {{ $l->materiel?->libelle }} reçu {{ $n($l->recu) }}, défectueux {{ $n($l->defectueux) }}{{ $l->observation ? ' ('.$l->observation.')' : '' }}{{ $loop->last ? '' : ' ;' }}
                         @endforeach
+                        @include('logistique.declarations._preuve', ['declaration' => $declaration, 'routePiece' => 'terrain.pieces.show', 'piecesVisibles' => $piecesVisibles, 'peutLever' => false])
+
+                        @if((int) $declaration->signataire_user_id === (int) auth()->id())
+                            @if($avis)
+                                <p class="mt-1">Avis de réception : envoyé sur votre compte le {{ $avis->created_at?->format('d/m/Y H:i') }} ({{ $avis->lue ? 'lu' : 'non lu' }}).</p>
+                            @endif
+                            @if(in_array($declaration->id, $contestables, true))
+                                <form method="POST" action="{{ route('terrain.declarations.contestation', $declaration) }}" class="flex flex-wrap gap-2 items-center pt-2"
+                                      onsubmit="return confirm('Contester cette réception ? Le service logistique la vérifiera.');">
+                                    @csrf
+                                    <input type="text" name="motif" required maxlength="500" placeholder="Pourquoi ce n'est pas vous" aria-label="Motif de la contestation" class="w-full md:w-80 {{ $champ }}">
+                                    <button type="submit" class="px-3 py-1.5 rounded-lg text-white text-xs font-medium hover:opacity-90" style="background:#EE1C25;">Contester : ce n'est pas moi</button>
+                                </form>
+                            @endif
+                        @endif
                     </div>
                 @endforeach
                 @if($remise->statut === 'a_verifier')

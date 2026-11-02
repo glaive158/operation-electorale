@@ -8,9 +8,11 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
+use App\Models\NotificationOp;
 use App\Models\User;
 use App\Services\Logistique\LibellesRemises;
 use App\Services\Logistique\PerimetreTerrain;
+use App\Services\Logistique\PieceJointeService;
 use App\Services\Logistique\RemiseService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -32,6 +34,7 @@ class DechargeController extends Controller
         private readonly PerimetreTerrain $perimetre,
         private readonly RemiseService $remises,
         private readonly LibellesRemises $libelles,
+        private readonly PieceJointeService $pieces,
     ) {}
 
     public function index(Request $request)
@@ -90,7 +93,24 @@ class DechargeController extends Controller
             ? $remises->filter(fn (Remise $r) => $r->etape === 'redistribution' && $r->statut === 'en_attente' && $r->declarations->isEmpty())->pluck('id')->all()
             : [];
 
+        // Signature et photo : seulement celles que ce compte a le droit de voir (périmètre ou affectations).
+        $piecesVisibles = $remises->flatMap(fn (Remise $r) => $r->declarations)->flatMap(fn ($d) => $d->pieces)
+            ->filter(fn ($piece) => $piece->piece_jointe_id !== null && $this->pieces->visiblePar($utilisateur, $piece->empreinte) !== null)
+            ->pluck('empreinte')->unique()->values()->all();
+
+        // « Ce n'est pas moi » : seul le signataire d'une réception encore contestable, et l'avis qu'il a reçu pour cette décharge.
+        $contestables = $remises->flatMap(fn (Remise $r) => $r->declarations)
+            ->filter(fn ($d) => $d->signataire_user_id !== null && (int) $d->signataire_user_id === (int) $utilisateur->id
+                && $d->contestation === 'aucune' && $d->estActive())
+            ->pluck('id')->all();
+        $avis = NotificationOp::where('user_id', $utilisateur->id)->where('type', 'logistique_reception')
+            ->where('message', 'like', '%décharge n° '.$decharge->numero.' %')
+            ->orderByDesc('id')->first();
+
         return view('terrain.decharges.show', [
+            'piecesVisibles' => $piecesVisibles,
+            'contestables' => $contestables,
+            'avis' => $avis,
             'decharge' => $decharge,
             'cycle' => $decharge->cycle,
             'remises' => $remises,
@@ -126,7 +146,7 @@ class DechargeController extends Controller
                         ->orWhere(fn (Builder $c) => $c->where('de_type', 'agent')->where('de_id', $utilisateur->id));
                 }
             })
-            ->with(['lignes.materiel', 'declarations.lignes.materiel'])
+            ->with(['lignes.materiel', 'declarations.lignes.materiel', 'declarations.signataireUser', 'declarations.delegation.autorite', 'declarations.pieces'])
             ->orderBy('id')->get()
             // Une redistribution à arbitrer n'existe pas encore pour celui qui la recevrait : seul le côté départ la voit.
             ->reject(fn (Remise $r) => $r->statut === 'a_arbitrer' && ! ($r->de_type === 'destinataire' && in_array((int) $r->de_id, $ids, true)))

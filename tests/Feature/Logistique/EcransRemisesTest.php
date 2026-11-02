@@ -543,6 +543,7 @@ class EcransRemisesTest extends TestCase
             ['POST', route('logistique.decharges.charger', $validee), [], 'gerer'],
             ['POST', route('logistique.declarations.retenir', $tablette), ['motif' => 'x'], 'administrer'],
             ['POST', route('logistique.declarations.rejeter', $tablette), ['motif' => 'x'], 'administrer'],
+            ['POST', route('logistique.declarations.contestation.levee', $tablette), ['motif' => 'x'], 'administrer'],
             ['POST', route('logistique.reclamations.prendre', $reclamation), [], 'gerer'],
             ['POST', route('logistique.reclamations.resoudre', $reclamation), ['issue' => 'article_retrouve', 'motif' => 'x'], 'gerer'],
             ['POST', route('logistique.clotures-ecart.store', $this->cycle), [

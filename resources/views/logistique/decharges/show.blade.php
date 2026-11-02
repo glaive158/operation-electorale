@@ -8,6 +8,7 @@
     $classesDocument = ['brouillon' => 'bg-amber-100 text-amber-700', 'validee' => 'bg-green-100 text-green-700', 'annulee' => 'bg-red-100 text-red-700'];
     $libellesCircuit = ['via_prefet' => 'Via le préfet', 'direct' => 'Direct', 'etranger' => 'Étranger'];
     $n = fn ($v) => number_format((int) $v, 0, ',', ' ');
+    $peutAdministrer = \Illuminate\Support\Facades\Gate::allows('logistique-administrer');
 
     $brouillon = $decharge->estBrouillon();
     $annulee = $decharge->statut_document === 'annulee';
@@ -208,6 +209,7 @@
                             @foreach($declaration->lignes as $l)
                                 {{ $l->materiel?->libelle }} reçu {{ $n($l->recu) }}, défectueux {{ $n($l->defectueux) }}{{ $loop->last ? '' : ' ;' }}
                             @endforeach
+                            @include('logistique.declarations._preuve', ['declaration' => $declaration, 'routePiece' => 'logistique.pieces.show', 'piecesVisibles' => null, 'peutLever' => $peutAdministrer])
                         </div>
                     @endforeach
                 </div>

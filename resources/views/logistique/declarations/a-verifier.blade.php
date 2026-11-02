@@ -54,6 +54,7 @@
                             — enregistrée le {{ $declaration->created_at?->format('d/m/Y H:i') }}
                             @if($declaration->horodatage_terminal) ; terminal : {{ $declaration->horodatage_terminal->format('d/m/Y H:i') }} @endif
                         </p>
+                        @include('logistique.declarations._preuve', ['declaration' => $declaration, 'routePiece' => 'logistique.pieces.show', 'piecesVisibles' => null, 'peutLever' => $peutArbitrer])
                         @if($declaration->anomalies)
                             <ul class="text-xs text-amber-700 list-disc pl-4">
                                 @foreach($declaration->anomalies as $anomalie) <li>{{ Declaration::ANOMALIES[$anomalie] ?? $anomalie }}</li> @endforeach

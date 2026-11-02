@@ -272,6 +272,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
             Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
             Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');
+            Route::post('declarations/{declaration}/contestation/levee', [ArbitrageController::class, 'leverContestation'])->whereNumber('declaration')->name('declarations.contestation.levee');
             Route::post('cycles/{cycle}/clotures-ecart', [ArbitrageController::class, 'cloturer'])->name('clotures-ecart.store');
             Route::post('prefectures/{destinataire}/appareil', [AppareilController::class, 'designer'])->whereNumber('destinataire')->name('appareils.designer');
             Route::post('appareils/{appareil}/revocation', [AppareilController::class, 'revoquer'])->whereNumber('appareil')->name('appareils.revoquer');
