@@ -387,7 +387,10 @@ class EcransRestitutionTest extends TestCase
         $this->actingAs($this->responsable)->get($page)->assertOk()
             ->assertSee(route('logistique.restitutions.retenir', $retenue), false)
             ->assertSee(route('logistique.restitutions.retenir', $aVerifier), false)
-            ->assertSee('Confirmer la déclaration retenue')->assertSee('Retenir cette déclaration');
+            ->assertSee('Confirmer la déclaration retenue')->assertSee('Retenir cette déclaration')
+            // Un champ de motif par déclaration, chacun nommé par la sienne.
+            ->assertSee('aria-label="Motif de l&#039;arbitrage : déclaration n° '.$aVerifier->id.'"', false)
+            ->assertSee('aria-label="Motif de la confirmation : déclaration n° '.$retenue->id.'"', false);
         $this->post(route('logistique.restitutions.retenir', $retenue), ['motif' => ''])->assertSessionHasErrors('motif');
         $this->post(route('logistique.restitutions.retenir', $retenue), ['motif' => 'Compte confirmé par téléphone'])
             ->assertRedirect()->assertSessionHas('success');
@@ -473,6 +476,25 @@ class EcransRestitutionTest extends TestCase
         $this->assertSame('Cinq urnes égarées au transit', $this->ligne($restitution)->justification);
         $this->assertSame(1, JournalEntree::where('action', 'justification_restitution')->count());
         $this->get($index)->assertOk()->assertSee('Cinq urnes égarées au transit');
+    }
+
+    public function test_ecarts_nuls_masques_par_defaut(): void
+    {
+        $restitution = $this->enRetour(100);
+        $this->actingAs($this->gestionnaire);
+        $this->post(route('logistique.restitutions.receptionner', $restitution), ['recus' => [$this->urnes->id => 100]])->assertSessionHas('success');
+        $index = route('logistique.restitutions.index', $this->cycle);
+        $tous = route('logistique.restitutions.index', [$this->cycle, 'ecarts' => 'tous']);
+
+        // Rien à justifier : la ligne est masquée, un lien affiche toutes les lignes.
+        $this->get($index)->assertOk()->assertSee('Aucun écart à justifier')->assertSee('Afficher toutes les lignes')
+            ->assertSee($tous, false)->assertDontSee('<td class="px-5 py-3 text-slate-600">Urnes</td>', false);
+        $this->get($tous)->assertOk()->assertSee('<td class="px-5 py-3 text-slate-600">Urnes</td>', false)
+            ->assertSee("N'afficher que les écarts", false)->assertDontSee('Aucun écart à justifier');
+
+        // Une ligne justifiée reste affichée, même sans écart.
+        app(RestitutionService::class)->justifier($this->ligne($restitution), 'Compté deux fois au départ');
+        $this->get($index)->assertOk()->assertSee('<td class="px-5 py-3 text-slate-600">Urnes</td>', false)->assertSee('Compté deux fois au départ');
     }
 
     public function test_toutes_les_ecritures_protegees(): void

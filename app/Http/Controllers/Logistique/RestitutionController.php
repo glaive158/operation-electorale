@@ -47,14 +47,19 @@ class RestitutionController extends Controller
             ->withExists(['declarations as a_verifier' => fn ($q) => $q->where('statut', 'a_verifier')])
             ->orderBy('id')->paginate(self::PAR_PAGE)->withQueryString();
 
+        // Par défaut, seules les lignes à traiter : un écart non nul, ou une justification déjà écrite (P6-R45).
+        $toutesLesLignes = $request->query('ecarts') === 'tous';
         $ecarts = $this->restitutions->ecarts($cycle)
-            ->when($detenteur, fn (Collection $c) => $c->where('detenteur_type', $detenteur)->values());
+            ->when($detenteur, fn (Collection $c) => $c->where('detenteur_type', $detenteur)->values())
+            ->when(! $toutesLesLignes, fn (Collection $c) => $c->filter(fn (array $e) => ($e['non_restitue'] ?? 0) > 0
+                || ($e['perdu_en_retour'] ?? 0) > 0 || $e['justification'] !== null)->values());
 
         return view('logistique.restitutions.index', [
             'cycle' => $cycle,
             'restitutions' => $restitutions,
             'noms' => $this->nomsDetenteurs($restitutions->getCollection()),
             'ecarts' => $ecarts,
+            'toutesLesLignes' => $toutesLesLignes,
             'statut' => $statut,
             'detenteur' => $detenteur,
         ]);

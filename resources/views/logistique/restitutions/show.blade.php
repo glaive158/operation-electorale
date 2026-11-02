@@ -213,14 +213,14 @@
                     <form method="POST" action="{{ route('logistique.restitutions.retenir', $declaration) }}" class="flex flex-wrap gap-2 items-center pt-1"
                           onsubmit="return confirm('Retenir cette déclaration ? Les autres seront écartées.');">
                         @csrf
-                        <input type="text" name="motif" required maxlength="500" placeholder="Motif de l'arbitrage" aria-label="Motif de l'arbitrage" class="w-full md:w-72 {{ $champ }}">
+                        <input type="text" name="motif" required maxlength="500" placeholder="Motif de l'arbitrage" aria-label="{{ 'Motif de l\'arbitrage : déclaration n° '.$declaration->id }}" class="w-full md:w-72 {{ $champ }}">
                         <button type="submit" class="{{ $bouton }}" style="background:#009A44;">Retenir cette déclaration</button>
                     </form>
                 @elseif($arbitrable && $declaration->statut === 'retenue' && $aVerifier->isNotEmpty())
                     <form method="POST" action="{{ route('logistique.restitutions.retenir', $declaration) }}" class="flex flex-wrap gap-2 items-center pt-1"
                           onsubmit="return confirm('Confirmer la déclaration retenue ? Les déclarations à vérifier seront écartées.');">
                         @csrf
-                        <input type="text" name="motif" required maxlength="500" placeholder="Motif de l'arbitrage" aria-label="Motif de la confirmation" class="w-full md:w-72 {{ $champ }}">
+                        <input type="text" name="motif" required maxlength="500" placeholder="Motif de l'arbitrage" aria-label="{{ 'Motif de la confirmation : déclaration n° '.$declaration->id }}" class="w-full md:w-72 {{ $champ }}">
                         <button type="submit" class="{{ $bouton }}" style="background:#0284c7;">Confirmer la déclaration retenue</button>
                     </form>
                 @endif
