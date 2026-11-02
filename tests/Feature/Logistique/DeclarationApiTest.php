@@ -888,4 +888,39 @@ class DeclarationApiTest extends TestCase
         }
         $this->assertSame(1, Declaration::count());
     }
+
+    public function test_filet_d_unicite_decide_d_apres_la_base(): void
+    {
+        // Le message d'une violation cite toutes les colonnes insérées (« bloc_empreinte » y figure toujours) : la
+        // décision se prend d'après la base. Une violation sur la clé d'un envoi identique est un rejeu, jamais un
+        // « preuve déjà utilisée ».
+        $corps = $this->avecBloc($this->corps());
+        $this->envoyer($corps)->assertCreated();
+        $existante = Declaration::firstOrFail();
+        $violation = new UniqueConstraintViolationException('sqlite',
+            'insert into "declarations" ("remise_id", "cle_idempotence", "bloc_empreinte") values (?, ?, ?)', [],
+            new \PDOException('UNIQUE constraint failed: declarations.cle_idempotence'));
+        $apresViolation = \Closure::bind(fn (...$arguments) => $this->apresViolation(...$arguments), app(DeclarationService::class), DeclarationService::class);
+        $preuve = ['bloc_empreinte' => $existante->bloc_empreinte, 'signataire_user_id' => $this->prefet->id];
+
+        [$rejouee, $conflit] = $apresViolation($violation, self::CLE, $this->remise, 'tablette', $existante->empreinte_contenu, $preuve, $this->agent);
+        $this->assertSame($existante->id, $rejouee->id);
+        $this->assertFalse($conflit);
+
+        // Clé libre, bloc déjà porté : preuve déjà utilisée.
+        try {
+            $apresViolation($violation, 'cle-idempotence-0009', $this->remise, 'tablette', str_repeat('0', 64), $preuve, $this->agent);
+            $this->fail('Le bloc déjà porté devait être refusé.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Preuve déjà utilisée par une autre déclaration.', $e->getMessage());
+        }
+
+        // Ni l'une ni l'autre : l'erreur d'origine.
+        try {
+            $apresViolation($violation, 'cle-idempotence-0010', $this->remise, 'compte', str_repeat('0', 64), null, $this->agent);
+            $this->fail("L'erreur d'origine devait remonter.");
+        } catch (UniqueConstraintViolationException $e) {
+            $this->assertSame($violation, $e);
+        }
+    }
 }
