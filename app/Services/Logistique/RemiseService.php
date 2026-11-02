@@ -6,10 +6,14 @@ use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeLigne;
+use App\Models\Logistique\Declaration;
+use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\RemiseLigne;
 use App\Models\Logistique\ReservationStock;
 use App\Models\User;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
@@ -18,14 +22,17 @@ use LogicException;
 /**
  * Remises d'une décharge : le chargement au magasin consomme les réservations (le stock sort) et crée la remise
  * de chargement (magasin vers l'agent ou le transporteur) et la remise de livraison (vers le destinataire).
+ * Dans le circuit via le préfet, celui-ci redistribue au sous-préfet une part de ce qu'il a reçu en bon état.
  *
  * Ordre des verrous : cycle, décharge, remise, déclaration, article, réservation.
  */
 class RemiseService
 {
+    private const HORS_PERIMETRE = 'Redistribution hors de votre périmètre.';
+
     private const AFFECTER = 'Affectez un agent (ou, à l\'étranger, un transporteur) avant le chargement.';
 
-    public function __construct(private readonly StockService $stock) {}
+    public function __construct(private readonly StockService $stock, private readonly PerimetreTerrain $perimetre) {}
 
     /**
      * Charge une décharge validée qui n'est pas partie. Hors circuit étranger, un agent doit être affecté ;
@@ -158,6 +165,208 @@ class RemiseService
         }
 
         return $remise;
+    }
+
+    /**
+     * Solde du préfet par article de la décharge : reçu utilisable (reçu moins défectueux de la déclaration
+     * retenue de la livraison), transféré (redistributions non annulées) et reliquat. Trois requêtes, quel que
+     * soit le nombre d'articles. Pour un chiffre qui sert à une décision, l'appelant tient les verrous de la
+     * décharge et de la livraison.
+     *
+     * @return Collection<int, array{recu_utilisable: int, transfere: int, reliquat: int}> par identifiant d'article
+     */
+    public function soldePrefet(Decharge $decharge): Collection
+    {
+        $articles = DechargeLigne::where('decharge_id', $decharge->id)->orderBy('materiel_id')->pluck('materiel_id');
+
+        $recus = DB::table('declaration_lignes')
+            ->join('declarations', 'declarations.id', '=', 'declaration_lignes.declaration_id')
+            ->join('remises', 'remises.id', '=', 'declarations.remise_id')
+            ->where('remises.decharge_id', $decharge->id)->where('remises.etape', 'livraison')
+            ->where('remises.statut', '!=', 'annulee')->where('declarations.statut', 'retenue')
+            ->selectRaw('declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu - declaration_lignes.defectueux) as utilisable')
+            ->groupBy('declaration_lignes.materiel_id')->pluck('utilisable', 'materiel_id');
+
+        $transferts = DB::table('remise_lignes')
+            ->join('remises', 'remises.id', '=', 'remise_lignes.remise_id')
+            ->where('remises.decharge_id', $decharge->id)->where('remises.etape', 'redistribution')
+            ->where('remises.statut', '!=', 'annulee')
+            ->selectRaw('remise_lignes.materiel_id as materiel_id, SUM(remise_lignes.quantite) as transfere')
+            ->groupBy('remise_lignes.materiel_id')->pluck('transfere', 'materiel_id');
+
+        return $articles->mapWithKeys(function ($materielId) use ($recus, $transferts) {
+            $utilisable = (int) ($recus[$materielId] ?? 0);
+            $transfere = (int) ($transferts[$materielId] ?? 0);
+
+            return [(int) $materielId => ['recu_utilisable' => $utilisable, 'transfere' => $transfere, 'reliquat' => $utilisable - $transfere]];
+        });
+    }
+
+    /**
+     * Le préfet remet au sous-préfet une part de ce qu'il a reçu en bon état (circuit via le préfet). La
+     * quantité est plafonnée, par article, au reçu utilisable de la déclaration retenue moins ce qui est déjà
+     * transféré. Aucun mouvement de stock : le matériel est déjà sorti du magasin. Renvoie la remise.
+     *
+     * @param  array<int, int|string>  $lignes  quantité par identifiant d'article ; les zéros sont omis
+     */
+    public function preparerRedistribution(Decharge $decharge, array $lignes): Remise
+    {
+        $this->exigerAuteur();
+        $auteur = auth()->user();
+        $lignes = $this->quantitesRedistribuees($lignes);
+
+        $remise = DB::transaction(function () use ($decharge, $lignes, $auteur) {
+            $cycle = Cycle::whereKey($decharge->cycle_id)->lockForUpdate()->first();
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+            $prefecture = $this->prefectureQuiRedistribue($actuelle, $auteur);
+
+            if ($cycle === null || ! $cycle->estOuvert()) {
+                throw new RegleLogistique('Cycle clôturé : redistribution impossible.');
+            }
+            if ($actuelle->statut_document !== 'validee') {
+                throw new RegleLogistique('Seule une décharge validée peut être redistribuée.');
+            }
+
+            $livraison = Remise::where('decharge_id', $actuelle->id)->where('etape', 'livraison')
+                ->where('statut', '!=', 'annulee')->lockForUpdate()->first();
+            if ($livraison?->statut === 'a_verifier') {
+                throw new RegleLogistique('Réception du préfet à vérifier : redistribution impossible.');
+            }
+            $retenue = $livraison !== null && Declaration::where('remise_id', $livraison->id)->where('statut', 'retenue')->exists();
+            if (! $retenue) {
+                throw new RegleLogistique("Le préfet n'a pas encore de réception retenue pour cette décharge.");
+            }
+
+            $solde = $this->soldePrefet($actuelle);
+            $demandes = [];
+            foreach ($lignes as $materielId => $quantite) {
+                if ($quantite > 0) {
+                    $demandes[$materielId] = $quantite;
+                }
+            }
+            foreach (array_keys($demandes) as $materielId) {
+                if (! $solde->has($materielId)) {
+                    throw new InvalidArgumentException("Article {$materielId} absent de la décharge.");
+                }
+            }
+            if ($demandes === []) {
+                throw new RegleLogistique('Rien à redistribuer.');
+            }
+
+            foreach ($demandes as $materielId => $quantite) {
+                ['recu_utilisable' => $utilisable, 'transfere' => $transfere] = $solde[$materielId];
+                if ($transfere + $quantite > $utilisable) {
+                    $libelle = Materiel::find($materielId)?->libelle ?? "article {$materielId}";
+                    throw new RegleLogistique("Redistribution supérieure au reçu utilisable du préfet pour {$libelle} : reçu utilisable {$utilisable}, déjà transféré {$transfere}, demandé {$quantite}.");
+                }
+            }
+
+            $redistribution = new Remise([
+                'decharge_id' => $actuelle->id, 'etape' => 'redistribution',
+                'de_type' => 'destinataire', 'de_id' => $prefecture->id,
+                'a_type' => 'destinataire', 'a_id' => (int) $actuelle->destinataire_id,
+                'preparee_par' => $auteur->id,
+            ]);
+            $redistribution->forceFill(['statut' => 'en_attente'])->save();
+            foreach ($demandes as $materielId => $quantite) {
+                RemiseLigne::create(['remise_id' => $redistribution->id, 'materiel_id' => $materielId, 'quantite' => $quantite]);
+            }
+
+            Journal::noter('remise', $redistribution->id, 'preparation_redistribution', null, [
+                'decharge_id' => $actuelle->id, 'de' => $prefecture->id, 'a' => (int) $actuelle->destinataire_id,
+                'lignes' => $demandes,
+                'soldes_avant' => $solde->only(array_keys($demandes))->all(),
+            ]);
+
+            return $redistribution;
+        }, attempts: 3);
+
+        return $remise->load('lignes');
+    }
+
+    /**
+     * Annule une redistribution que personne n'a encore déclarée : le reliquat du préfet est libéré.
+     */
+    public function annulerRedistribution(Remise $remise, string $motif): void
+    {
+        $this->exigerAuteur();
+        $auteur = auth()->user();
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > 500) {
+            throw new InvalidArgumentException("Le motif d'annulation est obligatoire (500 caractères au plus).");
+        }
+
+        $cycleId = Decharge::whereKey($remise->decharge_id)->value('cycle_id');
+        if ($cycleId === null) {
+            throw new LogicException('Remise sans décharge : invariant rompu.');
+        }
+
+        DB::transaction(function () use ($remise, $motif, $cycleId, $auteur) {
+            $cycle = Cycle::whereKey($cycleId)->lockForUpdate()->first();
+            $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
+            $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
+
+            $this->prefectureQuiRedistribue($decharge, $auteur);
+            if ($actuelle->etape !== 'redistribution' || (int) $actuelle->de_id !== (int) $decharge->remis_a_id) {
+                throw new RegleLogistique(self::HORS_PERIMETRE);
+            }
+            if ($cycle === null || ! $cycle->estOuvert()) {
+                throw new RegleLogistique('Cycle clôturé : annulation impossible.');
+            }
+            if ($actuelle->statut !== 'en_attente' || Declaration::where('remise_id', $actuelle->id)->exists()) {
+                throw new RegleLogistique('Seule une redistribution en attente, sans déclaration, peut être annulée.');
+            }
+
+            $actuelle->forceFill(['statut' => 'annulee', 'motif_annulation' => $motif])->save();
+            Journal::noter('remise', $actuelle->id, 'annulation_redistribution', ['statut' => 'en_attente'], [
+                'statut' => 'annulee', 'decharge_id' => $decharge->id,
+            ], $motif);
+        }, attempts: 3);
+
+        $remise->refresh();
+    }
+
+    /**
+     * La préfecture qui redistribue une décharge : celle à qui elle est remise, dont l'auteur est l'autorité,
+     * pour une sous-préfecture en circuit via le préfet. Sinon la redistribution est hors périmètre.
+     */
+    private function prefectureQuiRedistribue(Decharge $decharge, User $auteur): Destinataire
+    {
+        $prefecture = $decharge->remis_a_id === null ? null : Destinataire::find($decharge->remis_a_id);
+        $destinataire = Destinataire::find($decharge->destinataire_id);
+
+        if (! Gate::forUser($auteur)->allows('logistique-terrain')
+            || $prefecture === null || $destinataire === null
+            || $decharge->circuit !== 'via_prefet'
+            || $prefecture->type !== 'prefecture'
+            || $destinataire->type !== 'sous_prefecture'
+            || (int) $destinataire->prefecture_id !== (int) $prefecture->id
+            || ! $this->perimetre->estAutoriteDe($auteur, $prefecture)) {
+            throw new RegleLogistique(self::HORS_PERIMETRE);
+        }
+
+        return $prefecture;
+    }
+
+    /**
+     * @param  array<int|string, mixed>  $lignes
+     * @return array<int, int> quantité par identifiant d'article, triée
+     */
+    private function quantitesRedistribuees(array $lignes): array
+    {
+        $retenues = [];
+        foreach ($lignes as $materielId => $quantite) {
+            if (is_string($quantite) && preg_match('/^\d{1,12}$/', $quantite) === 1) {
+                $quantite = (int) $quantite;
+            }
+            if (! is_int($materielId) || ! is_int($quantite) || $quantite < 0 || $quantite > 10_000_000) {
+                throw new InvalidArgumentException('Les quantités à redistribuer doivent être des entiers de 0 à 10 000 000, par article.');
+            }
+            $retenues[$materielId] = $quantite;
+        }
+        ksort($retenues);
+
+        return $retenues;
     }
 
     private function exigerAuteur(): void
