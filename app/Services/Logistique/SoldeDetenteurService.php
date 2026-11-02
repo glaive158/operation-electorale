@@ -13,7 +13,7 @@ use InvalidArgumentException;
  *
  * Destinataire D (préfecture, sous-préfecture, poste) :
  *   reçu retenu (défectueux compris) sur les remises qui lui sont adressées
- *   − redistributions émises par D (ni annulées ni à arbitrer)
+ *   − reçu retenu sur les redistributions émises par D (le manque déclaré par le destinataire reste attendu de D)
  *   − attendu de ses restitutions contrôlées du cycle.
  *
  * Agent A (transport) :
@@ -65,12 +65,12 @@ class SoldeDetenteurService
             ->selectRaw("'destinataire' as detenteur_type, remises.a_id as detenteur_id, declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu) as quantite")
             ->groupBy('remises.a_id', 'declaration_lignes.materiel_id'), 'remises.a_id', 'destinataire', $detenteurType, $detenteurId)->get(), 1);
 
-        // Destinataire : redistributions émises, hors annulées et à arbitrer.
-        $ajouter($this->filtrer($this->lignesRemises($cycle)
+        // Destinataire : reçu retenu sur ses redistributions (P6-R43, miroir de l'agent). Tant que le destinataire
+        // n'a rien de retenu, le matériel reste attendu de l'émetteur ; un manque déclaré aussi.
+        $ajouter($this->filtrer($this->recusRetenus($cycle)
             ->where('remises.etape', 'redistribution')->where('remises.de_type', 'destinataire')
-            ->whereNotIn('remises.statut', ['annulee', 'a_arbitrer'])
-            ->selectRaw("'destinataire' as detenteur_type, remises.de_id as detenteur_id, remise_lignes.materiel_id as materiel_id, SUM(remise_lignes.quantite) as quantite")
-            ->groupBy('remises.de_id', 'remise_lignes.materiel_id'), 'remises.de_id', 'destinataire', $detenteurType, $detenteurId)->get(), -1);
+            ->selectRaw("'destinataire' as detenteur_type, remises.de_id as detenteur_id, declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu) as quantite")
+            ->groupBy('remises.de_id', 'declaration_lignes.materiel_id'), 'remises.de_id', 'destinataire', $detenteurType, $detenteurId)->get(), -1);
 
         // Agent : matériel chargé à son nom.
         $ajouter($this->filtrer($this->lignesRemises($cycle)

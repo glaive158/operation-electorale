@@ -243,7 +243,7 @@ class SoldeDetenteurTest extends TestCase
         ], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
     }
 
-    public function test_redistribution_avec_manquant_n_est_attendue_de_personne(): void
+    public function test_manquant_d_une_redistribution_reste_attendu_du_prefet(): void
     {
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
         $this->deposerRecue($decharge, [$this->urnes->id => 100]);
@@ -251,11 +251,34 @@ class SoldeDetenteurTest extends TestCase
         $this->declarerRedistribution($remise, 70);
         $this->assertSame('retenue', Declaration::where('remise_id', $remise->id)->firstOrFail()->statut);
 
-        // Le préfet est déchargé des 80 transférés, le sous-préfet ne doit que les 70 reçus : les 10 manquants
-        // ne sont attendus de personne (ruling P6-R2).
-        $this->assertSame(20, $this->solde('destinataire', $this->prefecture->id));
+        // Le préfet n'est déchargé que des 70 reçus par le sous-préfet : les 10 manquants restent attendus de lui
+        // (miroir de la règle de l'agent, ruling P6-R43). Rien ne se perd entre les deux soldes.
+        $this->assertSame(30, $this->solde('destinataire', $this->prefecture->id));
         $this->assertSame(70, $this->solde('destinataire', $this->sousPrefecture1->id));
-        $this->assertSame(90, app(SoldeDetenteurService::class)->soldes($this->cycle)->sum('solde'));
+        $this->assertSame(100, app(SoldeDetenteurService::class)->soldes($this->cycle)->sum('solde'));
+    }
+
+    public function test_redistribution_non_signee_reste_attendue_du_prefet(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $this->redistribuer($decharge->refresh(), [$this->urnes->id => 80]);
+
+        $this->assertSame(100, $this->solde('destinataire', $this->prefecture->id));
+        $this->assertSame(0, $this->solde('destinataire', $this->sousPrefecture1->id));
+    }
+
+    public function test_redistribution_a_verifier_reste_attendue_du_prefet(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $remise = $this->redistribuer($decharge->refresh(), [$this->urnes->id => 80]);
+        // 90 reçues pour 80 remises : excédent, la déclaration attend l'arbitrage.
+        $this->declarerRedistribution($remise, 90);
+        $this->assertSame('a_verifier', Declaration::where('remise_id', $remise->id)->firstOrFail()->statut);
+
+        $this->assertSame(100, $this->solde('destinataire', $this->prefecture->id));
+        $this->assertSame(0, $this->solde('destinataire', $this->sousPrefecture1->id));
     }
 
     public function test_circuit_etranger_credite_le_destinataire_sans_agent_ni_transporteur(): void
