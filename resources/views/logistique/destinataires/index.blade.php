@@ -48,6 +48,7 @@
                         <th class="px-5 py-3 text-left font-semibold">Préfecture</th>
                         <th class="px-5 py-3 text-left font-semibold">Signataire</th>
                         <th class="px-5 py-3 text-left font-semibold">Qualité</th>
+                        <th class="px-5 py-3 text-left font-semibold">Autorité (compte)</th>
                         <th class="px-5 py-3 text-left font-semibold">Actif</th>
                         @if($peutAdministrer)<th class="px-5 py-3 text-left font-semibold">Actions</th>@endif
                     </tr>
@@ -61,18 +62,30 @@
                             @if($peutAdministrer)
                                 <td class="px-5 py-3"><input form="dest-{{ $d->id }}" type="text" name="signataire_nom" value="{{ $d->signataire_nom }}" maxlength="150" aria-label="Signataire" class="w-44 px-2 py-1 rounded-lg border border-slate-300 text-xs focus:outline-none"></td>
                                 <td class="px-5 py-3"><input form="dest-{{ $d->id }}" type="text" name="signataire_qualite" value="{{ $d->signataire_qualite }}" maxlength="150" aria-label="Qualité du signataire" class="w-44 px-2 py-1 rounded-lg border border-slate-300 text-xs focus:outline-none"></td>
+                                <td class="px-5 py-3">
+                                    <select form="dest-{{ $d->id }}" name="autorite_user_id" aria-label="Autorité (compte)" class="w-48 px-2 py-1 rounded-lg border border-slate-300 text-xs focus:outline-none">
+                                        <option value="">— Aucune —</option>
+                                        @foreach($autorites[$d->type] ?? [] as $compte)
+                                            <option value="{{ $compte->id }}" {{ (int) $d->autorite_user_id === (int) $compte->id ? 'selected' : '' }}>{{ $compte->prenom }} {{ $compte->name }}</option>
+                                        @endforeach
+                                        @if($d->autorite_user_id !== null && ! ($autorites[$d->type] ?? collect())->contains('id', $d->autorite_user_id))
+                                            <option value="{{ $d->autorite_user_id }}" selected>Compte #{{ $d->autorite_user_id }} (inactif ou autre rôle)</option>
+                                        @endif
+                                    </select>
+                                </td>
                                 <td class="px-5 py-3"><input form="dest-{{ $d->id }}" type="checkbox" name="actif" value="1" {{ $d->actif ? 'checked' : '' }} aria-label="Actif" class="rounded border-slate-300" style="accent-color:#009A44;"></td>
                                 <td class="px-5 py-3"><button form="dest-{{ $d->id }}" type="submit" class="px-2.5 py-1 rounded text-xs text-white hover:opacity-90" style="background:#0284c7;">Enregistrer</button></td>
                             @else
                                 <td class="px-5 py-3 text-slate-600">{{ $d->signataire_nom ?? '—' }}</td>
                                 <td class="px-5 py-3 text-slate-600">{{ $d->signataire_qualite ?? '—' }}</td>
+                                <td class="px-5 py-3 text-slate-600">{{ $d->autorite_user_id !== null ? trim(($autorites[$d->type] ?? collect())->firstWhere('id', $d->autorite_user_id)?->nom_complet ?? 'Compte #'.$d->autorite_user_id) : '—' }}</td>
                                 <td class="px-5 py-3">
                                     <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ $d->actif ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600' }}">{{ $d->actif ? 'Actif' : 'Inactif' }}</span>
                                 </td>
                             @endif
                         </tr>
                     @empty
-                        <tr><td colspan="7" class="px-6 py-10 text-center text-slate-400">Aucun destinataire</td></tr>
+                        <tr><td colspan="8" class="px-6 py-10 text-center text-slate-400">Aucun destinataire</td></tr>
                     @endforelse
                 </tbody>
             </table>

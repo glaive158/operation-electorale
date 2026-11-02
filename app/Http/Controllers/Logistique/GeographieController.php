@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PerimetreDestinataire;
+use App\Models\User;
 use App\Services\Logistique\DecoupageService;
 use App\Services\Logistique\LectureRecensement;
 use App\Services\Logistique\NomGeo;
@@ -19,8 +20,7 @@ class GeographieController extends Controller
     public function __construct(
         private readonly DecoupageService $decoupage,
         private readonly LectureRecensement $recensement,
-    ) {
-    }
+    ) {}
 
     public function destinataires(Request $request)
     {
@@ -30,7 +30,13 @@ class GeographieController extends Controller
             ->orderBy('type')->orderBy('libelle')
             ->paginate(100)->withQueryString();
 
-        return view('logistique.destinataires.index', compact('destinataires'));
+        // Comptes candidats à l'autorité d'un destinataire : actifs, du rôle correspondant à son type.
+        $roles = ['prefecture' => 'prefet', 'sous_prefecture' => 'sous_prefet', 'poste' => 'chef_poste'];
+        $candidats = User::where('actif', true)->whereIn('role', array_values($roles))->orderBy('name')->orderBy('prenom')
+            ->get(['id', 'name', 'prenom', 'role'])->groupBy('role');
+        $autorites = collect($roles)->map(fn (string $role) => $candidats->get($role, collect()));
+
+        return view('logistique.destinataires.index', compact('destinataires', 'autorites'));
     }
 
     public function genererDestinataires()
@@ -46,7 +52,12 @@ class GeographieController extends Controller
         $donnees = $request->validate([
             'signataire_nom' => 'nullable|string|max:150',
             'signataire_qualite' => 'nullable|string|max:150',
+            'autorite_user_id' => 'nullable|integer|exists:users,id',
         ]);
+        // Champ absent du formulaire : l'autorité reste inchangée ; champ vide : elle est retirée.
+        if (! $request->has('autorite_user_id')) {
+            unset($donnees['autorite_user_id']);
+        }
 
         return $this->executer(
             fn () => $this->decoupage->modifierDestinataire($destinataire, $donnees + ['actif' => $request->boolean('actif')]),
