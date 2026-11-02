@@ -8,6 +8,7 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PlanDotation;
+use App\Models\Logistique\ReservationStock;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -16,7 +17,8 @@ use LogicException;
 
 /**
  * Décharges d'un cycle : préparation en brouillon d'après le plan de dotation approuvé et
- * ce qui reste à expédier. La validation, l'acheminement et l'annulation viennent ensuite.
+ * ce qui reste à expédier, validation sous plafond du besoin, annulation avant départ et
+ * remplacement. L'acheminement vient ensuite.
  *
  * Ordre des verrous : cycle, puis décharge.
  */
@@ -207,6 +209,132 @@ class DechargeService
     }
 
     /**
+     * Annule une décharge validée qui n'est pas partie : ses réservations sont libérées (la part prise
+     * sur l'attribution y retourne, sauf demande de retour au stock commun) et elle reste consultable.
+     * Une décharge déjà partie ne s'annule pas : seule une réintégration physique remet du matériel en stock.
+     */
+    public function annuler(Decharge $decharge, string $motif, bool $versStockCommun = false): void
+    {
+        $this->exigerAuteur();
+        $this->exigerDroitAdministrer();
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        DB::transaction(function () use ($decharge, $motif, $versStockCommun) {
+            $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : annulation de décharge impossible.');
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->statut_document !== 'validee') {
+                throw new RegleLogistique('Seule une décharge validée peut être annulée.');
+            }
+            if ($actuelle->estPartie()) {
+                throw new RegleLogistique('Décharge déjà partie : annulation impossible ; seule une réintégration physique remet du matériel en stock.');
+            }
+
+            $liberees = [];
+            foreach (DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('id')->get() as $ligne) {
+                if ($ligne->reservation_id === null) {
+                    continue;
+                }
+                $this->stock->liberer(ReservationStock::findOrFail($ligne->reservation_id), $motif, $versStockCommun);
+                $liberees[] = [
+                    'materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite, 'reservation_id' => $ligne->reservation_id,
+                ];
+            }
+
+            $actuelle->forceFill([
+                'statut_document' => 'annulee',
+                'annule_par' => auth()->id(),
+                'annule_le' => now(),
+                'motif_annulation' => $motif,
+            ])->save();
+
+            Journal::noter('decharge', $actuelle->id, 'annulation_decharge', ['statut_document' => 'validee'], [
+                'statut_document' => 'annulee', 'numero' => $actuelle->numero,
+                'vers_stock_commun' => $versStockCommun, 'lignes' => $liberees,
+            ], $motif);
+        }, attempts: 3);
+
+        $decharge->refresh();
+    }
+
+    /**
+     * Crée le brouillon qui remplace une décharge annulée : mêmes cycle, destinataire, catégorie et
+     * nature, plan approuvé courant ; chaque quantité est plafonnée au reste à expédier (les lignes à 0
+     * sont omises). L'annulée reste consultable et reliée à sa remplaçante.
+     */
+    public function remplacer(Decharge $annulee): Decharge
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit();
+
+        return DB::transaction(function () use ($annulee) {
+            $cycle = $this->verrouillerCycleOuvert((int) $annulee->cycle_id, 'Cycle clôturé : remplacement de décharge impossible.');
+            $origine = Decharge::whereKey($annulee->id)->lockForUpdate()->firstOrFail();
+            if ($origine->statut_document !== 'annulee') {
+                throw new RegleLogistique('Seule une décharge annulée peut être remplacée.');
+            }
+            if (Decharge::where('decharge_remplacee_id', $origine->id)->where('statut_document', '!=', 'annulee')->exists()) {
+                throw new RegleLogistique('Cette décharge a déjà une remplaçante.');
+            }
+
+            $plan = PlanDotation::courantApprouve($cycle);
+            if ($plan === null) {
+                throw new RegleLogistique(self::AUCUN_PLAN);
+            }
+
+            $destinataire = Destinataire::findOrFail($origine->destinataire_id);
+            if ($this->brouillonExiste($cycle, $destinataire, $origine->categorie)) {
+                throw new RegleLogistique(self::BROUILLON_EXISTANT);
+            }
+
+            $etat = $this->engagements->etat($cycle, $destinataire, $origine->categorie);
+            $lignes = [];
+            foreach (DechargeLigne::where('decharge_id', $origine->id)->orderBy('id')->get() as $ancienne) {
+                $entree = $etat->get($ancienne->materiel_id);
+                $quantite = min($ancienne->quantite, $entree['reste'] ?? 0);
+                if ($quantite > 0) {
+                    $lignes[] = ['entree' => $entree, 'materiel_id' => $ancienne->materiel_id, 'quantite' => $quantite, 'ancienne' => $ancienne->quantite];
+                }
+            }
+            if ($lignes === []) {
+                throw new RegleLogistique(self::RIEN_A_EXPEDIER);
+            }
+
+            $decharge = Decharge::create([
+                'cycle_id' => $cycle->id,
+                'destinataire_id' => $destinataire->id,
+                'categorie' => $origine->categorie,
+                'nature' => $origine->nature,
+                'decharge_remplacee_id' => $origine->id,
+                'plan_dotation_id' => $plan->id,
+                'prepare_par' => auth()->id(),
+            ]);
+
+            $journal = [];
+            foreach ($lignes as $l) {
+                DechargeLigne::create([
+                    'decharge_id' => $decharge->id,
+                    'materiel_id' => $l['materiel_id'],
+                    'dotation_approuvee' => $l['entree']['dotation'],
+                    'quantite' => $l['quantite'],
+                    'cle_affichee' => $this->cleAffichee($plan, $l['materiel_id']),
+                ]);
+                $journal[] = ['materiel_id' => $l['materiel_id'], 'quantite' => $l['quantite'], 'quantite_annulee' => $l['ancienne']];
+            }
+
+            Journal::noter('decharge', $decharge->id, 'remplacement_decharge', null, [
+                'decharge_remplacee_id' => $origine->id, 'cycle_id' => $cycle->id, 'destinataire_id' => $destinataire->id,
+                'categorie' => $decharge->categorie, 'nature' => $decharge->nature,
+                'plan_dotation_id' => $plan->id, 'lignes' => $journal,
+            ]);
+
+            return $decharge;
+        }, attempts: 3);
+    }
+
+    /**
      * Rattache un brouillon au plan approuvé courant : dotation et clé mises à jour, articles
      * disparus retirés, nouveaux articles ajoutés pour leur reste. Les quantités existantes sont conservées.
      */
@@ -328,9 +456,7 @@ class DechargeService
      */
     private function preparerPour(Cycle $cycle, PlanDotation $plan, Destinataire $destinataire, string $categorie): Decharge|string
     {
-        $existe = Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
-            ->where('categorie', $categorie)->where('statut_document', 'brouillon')->exists();
-        if ($existe) {
+        if ($this->brouillonExiste($cycle, $destinataire, $categorie)) {
             return self::BROUILLON_EXISTANT;
         }
 
@@ -367,6 +493,12 @@ class DechargeService
         ]);
 
         return $decharge;
+    }
+
+    private function brouillonExiste(Cycle $cycle, Destinataire $destinataire, string $categorie): bool
+    {
+        return Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
+            ->where('categorie', $categorie)->where('statut_document', 'brouillon')->exists();
     }
 
     /**
@@ -449,6 +581,13 @@ class DechargeService
     {
         if (! Gate::allows('logistique-gerer')) {
             throw new RegleLogistique('Seul le personnel logistique peut gérer les décharges.');
+        }
+    }
+
+    private function exigerDroitAdministrer(): void
+    {
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut annuler une décharge.');
         }
     }
 
