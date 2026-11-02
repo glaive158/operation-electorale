@@ -944,12 +944,81 @@ class AppareilReserveTest extends TestCase
         $this->refus(fn () => app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette'), $refus);
         $this->assertSame(0, Appareil::count());
 
-        // Le plus récent jeton valide d'un compte actif de la préfecture est épinglé (ici, celui d'un adjoint habilité).
-        $adjoint = $this->adjoint('chef_poste');
+        // Un seul compte (plusieurs jetons) : son jeton le plus récent est épinglé.
         $this->jeton($this->prefet, $identifiant);
-        $recent = $this->jeton($adjoint, $identifiant);
+        $recent = $this->jeton($this->prefet, $identifiant);
         $appareil = app(AppareilService::class)->designer($this->prefecture, $identifiant, 'Tablette');
         $this->assertSame($recent->getKey(), $appareil->jeton_id);
+    }
+
+    public function test_plusieurs_comptes_sur_la_tablette_le_central_choisit_le_jeton_a_epingler(): void
+    {
+        $decharge = $this->recueParLePrefet();
+        $identifiant = (string) Str::uuid();
+        $adjoint = $this->adjoint('chef_poste');
+        $jetonPrefet = $this->jeton($this->prefet, $identifiant);
+        $jetonAdjoint = $this->jeton($adjoint, $identifiant);
+        $service = app(AppareilService::class);
+        $designer = fn (string $nom, ?int $jetonId = null) => $this->en($this->responsable, fn () => $service->designer($this->prefecture, $identifiant, $nom, $jetonId));
+
+        $this->refus(fn () => $designer('Tablette'), 'Plusieurs comptes ont connecté cette tablette : choisissez le jeton à épingler.');
+        $this->assertSame(0, Appareil::count());
+
+        // Un jeton étranger (autre UUID, compte hors préfecture, inexistant) n'est pas un candidat.
+        $etranger = $this->jeton($this->prefet, (string) Str::uuid());
+        $horsPrefecture = $this->jeton(User::factory()->create(['role' => 'chef_poste']), $identifiant);
+        foreach ([$etranger->getKey(), $horsPrefecture->getKey(), 999999] as $jetonId) {
+            $this->refus(fn () => $designer('Tablette', $jetonId),
+                "Ce jeton n'a pas été ouvert par un compte de la préfecture avec l'identifiant de cette tablette.");
+        }
+
+        $appareil = $designer('Tablette', $jetonPrefet->getKey());
+        $this->assertSame($jetonPrefet->getKey(), $appareil->jeton_id);
+        $entree = JournalEntree::where('action', 'designation_appareil')->where('objet_id', $appareil->id)->sole();
+        $this->assertSame([$jetonPrefet->getKey(), $this->prefet->id], [$entree->apres['jeton_id'], $entree->apres['user_id']]);
+
+        // Seul ce jeton est reconnu : celui de l'adjoint, qui porte pourtant le même UUID, ne l'est pas.
+        $this->tablettes[$identifiant] = $jetonPrefet;
+        $this->api('GET', $decharge, 'reserve', $identifiant, [], $this->prefet)->assertOk();
+        $this->api('GET', $decharge, 'reserve', $identifiant, [], $adjoint, $jetonAdjoint)->assertForbidden();
+
+        // Redésigner exige aussi le choix, puis épingle le jeton choisi et le consigne avec son titulaire.
+        $this->refus(fn () => $designer('Tablette'), 'Plusieurs comptes ont connecté cette tablette : choisissez le jeton à épingler.');
+        $designer('Tablette', $jetonAdjoint->getKey());
+        $this->assertSame($jetonAdjoint->getKey(), $appareil->fresh()->jeton_id);
+        $epinglage = JournalEntree::where('action', 'epinglage_appareil')->where('objet_id', $appareil->id)->sole();
+        $this->assertSame([$jetonAdjoint->getKey(), $adjoint->id], [$epinglage->apres['jeton_id'], $epinglage->apres['user_id']]);
+        $this->api('GET', $decharge, 'reserve', $identifiant, [], $adjoint, $jetonAdjoint)->assertOk();
+        $this->api('GET', $decharge, 'reserve', $identifiant, [], $this->prefet, $jetonPrefet)->assertForbidden();
+    }
+
+    public function test_ecran_central_liste_les_jetons_candidats_et_le_jeton_epingle_et_masque_l_uuid_a_qui_ne_designe_pas(): void
+    {
+        $identifiant = (string) Str::uuid();
+        $adjoint = $this->adjoint('chef_poste');
+        $jetonPrefet = $this->jeton($this->prefet, $identifiant);
+        $jetonAdjoint = $this->jeton($adjoint, $identifiant);
+        $jetonAdjoint->forceFill(['last_used_at' => now()->subDay()])->save();
+
+        $this->actingAs($this->responsable)->get(route('logistique.appareils.index'))->assertOk()
+            ->assertSee('Tablettes connectées')->assertSee($identifiant)
+            ->assertSee('jeton n° '.$jetonPrefet->getKey(), false)->assertSee('jeton n° '.$jetonAdjoint->getKey(), false)
+            ->assertSee($this->prefet->nom_complet)->assertSee($adjoint->nom_complet)
+            ->assertSee('name="jeton_id"', false);
+
+        $this->post(route('logistique.appareils.designer', $this->prefecture), ['identifiant' => $identifiant, 'nom' => 'Tablette'])
+            ->assertSessionHas('error', 'Plusieurs comptes ont connecté cette tablette : choisissez le jeton à épingler.');
+        $this->post(route('logistique.appareils.designer', $this->prefecture), ['identifiant' => $identifiant, 'nom' => 'Tablette', 'jeton_id' => $jetonAdjoint->getKey()])
+            ->assertSessionHas('success');
+
+        $this->get(route('logistique.appareils.index'))->assertSee('Tablette reconnue')
+            ->assertSee('Jeton épinglé : '.$adjoint->nom_complet)->assertSee('dernière utilisation : '.now()->subDay()->format('d/m/Y H:i'));
+
+        // Un compte « gérer » sans « administrer » ne voit que les 8 premiers caractères et aucun jeton.
+        $gestionnaire = User::factory()->create(['role' => 'logistique_gestionnaire']);
+        $this->actingAs($gestionnaire)->get(route('logistique.appareils.index'))->assertOk()
+            ->assertSee(substr($identifiant, 0, 8))->assertDontSee($identifiant)
+            ->assertDontSee('Tablettes connectées')->assertDontSee('name="jeton_id"', false);
     }
 
     public function test_jeton_cree_pour_un_appareil_porte_son_identifiant(): void

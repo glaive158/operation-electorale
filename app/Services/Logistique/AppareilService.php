@@ -7,11 +7,13 @@ use App\Models\Logistique\Appareil;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
+use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\ReserveAppareil;
 use App\Models\User;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -42,6 +44,8 @@ class AppareilService
 
     private const TABLETTE_NON_CONNECTEE = "Connectez d'abord la tablette avec un compte de la préfecture.";
 
+    private const PLUSIEURS_COMPTES = 'Plusieurs comptes ont connecté cette tablette : choisissez le jeton à épingler.';
+
     private const NON_DESIGNE = "Cet appareil n'est pas l'appareil désigné de la préfecture.";
 
     public function __construct(
@@ -52,9 +56,13 @@ class AppareilService
 
     /**
      * Désigne l'appareil d'une préfecture. Il n'y en a qu'un d'actif : le précédent est révoqué (et sa réserve
-     * libérée). Redésigner l'appareil déjà actif ne change rien ; un appareil révoqué peut être désigné de nouveau.
+     * libérée). Un appareil révoqué peut être désigné de nouveau.
+     *
+     * Le jeton de la tablette est épinglé : un seul compte de la préfecture l'a connectée avec cet UUID ⇒ son jeton le
+     * plus récent ; plusieurs comptes ⇒ le central choisit (`$jetonId`, l'un des jetons candidats), sinon refus.
+     * Redésigner l'appareil actif épingle de même le jeton choisi (reconnexion de la tablette).
      */
-    public function designer(Destinataire $prefecture, string $identifiant, string $nom): Appareil
+    public function designer(Destinataire $prefecture, string $identifiant, string $nom, ?int $jetonId = null): Appareil
     {
         $this->exigerAuteur();
         if (! Gate::allows('logistique-administrer')) {
@@ -69,7 +77,7 @@ class AppareilService
             throw new InvalidArgumentException('Le nom de l\'appareil est obligatoire (100 caractères au plus).');
         }
 
-        return DB::transaction(function () use ($prefecture, $identifiant, $nom) {
+        return DB::transaction(function () use ($prefecture, $identifiant, $nom, $jetonId) {
             // Le verrou de la préfecture ordonne les désignations concurrentes.
             $destinataire = Destinataire::whereKey($prefecture->id)->lockForUpdate()->firstOrFail();
             if ($destinataire->type !== 'prefecture') {
@@ -82,10 +90,7 @@ class AppareilService
             }
 
             // Le jeton de la tablette, ouvert avec son UUID par un compte de la préfecture : il est épinglé à l'appareil.
-            $jeton = $this->jetonDeLaTablette($destinataire, $identifiant);
-            if ($jeton === null) {
-                throw new RegleLogistique(self::TABLETTE_NON_CONNECTEE);
-            }
+            $jeton = $this->jetonAEpingler($destinataire, $identifiant, $jetonId);
 
             if ($existant?->actif) {
                 // Redésigner l'appareil actif reconnecte sa tablette : le nouveau jeton remplace l'ancien.
@@ -93,7 +98,7 @@ class AppareilService
                     $avant = $existant->jeton_id;
                     $existant->forceFill(['jeton_id' => $jeton->getKey(), 'nom' => $nom])->save();
                     Journal::noter('appareil', $existant->id, 'epinglage_appareil', ['jeton_id' => $avant], [
-                        'jeton_id' => $jeton->getKey(), 'identifiant' => $identifiant,
+                        'jeton_id' => $jeton->getKey(), 'user_id' => (int) $jeton->tokenable_id, 'identifiant' => $identifiant,
                     ]);
                 }
 
@@ -113,7 +118,8 @@ class AppareilService
             }
 
             Journal::noter('appareil', $appareil->id, 'designation_appareil', null, [
-                'destinataire_id' => $destinataire->id, 'identifiant' => $identifiant, 'nom' => $nom, 'jeton_id' => $jeton->getKey(),
+                'destinataire_id' => $destinataire->id, 'identifiant' => $identifiant, 'nom' => $nom,
+                'jeton_id' => $jeton->getKey(), 'user_id' => (int) $jeton->tokenable_id,
             ]);
 
             return $appareil;
@@ -282,24 +288,85 @@ class AppareilService
     }
 
     /**
-     * Le jeton le plus récent, non expiré, ouvert avec cet UUID par un compte actif qui est l'autorité de la préfecture
-     * (le titulaire ou l'adjoint habilité), ou null : la tablette ne s'est pas encore connectée avec un tel compte.
+     * Les jetons candidats à être celui de la tablette : non expirés, ouverts avec cet UUID par un compte actif qui est
+     * l'autorité de la préfecture (le titulaire ou l'adjoint habilité), du plus récent au plus ancien.
+     *
+     * @return Collection<int, PersonalAccessToken>
      */
-    private function jetonDeLaTablette(Destinataire $prefecture, string $identifiant): ?PersonalAccessToken
+    public function jetonsCandidats(Destinataire $prefecture, string $identifiant): Collection
     {
         $maintenant = now();
-        $jetons = PersonalAccessToken::where('appareil_identifiant', $identifiant)->where('tokenable_type', (new User)->getMorphClass())
+        $jetons = PersonalAccessToken::where('appareil_identifiant', mb_strtolower($identifiant))->where('tokenable_type', (new User)->getMorphClass())
             ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', $maintenant))
             ->orderByDesc('id')->get();
+        $comptes = User::whereIn('id', $jetons->pluck('tokenable_id')->unique()->all())->get()->keyBy('id');
 
-        foreach ($jetons as $jeton) {
-            $compte = User::find($jeton->tokenable_id);
-            if ($compte !== null && $this->perimetre->estAutoriteDe($compte, $prefecture, $maintenant)) {
-                return $jeton;
-            }
+        return $jetons->filter(fn (PersonalAccessToken $jeton) => ($compte = $comptes->get($jeton->tokenable_id)) !== null
+            && $this->perimetre->estAutoriteDe($compte, $prefecture, $maintenant))->values();
+    }
+
+    /**
+     * Les tablettes qui se sont connectées avec un compte de chaque préfecture, pour l'écran du central : jetons
+     * candidats (non expirés, ouverts avec un UUID par l'autorité ou un adjoint habilité), par identifiant de préfecture.
+     *
+     * @param  Collection<int, Destinataire>  $prefectures
+     * @return Collection<int, Collection<int, PersonalAccessToken>>
+     */
+    public function connexionsParPrefecture(Collection $prefectures): Collection
+    {
+        $maintenant = now();
+        $jetons = PersonalAccessToken::whereNotNull('appareil_identifiant')->where('tokenable_type', (new User)->getMorphClass())
+            ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', $maintenant))
+            ->orderByDesc('id')->with('tokenable')->get();
+
+        $parCompte = [];
+        foreach ($jetons->pluck('tokenable')->filter()->unique('id') as $compte) {
+            $parCompte[$compte->id] = $this->prefecturesDeLAutorite($compte, $maintenant);
         }
 
-        return null;
+        return $prefectures->mapWithKeys(fn (Destinataire $p) => [$p->id => $jetons->filter(
+            fn (PersonalAccessToken $j) => in_array($p->id, $parCompte[$j->tokenable_id] ?? [], true)
+        )->values()]);
+    }
+
+    /** @return list<int> les préfectures dont le compte est l'autorité : titulaire, ou adjoint habilité à l'instant */
+    private function prefecturesDeLAutorite(User $compte, CarbonInterface $instant): array
+    {
+        if (! $compte->actif || ! in_array($compte->role, CodeReceptionService::ROLES_AUTORITE, true)) {
+            return [];
+        }
+
+        $delegues = Delegation::where('delegue_user_id', $compte->id)->activesA($instant)->pluck('destinataire_id');
+
+        return Destinataire::where('type', 'prefecture')
+            ->where(fn ($q) => $q->where('autorite_user_id', $compte->id)->orWhereIn('id', $delegues->all()))
+            ->pluck('id')->map(fn ($id) => (int) $id)->all();
+    }
+
+    /**
+     * Le jeton à épingler : celui choisi par le central s'il fait partie des candidats ; sans choix, le jeton le plus
+     * récent quand un seul compte a connecté la tablette. Aucun candidat, un choix étranger ou plusieurs comptes sans
+     * choix ⇒ refus.
+     */
+    private function jetonAEpingler(Destinataire $prefecture, string $identifiant, ?int $jetonId): PersonalAccessToken
+    {
+        $candidats = $this->jetonsCandidats($prefecture, $identifiant);
+        if ($candidats->isEmpty()) {
+            throw new RegleLogistique(self::TABLETTE_NON_CONNECTEE);
+        }
+        if ($jetonId !== null) {
+            $choisi = $candidats->first(fn (PersonalAccessToken $j) => (int) $j->getKey() === $jetonId);
+            if ($choisi === null) {
+                throw new RegleLogistique("Ce jeton n'a pas été ouvert par un compte de la préfecture avec l'identifiant de cette tablette.");
+            }
+
+            return $choisi;
+        }
+        if ($candidats->pluck('tokenable_id')->unique()->count() > 1) {
+            throw new RegleLogistique(self::PLUSIEURS_COMPTES);
+        }
+
+        return $candidats->first();
     }
 
     /**

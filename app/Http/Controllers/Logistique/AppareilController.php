@@ -9,6 +9,7 @@ use App\Models\Logistique\Remise;
 use App\Services\Logistique\AppareilService;
 use App\Services\Logistique\LibellesRemises;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 
 /**
  * Appareil désigné de chaque préfecture (celui qui prépare les redistributions hors ligne) et redistributions
@@ -28,9 +29,13 @@ class AppareilController extends Controller
         $remises = Remise::where('etape', 'redistribution')->where('statut', 'a_arbitrer')
             ->with(['decharge.destinataire', 'lignes.materiel', 'appareil', 'preparePar'])->orderBy('id')->get();
 
+        $prefectures = Destinataire::where('type', 'prefecture')->orderBy('libelle')->get();
+
         return view('logistique.appareils.index', [
-            'prefectures' => Destinataire::where('type', 'prefecture')->orderBy('libelle')->get(),
-            'appareils' => Appareil::with('jeton')->orderByDesc('id')->get()->groupBy('destinataire_id'),
+            'prefectures' => $prefectures,
+            // Les jetons de tablette ne sont montrés qu'à ceux qui désignent.
+            'connexions' => Gate::allows('logistique-administrer') ? $this->appareils->connexionsParPrefecture($prefectures) : collect(),
+            'appareils' => Appareil::with('jeton.tokenable')->orderByDesc('id')->get()->groupBy('destinataire_id'),
             'remises' => $remises,
             'parties' => $this->libelles->pour($remises),
         ]);
@@ -41,10 +46,11 @@ class AppareilController extends Controller
         $donnees = $request->validate([
             'identifiant' => 'required|uuid',
             'nom' => 'required|string|max:100',
+            'jeton_id' => 'nullable|integer|min:1',
         ]);
 
         return $this->executer(
-            fn () => $this->appareils->designer($destinataire, $donnees['identifiant'], $donnees['nom']),
+            fn () => $this->appareils->designer($destinataire, $donnees['identifiant'], $donnees['nom'], isset($donnees['jeton_id']) ? (int) $donnees['jeton_id'] : null),
             'Appareil désigné : il peut préparer les redistributions hors ligne. L\'appareil précédent, le cas échéant, est révoqué.',
         );
     }

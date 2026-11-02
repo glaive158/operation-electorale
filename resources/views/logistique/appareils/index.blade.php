@@ -7,6 +7,10 @@
     $n = fn ($v) => number_format((int) $v, 0, ',', ' ');
     $peutAdministrer = \Illuminate\Support\Facades\Gate::allows('logistique-administrer');
     $champ = 'px-2 py-1 rounded-lg border border-slate-300 text-sm focus:outline-none';
+    // Seuls ceux qui désignent voient l'identifiant entier d'une tablette : les autres, ses 8 premiers caractères.
+    $identifiantVisible = fn (?string $uuid) => $uuid === null ? '' : ($peutAdministrer ? $uuid : \Illuminate\Support\Str::substr($uuid, 0, 8).'…');
+    $libellesRole = ['prefet' => 'Préfet', 'sous_prefet' => 'Sous-préfet', 'chef_poste' => 'Chef de poste'];
+    $dateHeure = fn ($date) => $date ? $date->format('d/m/Y H:i') : 'jamais';
 @endphp
 
 @section('content')
@@ -29,7 +33,7 @@
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-100">
             <h3 class="font-semibold text-slate-800">Préfectures</h3>
-            <p class="text-xs text-slate-500">L'identifiant de l'appareil est celui qu'il affiche à la première connexion (un UUID). La tablette doit d'abord s'être connectée avec un compte de la préfecture : sa connexion est alors épinglée à la désignation, et seule elle est reconnue comme l'appareil désigné. Désigner un nouvel appareil révoque le précédent et libère sa réserve ; redésigner l'appareil actif après une reconnexion épingle son nouveau jeton.</p>
+            <p class="text-xs text-slate-500">L'identifiant de l'appareil est celui qu'il affiche à la première connexion (un UUID). La tablette doit d'abord s'être connectée avec un compte de la préfecture : sa connexion est alors épinglée à la désignation, et seule elle est reconnue comme l'appareil désigné. Si plusieurs comptes l'ont connectée, choisissez le jeton à épingler. Désigner un nouvel appareil révoque le précédent et libère sa réserve ; redésigner l'appareil actif après une reconnexion épingle son nouveau jeton.</p>
         </div>
         <div class="overflow-x-auto">
             <table class="w-full text-sm">
@@ -51,9 +55,14 @@
                             <td class="px-4 py-2">
                                 @if($actif)
                                     <p class="text-slate-800">{{ $actif->nom }}</p>
-                                    <p class="text-xs text-slate-500 break-all">{{ $actif->identifiant }}</p>
+                                    <p class="text-xs text-slate-500 break-all">{{ $identifiantVisible($actif->identifiant) }}</p>
                                     @if($actif->estReconnaissable())
+                                        @php $proprietaire = $actif->jeton->tokenable; @endphp
                                         <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Tablette reconnue</span>
+                                        <p class="text-xs text-slate-500">
+                                            Jeton épinglé : {{ $proprietaire?->nom_complet }} ({{ $libellesRole[$proprietaire?->role] ?? $proprietaire?->role }}),
+                                            dernière utilisation : {{ $dateHeure($actif->jeton->last_used_at) }}
+                                        </p>
                                     @else
                                         <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">Tablette non reconnue</span>
                                         <p class="text-xs text-amber-700">Le jeton de la tablette est supprimé ou expiré : reconnectez-la avec un compte de la préfecture, puis désignez-la de nouveau.</p>
@@ -75,10 +84,33 @@
                                 @endif
                             </td>
                             @if($peutAdministrer)
-                                <td class="px-4 py-2">
+                                <td class="px-4 py-2 space-y-2">
+                                    @php $candidats = $connexions->get($prefecture->id, collect()); @endphp
+                                    @if($candidats->isNotEmpty())
+                                        <div class="text-xs text-slate-500">
+                                            <p class="font-medium text-slate-700">Tablettes connectées avec un compte de la préfecture :</p>
+                                            <ul class="list-disc pl-4">
+                                                @foreach($candidats as $jeton)
+                                                    <li>
+                                                        <span class="break-all">{{ $jeton->appareil_identifiant }}</span>
+                                                        — jeton n° {{ $jeton->id }} « {{ $jeton->name }} » de {{ $jeton->tokenable?->nom_complet }} ({{ $libellesRole[$jeton->tokenable?->role] ?? $jeton->tokenable?->role }}),
+                                                        créé le {{ $dateHeure($jeton->created_at) }}, dernière utilisation : {{ $dateHeure($jeton->last_used_at) }}
+                                                    </li>
+                                                @endforeach
+                                            </ul>
+                                        </div>
+                                    @endif
                                     <form method="POST" action="{{ route('logistique.appareils.designer', $prefecture) }}" class="flex flex-wrap gap-2 items-center">
                                         @csrf
                                         <input type="text" name="identifiant" required maxlength="36" placeholder="Identifiant (UUID)" aria-label="Identifiant de l'appareil pour {{ $prefecture->libelle }}" class="{{ $champ }} w-72">
+                                        @if($candidats->isNotEmpty())
+                                            <select name="jeton_id" aria-label="Jeton à épingler pour {{ $prefecture->libelle }}" class="{{ $champ }}">
+                                                <option value="">Jeton : automatique (un seul compte)</option>
+                                                @foreach($candidats as $jeton)
+                                                    <option value="{{ $jeton->id }}">n° {{ $jeton->id }} — {{ $jeton->tokenable?->nom_complet }} — {{ \Illuminate\Support\Str::substr($jeton->appareil_identifiant, 0, 8) }}…</option>
+                                                @endforeach
+                                            </select>
+                                        @endif
                                         <input type="text" name="nom" required maxlength="100" placeholder="Nom (ex. tablette du préfet)" aria-label="Nom de l'appareil pour {{ $prefecture->libelle }}" class="{{ $champ }}">
                                         <button type="submit" class="px-3 py-1 rounded-lg text-white text-sm font-medium hover:opacity-90" style="background:#009A44;">Désigner</button>
                                     </form>
@@ -109,7 +141,7 @@
                         <p class="text-xs text-slate-500">
                             {{ Remise::ETAPES[$remise->etape] ?? $remise->etape }} : {{ $parties[$remise->id]['de'] }} → {{ $parties[$remise->id]['a'] }}
                             ; envoyée par {{ $remise->preparePar?->nom_complet }}
-                            @if($remise->appareil_declare) depuis l'appareil {{ $remise->appareil?->nom ?? 'inconnu' }} ({{ $remise->appareil_declare }}) @endif
+                            @if($remise->appareil_declare) depuis l'appareil {{ $remise->appareil?->nom ?? 'inconnu' }} ({{ $identifiantVisible($remise->appareil_declare) }}) @endif
                             @if($remise->horodatage_terminal) ; terminal : {{ $remise->horodatage_terminal->format('d/m/Y H:i') }} @endif
                         </p>
                     </div>
