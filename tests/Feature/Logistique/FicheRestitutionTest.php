@@ -82,6 +82,17 @@ class FicheRestitutionTest extends TestCase
         return $declaration;
     }
 
+    /**
+     * Le préfet détient réellement ces urnes (reçu retenu) : son solde brut reste cohérent avec les attendus des
+     * restitutions contrôlées, qui sinon le rendraient négatif et réduiraient le non restitué (P6-R47).
+     */
+    private function prefetDetient(int $urnes): void
+    {
+        $this->approuverPlanFictif([[$this->sousPrefecture1, $this->urnes, $urnes]]);
+        app(StockService::class)->attribuer($this->cycle, $this->urnes, $urnes, 'Attribution de test');
+        $this->deposerRecue($this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => $urnes]), [$this->urnes->id => $urnes]);
+    }
+
     private function ligne(Restitution $r, int $materielId): RestitutionLigne
     {
         return RestitutionLigne::where('restitution_id', $r->id)->where('materiel_id', $materielId)->sole();
@@ -153,7 +164,8 @@ class FicheRestitutionTest extends TestCase
         DB::disableQueryLog();
 
         $this->assertCount(13, $ecarts);
-        $this->assertLessThanOrEqual(6, $requetes);
+        // Cinq pour les lignes et les noms, cinq pour les soldes bruts (P6-R47).
+        $this->assertLessThanOrEqual(10, $requetes);
     }
 
     public function test_justification_journalisee(): void
@@ -367,20 +379,21 @@ class FicheRestitutionTest extends TestCase
 
     public function test_ecarts_cumules_sur_deux_restitutions_du_meme_detenteur(): void
     {
-        $r1 = $this->restitution([$this->urnes->id => [100, 90]], 'en_retour');
-        $this->service()->receptionner($r1, [$this->urnes->id => 85]);
-        $this->service()->controler($r1, [$this->urnes->id => ['bon' => 85, 'a_reparer' => 0, 'reforme' => 0]]);
+        $this->prefetDetient(100);
+        $r1 = $this->restitution([$this->urnes->id => [90, 80]], 'en_retour', true, 'destinataire', $this->prefecture->id);
+        $this->service()->receptionner($r1, [$this->urnes->id => 75]);
+        $this->service()->controler($r1, [$this->urnes->id => ['bon' => 75, 'a_reparer' => 0, 'reforme' => 0]]);
         $this->assertSame('controlee', $r1->fresh()->statut);
         $this->service()->justifier($this->ligne($r1, $this->urnes->id), 'Cinq urnes détruites.');
 
         // La seconde porte du matériel reçu après le contrôle de la première (P6-R40) : les attendus s'additionnent.
-        $r2 = $this->restitution([$this->urnes->id => [10, 4]], 'a_preparer');
+        $r2 = $this->restitution([$this->urnes->id => [10, 4]], 'a_preparer', true, 'destinataire', $this->prefecture->id);
 
         $this->assertCount(1, $this->service()->ecarts($this->cycle));
         $ecart = $this->ecart($r2, $this->urnes->id);
-        $this->assertSame(110, $ecart['attendu']);
-        $this->assertSame(94, $ecart['declare_restitue']);
-        $this->assertSame(85, $ecart['recu_central']);
+        $this->assertSame(100, $ecart['attendu']);
+        $this->assertSame(84, $ecart['declare_restitue']);
+        $this->assertSame(75, $ecart['recu_central']);
         $this->assertSame(16, $ecart['non_restitue']);
         $this->assertSame(5, $ecart['perdu_en_retour'], 'Le perdu de la première restitution est conservé tant que la seconde n\'est pas reçue.');
         $this->assertSame('Cinq urnes détruites.', $ecart['justification'], 'Sans justification sur la ligne récente, celle de la plus ancienne.');
@@ -390,10 +403,11 @@ class FicheRestitutionTest extends TestCase
 
     public function test_non_restitue_reporte_tant_que_la_derniere_restitution_n_a_pas_de_declaration(): void
     {
-        $r1 = $this->restitution([$this->urnes->id => [100, 90]], 'en_retour');
+        $this->prefetDetient(100);
+        $r1 = $this->restitution([$this->urnes->id => [100, 90]], 'en_retour', true, 'destinataire', $this->prefecture->id);
         $this->service()->receptionner($r1, [$this->urnes->id => 90]);
         $this->service()->controler($r1, [$this->urnes->id => ['bon' => 90, 'a_reparer' => 0, 'reforme' => 0]]);
-        $this->restitution([$this->urnes->id => [10, 0]], 'a_preparer', false);
+        $this->restitution([$this->urnes->id => [10, 0]], 'a_preparer', false, 'destinataire', $this->prefecture->id);
 
         $this->assertSame(10, $this->ecart($r1, $this->urnes->id)['non_restitue']);
 

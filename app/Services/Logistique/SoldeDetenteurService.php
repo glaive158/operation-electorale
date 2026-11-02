@@ -40,6 +40,23 @@ class SoldeDetenteurService
      */
     public function soldes(Cycle $cycle, ?string $detenteurType = null, ?int $detenteurId = null, ?int $sauf = null): Collection
     {
+        return $this->soldesBruts($cycle, $detenteurType, $detenteurId, $sauf)
+            ->filter(fn (array $ligne) => $ligne['solde'] > 0)
+            ->values();
+    }
+
+    /**
+     * Soldes du cycle sans borne, nuls et négatifs compris, mêmes paramètres et même tri que soldes(). Un solde
+     * négatif dit qu'une restitution contrôlée a attendu du détenteur plus qu'il ne détient désormais : une
+     * réception retenue après coup (redistribution du préfet, livraison de l'agent) l'a reporté sur un autre
+     * détenteur, et cet écart-là n'est plus le sien (P6-R47).
+     *
+     * @return Collection<int, array{detenteur_type: string, detenteur_id: int, materiel_id: int, solde: int}>
+     *
+     * @throws InvalidArgumentException si un seul des deux est donné, ou si le type est inconnu
+     */
+    public function soldesBruts(Cycle $cycle, ?string $detenteurType = null, ?int $detenteurId = null, ?int $sauf = null): Collection
+    {
         if (($detenteurType === null) !== ($detenteurId === null)) {
             throw new InvalidArgumentException('Le type et l\'identifiant du détenteur se donnent ensemble.');
         }
@@ -98,7 +115,6 @@ class SoldeDetenteurService
         $ajouter($retours, -1);
 
         return collect($soldes)
-            ->filter(fn (array $ligne) => $ligne['solde'] > 0)
             ->sortBy([['detenteur_type', 'asc'], ['detenteur_id', 'asc'], ['materiel_id', 'asc']])
             ->values();
     }

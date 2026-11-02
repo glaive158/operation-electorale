@@ -584,11 +584,13 @@ class RestitutionService
     }
 
     /**
-     * Écarts de restitution du cycle : une ligne par (détenteur, article), en cinq requêtes au plus quel que soit
-     * le volume. Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante ne porte que du matériel reçu
-     * après le contrôle de la précédente, P6-R40) est cumulé : attendus, retours déclarés et reçus s'additionnent.
-     * `non_restitue` (Σ attendu − Σ retour déclaré, jamais négatif) ne compte que les restitutions qui ont une
-     * déclaration retenue (null s'il n'y en a aucune) ; `perdu_en_retour` (retour déclaré − reçu au central, jamais
+     * Écarts de restitution du cycle : une ligne par (détenteur, article), en dix requêtes au plus (celles du solde
+     * comprises) quel que soit le volume. Un détenteur qui a eu plusieurs restitutions sur le cycle (la suivante ne
+     * porte que du matériel reçu après le contrôle de la précédente, P6-R40) est cumulé : attendus, retours déclarés
+     * et reçus s'additionnent. `non_restitue` (Σ attendu − Σ retour déclaré, jamais négatif) ne compte que les
+     * restitutions qui ont une déclaration retenue (null s'il n'y en a aucune) ; il est réduit d'un solde brut
+     * négatif (SoldeDetenteurService::soldesBruts) : ce qu'une réception retenue après le contrôle a reporté sur un
+     * autre détenteur n'est attendu qu'une fois (P6-R47). `perdu_en_retour` (retour déclaré − reçu au central, jamais
      * négatif) seulement les restitutions reçues au central ou contrôlées : avant la réception, un reçu à zéro ferait
      * passer tout le retour pour perdu. `ligne_id` est la ligne de la dernière restitution (celle qu'on justifie) ;
      * la justification est la dernière écrite.
@@ -616,6 +618,10 @@ class RestitutionService
         $agents = User::whereIn('id', $lignes->where('detenteur_type', 'agent')->pluck('detenteur_id')->unique()->all())->get()->keyBy('id');
         $destinataires = Destinataire::whereIn('id', $lignes->where('detenteur_type', 'destinataire')->pluck('detenteur_id')->unique()->all())->pluck('libelle', 'id');
         $materiels = Materiel::whereIn('id', $lignes->pluck('materiel_id')->unique()->all())->get()->keyBy('id');
+        // Solde non borné par (détenteur, article) : négatif, une réception retenue après le contrôle d'une
+        // restitution a reporté une part de son attendu sur un autre détenteur (P6-R47).
+        $bruts = $this->soldes->soldesBruts($cycle)
+            ->mapWithKeys(fn (array $s) => [$s['detenteur_type'].':'.$s['detenteur_id'].':'.$s['materiel_id'] => $s['solde']])->all();
 
         $ecarts = [];
         // Attendu et retour déclaré des seules restitutions qui ont une déclaration retenue, par (détenteur, article).
@@ -647,10 +653,18 @@ class RestitutionService
                 'declare_restitue' => ($precedent['declare_restitue'] ?? 0) + $declare,
                 'recu_central' => ($precedent['recu_central'] ?? 0) + $recu,
                 // Une restitution sans déclaration retenue ne compte pas encore : le reliquat des autres reste dû.
-                'non_restitue' => isset($retenus[$cle]) ? max(0, $retenus[$cle][0] - $retenus[$cle][1]) : null,
+                'non_restitue' => $retenus[$cle] ?? null,
                 'perdu_en_retour' => $recue ? ($precedent['perdu_en_retour'] ?? 0) + max(0, $declare - $recu) : ($precedent['perdu_en_retour'] ?? null),
                 'justification' => $l->justification ?? ($precedent['justification'] ?? null),
             ];
+        }
+
+        // Ce qu'une réception retenue après coup a reporté sur un autre détenteur n'est plus attendu de celui-ci.
+        foreach ($ecarts as $cle => $ecart) {
+            if ($ecart['non_restitue'] !== null) {
+                [$attendus, $declares] = $ecart['non_restitue'];
+                $ecarts[$cle]['non_restitue'] = max(0, $attendus - $declares + min(0, $bruts[$cle] ?? 0));
+            }
         }
 
         return collect($ecarts)

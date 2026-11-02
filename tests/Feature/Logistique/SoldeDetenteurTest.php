@@ -195,6 +195,88 @@ class SoldeDetenteurTest extends TestCase
         $this->assertSame([100, 90, 90, 10, 0], [$ecart['attendu'], $ecart['declare_restitue'], $ecart['recu_central'], $ecart['non_restitue'], $ecart['perdu_en_retour']]);
     }
 
+    /** Restitution du détenteur déclarée, prise en charge, reçue et contrôlée tout en bon. */
+    private function restituer(Restitution $restitution, User $declarant, User $agent, int $rendu): void
+    {
+        $service = app(RestitutionService::class);
+        $this->en($declarant, fn () => $service->declarer(
+            $restitution, 'compte', ['nom' => 'Signataire', 'qualite' => 'Détenteur'], [$this->urnes->id => ['restitue' => $rendu]], (string) Str::uuid(),
+        ));
+        $this->en($agent, fn () => $service->prendreEnCharge($restitution, $agent));
+        $service->receptionner($restitution, [$this->urnes->id => $rendu]);
+        $service->controler($restitution, [$this->urnes->id => ['bon' => $rendu, 'a_reparer' => 0, 'reforme' => 0]]);
+        $this->assertSame('controlee', $restitution->fresh()->statut);
+    }
+
+    /** L'écart d'un détenteur pour les urnes. */
+    private function ecartDe(string $type, int $id): array
+    {
+        return app(RestitutionService::class)->ecarts($this->cycle)
+            ->first(fn (array $e) => $e['detenteur_type'] === $type && $e['detenteur_id'] === $id && $e['materiel_id'] === $this->urnes->id);
+    }
+
+    public function test_redistribution_retenue_apres_le_controle_du_prefet_n_est_attendue_qu_une_fois(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $remise = $this->redistribuer($decharge->refresh(), [$this->urnes->id => 80]);
+        $service = app(RestitutionService::class);
+
+        // Redistribution pas encore signée : les 100 sont attendues du préfet, qui n'en rend que 20.
+        $service->ouvrir($this->cycle);
+        $prefet = Restitution::sole();
+        $this->assertSame(100, (int) $prefet->lignes()->sole()->attendu);
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $service->affecterAgent($prefet, $agent);
+        $this->restituer($prefet, $this->autoriteFictive($this->prefecture), $agent, 20);
+        $this->assertSame(80, $this->ecartDe('destinataire', $this->prefecture->id)['non_restitue']);
+
+        // Le sous-préfet signe ensuite les 80 reçus (P6-R47) : attendues de lui, elles ne sont plus un écart du préfet.
+        $this->declarerRedistribution($remise, 80);
+        $this->assertSame(['creees' => 1, 'inchangees' => 0], $service->ouvrir($this->cycle));
+        $this->assertSame(80, (int) Restitution::where('detenteur_id', $this->sousPrefecture1->id)->sole()->lignes()->sole()->attendu);
+        $ecart = $this->ecartDe('destinataire', $this->prefecture->id);
+        $this->assertSame([100, 20, 0], [$ecart['attendu'], $ecart['declare_restitue'], $ecart['non_restitue']]);
+        $this->assertNull($this->ecartDe('destinataire', $this->sousPrefecture1->id)['non_restitue'], 'Rien de déclaré par le sous-préfet.');
+    }
+
+    public function test_livraison_retenue_apres_le_controle_de_l_agent_n_est_attendue_qu_une_fois(): void
+    {
+        $agent = User::factory()->create(['role' => 'agent_transport']);
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100], $agent);
+        $service = app(RestitutionService::class);
+
+        // Livraison pas encore signée : les 100 sont attendues de l'agent, qui déclare n'en rien rapporter.
+        $service->ouvrir($this->cycle);
+        $restitution = Restitution::sole();
+        $this->assertSame('agent', $restitution->detenteur_type);
+        $this->restituer($restitution, $agent, $agent, 0);
+        $this->assertSame(100, $this->ecartDe('agent', $agent->id)['non_restitue']);
+
+        // Le préfet signe ensuite la réception des 100 (P6-R47) : attendues de lui, plus de l'agent.
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $this->assertSame(['creees' => 1, 'inchangees' => 0], $service->ouvrir($this->cycle));
+        $this->assertSame(100, $this->solde('destinataire', $this->prefecture->id));
+        $ecart = $this->ecartDe('agent', $agent->id);
+        $this->assertSame([100, 0, 0], [$ecart['attendu'], $ecart['declare_restitue'], $ecart['non_restitue']]);
+    }
+
+    public function test_soldes_bruts_non_bornes(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => 100]);
+        $restitution = (new Restitution(['cycle_id' => $this->cycle->id, 'detenteur_type' => 'destinataire', 'detenteur_id' => $this->prefecture->id]))
+            ->forceFill(['ouverte_par' => $this->responsable->id, 'statut' => 'controlee']);
+        $restitution->save();
+        RestitutionLigne::create(['restitution_id' => $restitution->id, 'materiel_id' => $this->urnes->id, 'attendu' => 130]);
+
+        // Les soldes nuls (l'agent, livraison retenue) et négatifs restent dans les soldes bruts, pas dans les soldes.
+        $bruts = app(SoldeDetenteurService::class)->soldesBruts($this->cycle);
+        $this->assertSame(-30, $bruts->firstWhere('detenteur_type', 'destinataire')['solde']);
+        $this->assertSame(0, $bruts->firstWhere('detenteur_type', 'agent')['solde']);
+        $this->assertSame([], app(SoldeDetenteurService::class)->soldes($this->cycle)->all());
+    }
+
     public function test_cycles_independants(): void
     {
         $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
