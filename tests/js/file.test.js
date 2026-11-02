@@ -251,6 +251,7 @@ test('file : validation des éléments à envoyer (clé 16–64 [A-Za-z0-9-], ho
     await assert.rejects(file.ajouter(declaration({ horodatage_terminal: '2026-11-05T10:00:00Z' })), /horodatage/i);
     await assert.rejects(file.ajouter(declaration({ horodatage_terminal: '2026-11-05T10:00:00.000+00:00' })), /horodatage/i);
     await assert.rejects(file.ajouter(declaration({ bloc_preuve: '' })), /bloc/i);
+    await assert.rejects(file.ajouter(declaration({ bloc_preuve: undefined })), /bloc/i);
     await assert.rejects(file.ajouter(piece('ABC', 'photo')), /empreinte/i);
     await assert.rejects(file.ajouter({ type: 'inconnu', id: 'z', statut: 'en_attente' }), /type/i);
     await assert.rejects(file.ajouter({ type: 'piece', empreinte: EMP_PHOTO, statut: 'termine' }), /statut/i);
@@ -286,4 +287,40 @@ test('file : ajouts concurrents, l\'ordre d\'arrivée est conservé', async () =
         await file.marquer(e.id, { status: 201 });
     }
     assert.deepEqual(vus, ids);
+});
+
+test('file : une déclaration de repli (sans code) porte un bloc nul, gardé tel quel', async () => {
+    const { file } = nouvelle();
+    await file.ajouter(declaration({ bloc_preuve: null, repli: true, pieces: [] }));
+
+    const e = await file.prochain();
+    assert.equal(e.id, CLE_D);
+    assert.equal(e.bloc_preuve, null);
+    await file.marquer(CLE_D, { status: 409, corps: {} });
+    assert.equal((await file.lister())[0].bloc_preuve, null, 'même bloc (nul) au nouvel essai');
+});
+
+test('file : une pièce en échec réessayable (réseau, 408, 429, 5xx) ne retient plus sa déclaration', async () => {
+    for (const status of [0, 408, 429, 503]) {
+        const { file, avancer } = nouvelle();
+        await file.ajouter(piece(EMP_SIGNATURE, 'signature'));
+        await file.ajouter(piece(EMP_PHOTO, 'photo'));
+        await file.ajouter(declaration());
+
+        // Jamais tentées : la déclaration attend ses pièces.
+        assert.equal((await file.prochain()).id, EMP_SIGNATURE);
+        await file.marquer(EMP_SIGNATURE, { status: 201, corps: {} });
+        assert.equal((await file.prochain()).id, EMP_PHOTO);
+        await file.marquer(EMP_PHOTO, { status, corps: null });
+
+        // La photo attend son délai de réessai, la déclaration part sans elle (passage automatique comme manuel).
+        assert.equal((await file.prochain()).id, CLE_D, `status ${status}`);
+        assert.equal((await file.prochain({ ignorerPasAvant: true, exclure: new Set([EMP_PHOTO]) })).id, CLE_D);
+        await file.marquer(CLE_D, { status: 201, corps: {} });
+        const photo = (await file.lister()).find((e) => e.id === EMP_PHOTO);
+        assert.equal(photo.statut, STATUTS.EN_ATTENTE, 'la photo reste à envoyer');
+        assert.equal(await file.prochain(), null, 'délai de réessai');
+        avancer(31_000);
+        assert.equal((await file.prochain()).id, EMP_PHOTO, 'la photo est reprise ensuite');
+    }
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-    creerStockage, identifiantAppareil, MAGASINS, migrer, MIGRATIONS, NOM_BASE, ouvrirBase, proteger, protegerTransaction, VERSION,
+    creerStockage, demanderStockagePersistant, identifiantAppareil, MAGASINS, migrer, MIGRATIONS, NOM_BASE, ouvrirBase, proteger, protegerTransaction, VERSION,
 } from '../../resources/js/terrain/stockage.js';
 import { creerFauxIndexedDB } from './support/faux-indexeddb.js';
 
@@ -147,4 +147,44 @@ test('ouverture bloquee : refus, et une connexion ouverte apres coup est referme
     requete.onsuccess();
 
     assert.equal(fermee, true);
+});
+
+test('ecritures de la file et des pieces en durabilite stricte ; le reste sans option', async () => {
+    const indexedDB = creerFauxIndexedDB();
+    const stockage = creerStockage(await ouvrirBase({ indexedDB }));
+    indexedDB.transactions.length = 0;
+
+    await stockage.file.put({ id: 'cle-1', statut: 'en_attente' });
+    await stockage.file.delete('cle-1');
+    await stockage.pieces.put({ empreinte: 'a'.repeat(64), blob: 1 });
+    await stockage.file.list();
+    await stockage.elements.put({ id: 'remise-1' });
+    await stockage.meta.ecrire('session', {});
+
+    assert.deepEqual(indexedDB.transactions.map((t) => [t.noms, t.mode, t.options?.durability ?? null]), [
+        ['file', 'readwrite', 'strict'],
+        ['file', 'readwrite', 'strict'],
+        ['pieces', 'readwrite', 'strict'],
+        ['file', 'readonly', null],
+        ['elements', 'readwrite', null],
+        ['meta', 'readwrite', null],
+    ]);
+});
+
+test('stockage persistant : demande au navigateur, resultat rapporte, jamais d\'erreur', async () => {
+    const appels = [];
+    const storage = (persisted, persist) => ({
+        persisted: async () => { appels.push('persisted'); return persisted; },
+        persist: async () => { appels.push('persist'); if (persist instanceof Error) throw persist; return persist; },
+    });
+
+    assert.equal(await demanderStockagePersistant({ storage: storage(false, true) }), true);
+    assert.deepEqual(appels.splice(0), ['persisted', 'persist']);
+    assert.equal(await demanderStockagePersistant({ storage: storage(true, false) }), true, 'déjà protégé : rien à redemander');
+    assert.deepEqual(appels.splice(0), ['persisted']);
+    assert.equal(await demanderStockagePersistant({ storage: storage(false, false) }), false, 'refusé par le navigateur');
+    assert.equal(await demanderStockagePersistant({ storage: storage(false, new Error('refus')) }), false);
+    assert.equal(await demanderStockagePersistant({ storage: { persist: async () => true } }), true, 'sans persisted()');
+    assert.equal(await demanderStockagePersistant({ storage: undefined }), false, 'API absente');
+    assert.equal(await demanderStockagePersistant({ storage: {} }), false);
 });

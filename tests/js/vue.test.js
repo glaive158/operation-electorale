@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { STATUTS } from '../../resources/js/terrain/file.js';
 import {
     construireListe, dechargesDeRedistribution, duCompte, detailSynchronisation, enAttenteDEnvoi, indicateurHorsLigne, LIBELLES_STATUT, LIBELLES_VERIFICATION,
-    reserveRestante, statutAffiche, texteHorsLigne,
+    reserveRestante, statutAffiche, texteHorsLigne, texteStockage,
 } from '../../resources/js/terrain/vue.js';
 
 const remise = (id, statut = 'en_attente') => ({
@@ -132,4 +132,30 @@ test('chaque etat d\'identite du serveur a un libelle, ceux du central pour les 
     assert.equal(LIBELLES_VERIFICATION.compte, 'Confirmée depuis le compte');
     // Un echec ou une identite a verifier ne se presente jamais comme verifiee.
     for (const etat of ['echec', 'a_verifier', 'non_verifiee', 'en_attente']) assert.doesNotMatch(LIBELLES_VERIFICATION[etat], /^Vérifiée|^Confirmée/);
+});
+
+test('lecture seule : un element que ce compte ne declare pas sur sa tablette ; sans indication, il est declarable', () => {
+    const lignes = construireListe([{ ...remise(1), peut_declarer_tablette: false }, { ...remise(2), peut_declarer_tablette: true }, remise(3)], []);
+
+    assert.deepEqual(lignes.map((l) => [l.remise_id, l.lecture_seule]), [[1, true], [2, false], [3, false]]);
+    assert.equal(lignes[0].statut, STATUTS.DISPONIBLE);
+});
+
+test('identite non verifiee : une declaration de repli, avant comme apres l\'envoi', () => {
+    const file = [
+        declaration(1, 'en_attente', { bloc_preuve: null, repli: true }),
+        declaration(2, 'synchronise', { bloc_preuve: null, repli: true, reponse: { declaration: { statut: 'a_verifier', verification_identite: 'non_verifiee', contestation: 'aucune' } } }),
+        declaration(3, 'en_attente', { bloc_preuve: 'QQ==' }),
+    ];
+
+    const lignes = construireListe([remise(1), remise(2), remise(3)], file);
+
+    assert.deepEqual(lignes.map((l) => [l.remise_id, l.identite_non_verifiee]), [[2, true], [1, true], [3, false]]);
+    assert.equal(lignes.find((l) => l.remise_id === 1).detail, 'Signée sans code : identité non vérifiée.');
+});
+
+test('etat du stockage : protege, non garanti, ou inconnu', () => {
+    assert.equal(texteStockage(true), 'Stockage protégé');
+    assert.equal(texteStockage(false), 'Stockage non garanti par le navigateur');
+    assert.equal(texteStockage(undefined), null);
 });

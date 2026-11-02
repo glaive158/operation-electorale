@@ -241,3 +241,31 @@ test('mise a jour du service worker : seulement sur la liste, sans champ actif e
         ctx.arreter();
     }
 });
+
+test('demarrage : stockage persistant demande au navigateur, resultat affiche a cote de l\'indicateur hors ligne', async () => {
+    indexedDB.bases.clear();
+    reseau();
+    const demandes = [];
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { onLine: true, storage: { persisted: async () => false, persist: async () => { demandes.push(1); return true; } } },
+    });
+    try {
+        const racine = new Element('div');
+        const ctx = await demarrer(racine);
+        await attendre(() => ctx.etat.stockageProtege === true);
+        assert.equal(demandes.length, 1);
+
+        parId(racine, 'connexion-email').value = 'agent@exemple.sn';
+        parId(racine, 'connexion-mdp').value = 'mot-de-passe';
+        await trouverTous(racine, (e) => e.tagName === 'FORM')[0].emettre('submit');
+        await attendre(async () => (await ctx.stockage.meta.lire('derniere_sync')) !== undefined);
+        await ctx.rafraichir();
+
+        assert.equal(parId(racine, 'etat-stockage').textContent, 'Stockage protégé');
+        ctx.arreter();
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', original);
+    }
+});

@@ -40,18 +40,18 @@ export async function importerCle(pem) {
     return globalThis.crypto.subtle.importKey('spki', der, ALGORITHME, false, ['encrypt']);
 }
 
-/**
- * Contenu attesté par le bloc : le miroir exact de PreuveService::contenuPreuve (PHP). Les saisies sont
- * rognées, une observation vide devient null, les lignes sont triées par article, les nombres sont des entiers.
- * C'est cet objet (champs identiques) que la tablette envoie ensuite au serveur.
- */
-export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cle, signataire, lignes, horodatage_terminal }) {
-    const entier = (n) => {
-        if (!Number.isSafeInteger(n)) throw new TypeError(`Entier attendu (reçu : ${n}).`);
+const entier = (n) => {
+    if (!Number.isSafeInteger(n)) throw new TypeError(`Entier attendu (reçu : ${n}).`);
 
-        return n;
-    };
-    const lignesNormalisees = lignes.map((ligne) => {
+    return n;
+};
+
+/**
+ * Lignes telles que le serveur les reçoit (et que le bloc les atteste) : observation rognée, vide => null,
+ * entiers, triées par article. Sert aussi au repli sans code, qui n'a pas de bloc.
+ */
+export function normaliserLignes(lignes) {
+    return lignes.map((ligne) => {
         const observation = typeof ligne.observation === 'string' ? rogner(ligne.observation) : null;
 
         return {
@@ -60,9 +60,15 @@ export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cl
             defectueux: entier(ligne.defectueux ?? 0),
             observation: observation === '' ? null : observation,
         };
-    });
-    lignesNormalisees.sort((a, b) => a.materiel_id - b.materiel_id);
+    }).sort((a, b) => a.materiel_id - b.materiel_id);
+}
 
+/**
+ * Contenu attesté par le bloc : le miroir exact de PreuveService::contenuPreuve (PHP). Les saisies sont
+ * rognées, une observation vide devient null, les lignes sont triées par article, les nombres sont des entiers.
+ * C'est cet objet (champs identiques) que la tablette envoie ensuite au serveur.
+ */
+export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cle, signataire, lignes, horodatage_terminal }) {
     return {
         decharge_id: entier(decharge_id),
         decharge_identifiant: String(decharge_identifiant),
@@ -73,7 +79,7 @@ export function contenuPreuve({ decharge_id, decharge_identifiant, remise_id, cl
             nom: rogner(String(signataire.nom ?? '')),
             qualite: rogner(String(signataire.qualite ?? '')),
         },
-        lignes: lignesNormalisees,
+        lignes: normaliserLignes(lignes),
         horodatage_terminal,
     };
 }

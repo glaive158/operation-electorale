@@ -1,10 +1,13 @@
 /**
  * IndexedDB minimal en mémoire pour les tests : ouverture avec montée de version, magasins à clé
- * (`keyPath`), get / put / getAll / delete, transactions. Les valeurs sont clonées comme le fait le navigateur.
+ * (`keyPath`), get / put / getAll / delete, transactions (journalisées avec leur mode et leurs options). Les valeurs
+ * sont clonées comme le fait le navigateur.
  */
 
 export function creerFauxIndexedDB() {
     const bases = new Map();
+    /** Transactions ouvertes : {noms, mode, options} (durabilité demandée, par exemple). */
+    const transactions = [];
 
     function requete(action, transaction) {
         const r = { result: undefined, error: null };
@@ -46,6 +49,7 @@ export function creerFauxIndexedDB() {
 
     return {
         bases,
+        transactions,
         open(nom, version) {
             const demande = { result: null, error: null, transaction: null };
             queueMicrotask(() => {
@@ -54,7 +58,11 @@ export function creerFauxIndexedDB() {
                     objectStoreNames: { contains: (n) => base.magasins.has(n) },
                     createObjectStore: (n, options) => { base.magasins.set(n, { keyPath: options.keyPath, donnees: new Map() }); },
                     deleteObjectStore: (n) => { base.magasins.delete(n); },
-                    transaction: (noms) => ouvrirTransaction(base, noms),
+                    transaction: (noms, mode = 'readonly', options = undefined) => {
+                        transactions.push({ noms, mode, options });
+
+                        return ouvrirTransaction(base, noms);
+                    },
                     close() {},
                 };
                 demande.result = facade;

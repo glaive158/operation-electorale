@@ -216,18 +216,145 @@ test('reception : un delegue peut signer ; son identite entre dans le contenu at
     assert.deepEqual(declaration.signataire, { user_id: 9, nom: 'Moussa Fall', qualite: 'Chef de poste' });
 });
 
-test('reception : une autorite sans compte rattache ne peut pas etre signee sur la tablette', async () => {
+test('reception : repli sans code (code oublie ou verrouille) : signature exigee, aucun bloc, identite non verifiee', async () => {
     const ctx = await contexte();
+    const confirmations = [];
+    globalThis.window.confirm = (texte) => { confirmations.push(texte); return true; };
+    await ctx.stockage.elements.put(elementReception());
+    const racine = await ecranReception(ctx, 'remise-12');
+    await passerALAutorite(racine);
+
+    // Le repli est proposé à côté de la validation par code ; la signature reste obligatoire.
+    const repli = () => parTexte(racine, 'button', 'Signer sans code (identité non vérifiée)').click();
+    const champCode = parId(racine, 'reception-code');
+    saisir(champCode, CODE);
+    await repli();
+    assert.match(toutLeTexte(racine), /La signature est obligatoire/);
+    assert.equal(champCode.value, '', 'un code saisi ne sert pas au repli et ne reste pas');
+    assert.equal((await ctx.file.lister()).length, 0);
+
+    // Sans photo, la tablette la suggère fortement avant d'enregistrer.
+    await tracer(parAria(racine, 'Zone de signature'));
+    globalThis.window.confirm = (texte) => { confirmations.push(texte); return false; };
+    await repli();
+    assert.match(confirmations.at(-1), /photo/i);
+    assert.equal((await ctx.file.lister()).length, 0, 'refusé : rien n\'est enregistré');
+    globalThis.window.confirm = (texte) => { confirmations.push(texte); return true; };
+    await repli();
+
+    const declaration = (await ctx.file.lister()).find((e) => e.type === 'declaration');
+    assert.equal(declaration.bloc_preuve, null, 'aucun bloc de preuve : le serveur la tient pour non vérifiée');
+    assert.equal(declaration.repli, true);
+    assert.deepEqual(declaration.signataire, { user_id: 7, nom: 'Awa BA', qualite: 'Sous-préfet' });
+    assert.deepEqual(declaration.lignes, [
+        { materiel_id: 3, recu: 19, defectueux: 2, observation: '1 urne cassée' },
+        { materiel_id: 4, recu: 10, defectueux: 0, observation: null },
+    ]);
+    assert.deepEqual(declaration.pieces.map((p) => p.role), ['signature']);
+    assert.match(declaration.cle, /^[A-Za-z0-9-]{16,64}$/);
+    const corps = corpsDeclaration(declaration);
+    assert.equal(corps.bloc_preuve, null);
+    assert.deepEqual(corps.signataire, declaration.signataire);
+    assert.equal(ctx.cycles.length, 1);
+
+    // L'écran de résultat et le récapitulatif disent que l'identité n'est pas vérifiée.
+    assert.match(toutLeTexte(racine), /Enregistrée — identité non vérifiée/);
+    assert.match(toutLeTexte(racine), /confirmer depuis son compte/);
+    assert.doesNotMatch(toutLeTexte(racine), /vérification d'identité en attente/);
+    const recapitulatif = await ecranReception(ctx, 'remise-12');
+    assert.match(toutLeTexte(recapitulatif), /Identité non vérifiée/);
+
+    // Le badge de la liste aussi.
+    const liste = await ecranListe(ctx);
+    assert.match(toutLeTexte(liste), /Identité non vérifiée/);
+    const tout = JSON.stringify([...ctx.indexedDB.bases.values()].map((b) => [...b.magasins.values()].map((m) => [...m.donnees.values()])));
+    assert.equal(tout.includes(CODE), false);
+});
+
+test('reception : une autorite sans compte rattache : nom et qualite saisis a la main, signature sans code', async () => {
+    const ctx = await contexte();
+    globalThis.window.confirm = () => true;
     await ctx.stockage.elements.put(elementReception({ autorite_attendue: { user_id: null, nom: null, qualite: null, delegues: [] } }));
     const racine = await ecranReception(ctx, 'remise-12');
     await passerALAutorite(racine);
-    saisir(parId(racine, 'reception-code'), CODE);
-    await tracer(parAria(racine, 'Zone de signature'));
 
-    await parTexte(racine, 'button', 'Valider la réception').click();
-
+    // Pas de code possible : seul le repli est proposé, avec le nom et la qualité à saisir.
+    assert.equal(parId(racine, 'reception-code'), null);
+    assert.equal(parTexte(racine, 'button', 'Valider la réception'), null);
     assert.match(toutLeTexte(racine), /Aucune autorité n'est rattachée/);
+    const repli = () => parTexte(racine, 'button', 'Signer sans code (identité non vérifiée)').click();
+    await tracer(parAria(racine, 'Zone de signature'));
+    await repli();
+    assert.match(toutLeTexte(racine), /Le nom et la qualité du signataire sont obligatoires/);
     assert.equal((await ctx.file.lister()).length, 0);
+
+    saisir(parAria(racine, 'Nom du signataire'), '  Mame Diarra Fall ');
+    saisir(parAria(racine, 'Qualité du signataire'), 'Préfet par intérim');
+    await repli();
+
+    const declaration = (await ctx.file.lister()).find((e) => e.type === 'declaration');
+    assert.deepEqual(declaration.signataire, { user_id: null, nom: 'Mame Diarra Fall', qualite: 'Préfet par intérim' });
+    assert.equal(declaration.bloc_preuve, null);
+    assert.equal(corpsDeclaration(declaration).signataire.user_id, null);
+    assert.match(toutLeTexte(racine), /Enregistrée — identité non vérifiée/);
+});
+
+test('reception : un signataire enregistre sans compte est propose dans les champs a saisir', async () => {
+    const ctx = await contexte();
+    globalThis.window.confirm = () => true;
+    await ctx.stockage.elements.put(elementReception({ autorite_attendue: { user_id: null, nom: 'Mame Diarra Fall', qualite: 'Préfet', delegues: [] } }));
+    const racine = await ecranReception(ctx, 'remise-12');
+    await passerALAutorite(racine);
+
+    assert.equal(parAria(racine, 'Nom du signataire').value, 'Mame Diarra Fall');
+    assert.equal(parAria(racine, 'Qualité du signataire').value, 'Préfet');
+    await tracer(parAria(racine, 'Zone de signature'));
+    await parTexte(racine, 'button', 'Signer sans code (identité non vérifiée)').click();
+
+    const declaration = (await ctx.file.lister()).find((e) => e.type === 'declaration');
+    assert.deepEqual(declaration.signataire, { user_id: null, nom: 'Mame Diarra Fall', qualite: 'Préfet' });
+});
+
+test('liste et reception : un element que ce compte ne declare pas sur sa tablette reste en lecture seule', async () => {
+    const ctx = await contexte({ session: { utilisateur: { id: 7, nom: 'Sous-préfet' } } });
+    await ctx.stockage.elements.put(elementReception({
+        id: 'remise-13', remise: { id: 13, etape: 'redistribution', statut: 'en_attente', de: 'Préfecture de Thiès', a: 'Sous-préfecture de Sindia' },
+        peut_declarer_tablette: false,
+    }));
+    await ctx.stockage.elements.put(elementReception({ peut_declarer_tablette: true }));
+
+    const liste = await ecranListe(ctx);
+    const carte = trouverTous(liste, (e) => e.tagName === 'LI' && e.getAttribute('data-remise') === '13')[0];
+    assert.equal(parTexte(carte, 'a', 'Réceptionner'), null);
+    assert.match(toutLeTexte(carte), /À signer sur la tablette de l'agent, ou à confirmer depuis votre compte/);
+    const lienWeb = parTexte(carte, 'a', 'Ouvrir la décharge');
+    assert.equal(lienWeb.getAttribute('href'), '/terrain/decharges/5');
+    const autre = trouverTous(liste, (e) => e.tagName === 'LI' && e.getAttribute('data-remise') === '12')[0];
+    assert.ok(parTexte(autre, 'a', 'Réceptionner'));
+
+    // Par l'adresse directe : aucun formulaire, le même renvoi.
+    const ecran = await ecranReception(ctx, 'remise-13');
+    assert.equal(parTexte(ecran, 'button', 'Continuer'), null);
+    assert.match(toutLeTexte(ecran), /À signer sur la tablette de l'agent, ou à confirmer depuis votre compte/);
+    assert.equal(parTexte(ecran, 'a', 'Ouvrir la décharge').getAttribute('href'), '/terrain/decharges/5');
+});
+
+test('liste : etat du stockage affiche a cote de « Tout est disponible hors ligne »', async () => {
+    const ctx = await contexte();
+    await ctx.stockage.meta.ecrire('derniere_sync', '2026-11-05T10:00:00Z');
+
+    ctx.etat.stockageProtege = true;
+    let liste = await ecranListe(ctx);
+    assert.equal(toutLeTexte(parId(liste, 'indicateur-hors-ligne')), 'Tout est disponible hors ligne');
+    assert.equal(toutLeTexte(parId(liste, 'etat-stockage')), 'Stockage protégé');
+
+    ctx.etat.stockageProtege = false;
+    liste = await ecranListe(ctx);
+    assert.equal(toutLeTexte(parId(liste, 'etat-stockage')), 'Stockage non garanti par le navigateur');
+
+    ctx.etat.stockageProtege = undefined;
+    liste = await ecranListe(ctx);
+    assert.equal(parId(liste, 'etat-stockage'), null, 'rien tant que le navigateur n\'a pas répondu');
 });
 
 test('reception : une remise a arbitrer ou inconnue n\'ouvre aucun formulaire', async () => {

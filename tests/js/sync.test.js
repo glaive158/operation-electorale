@@ -512,3 +512,152 @@ test('une redistribution a arbitrer ne diminue pas la reserve (rien n\'a ete com
 
     assert.equal(reglages.get('reserve:5').lignes[0].quantite, 25);
 });
+
+/** Signature A et photo B en file avant leur déclaration ; `echec` répond au premier dépôt de la pièce visée. */
+function pieceInterrompue({ visee = EMPREINTE_B, echec }) {
+    const octets = (n) => new Blob([new Uint8Array([n])], { type: 'image/png' });
+    let premierDepot = true;
+    const recus = new Set();
+
+    return installer({
+        pieces: new Map([[EMPREINTE_A, { empreinte: EMPREINTE_A, blob: octets(1) }], [EMPREINTE_B, { empreinte: EMPREINTE_B, blob: octets(2) }]]),
+        reponses: (m, chemin, options) => {
+            if (m === 'HEAD') return { status: recus.has(chemin.slice('/pieces/'.length)) ? 200 : 404, corps: null };
+            if (chemin === '/pieces') {
+                const empreinte = options.formData.get('empreinte');
+                if (empreinte === visee && premierDepot) {
+                    premierDepot = false;
+
+                    return { status: echec, corps: null };
+                }
+                recus.add(empreinte);
+
+                return { status: 201, corps: { piece: { empreinte } } };
+            }
+
+            return { status: 201, corps: { declaration: { id: 41, statut: 'retenue', verification_identite: 'verifiee_code', contestation: 'aucune' } } };
+        },
+    });
+}
+
+async function mettreEnFile(file) {
+    await file.ajouter({ type: 'piece', id: EMPREINTE_A, empreinte: EMPREINTE_A, role: 'signature' });
+    await file.ajouter({ type: 'piece', id: EMPREINTE_B, empreinte: EMPREINTE_B, role: 'photo' });
+    const d = declaration({ pieces: [{ empreinte: EMPREINTE_A, role: 'signature' }, { empreinte: EMPREINTE_B, role: 'photo' }] });
+    await file.ajouter(d);
+
+    return d;
+}
+
+test('photo interrompue (reseau, 408, 429, 5xx) : la declaration est enregistree sans l\'attendre, la photo part ensuite', async () => {
+    for (const echec of [0, 408, 429, 503]) {
+        const { file, api, sync, pieces, avancer } = pieceInterrompue({ echec });
+        const d = await mettreEnFile(file);
+
+        await sync.cycle();
+
+        const chemins = api.appels.map((a) => `${a.methode} ${a.chemin}`);
+        assert.deepEqual(chemins, [
+            `HEAD /pieces/${EMPREINTE_A}`, 'POST /pieces', // signature déposée
+            `HEAD /pieces/${EMPREINTE_B}`, 'POST /pieces', // photo interrompue
+            `HEAD /pieces/${EMPREINTE_A}`, 'POST /remises/12/declarations', // la déclaration part sans attendre la photo
+        ], `status ${echec}`);
+        assert.deepEqual(api.appels.at(-1).options.json, corpsDeclaration(d), 'même corps : la photo y est annoncée, « attendue » côté serveur');
+        let [signature, photo, envoyee] = await file.lister();
+        assert.equal(envoyee.statut, STATUTS.SYNCHRONISE);
+        assert.equal(signature.statut, STATUTS.SYNCHRONISE);
+        assert.equal(photo.statut, STATUTS.EN_ATTENTE, 'la photo reste en file');
+        assert.equal(pieces.has(EMPREINTE_A), false);
+        assert.equal(pieces.has(EMPREINTE_B), true, 'ses octets restent sur la tablette');
+
+        // Passage suivant, après le délai de réessai : la photo part et ses octets sont libérés.
+        api.appels.length = 0;
+        avancer(31_000);
+        await sync.cycle();
+
+        assert.deepEqual(api.appels.map((a) => `${a.methode} ${a.chemin}`), [`HEAD /pieces/${EMPREINTE_B}`, 'POST /pieces']);
+        [signature, photo, envoyee] = await file.lister();
+        assert.equal(photo.statut, STATUTS.SYNCHRONISE);
+        assert.equal(pieces.has(EMPREINTE_B), false);
+        assert.equal(envoyee.tentatives, 1, 'la déclaration n\'est jamais renvoyée');
+    }
+});
+
+test('signature interrompue : elle ne bloque pas non plus la declaration (son empreinte est dans la declaration)', async () => {
+    const { file, api, sync, pieces, avancer } = pieceInterrompue({ visee: EMPREINTE_A, echec: 503 });
+    const d = await mettreEnFile(file);
+
+    await sync.cycle();
+
+    assert.deepEqual(api.appels.map((a) => `${a.methode} ${a.chemin}`), [
+        `HEAD /pieces/${EMPREINTE_A}`, 'POST /pieces',
+        `HEAD /pieces/${EMPREINTE_B}`, 'POST /pieces',
+        `HEAD /pieces/${EMPREINTE_B}`, 'POST /remises/12/declarations',
+    ]);
+    assert.deepEqual(api.appels.at(-1).options.json.pieces, corpsDeclaration(d).pieces);
+    assert.equal((await file.lister())[0].statut, STATUTS.EN_ATTENTE);
+    assert.equal(pieces.has(EMPREINTE_A), true);
+
+    avancer(31_000);
+    await sync.cycle();
+    assert.equal((await file.lister())[0].statut, STATUTS.SYNCHRONISE);
+    assert.equal(pieces.has(EMPREINTE_A), false);
+});
+
+test('passage manuel : la photo en echec est tentee une fois, la declaration part dans le meme passage', async () => {
+    const { file, api, sync, pieces } = pieceInterrompue({ echec: 503 });
+    await mettreEnFile(file);
+
+    await sync.cycle({ manuel: true });
+
+    assert.equal(api.appels.filter((a) => a.chemin === '/pieces' && a.options.formData.get('empreinte') === EMPREINTE_B).length, 1);
+    assert.equal((await file.lister())[2].statut, STATUTS.SYNCHRONISE);
+
+    // Un nouveau passage manuel reprend la photo tout de suite (délai de réessai ignoré).
+    await sync.cycle({ manuel: true });
+    assert.equal((await file.lister())[1].statut, STATUTS.SYNCHRONISE);
+    assert.equal(pieces.has(EMPREINTE_B), false);
+});
+
+test('piece hors file renvoyee avec la declaration et interrompue : elle est mise en file, la declaration part', async () => {
+    const { file, api, sync, pieces, avancer } = pieceInterrompue({ echec: 0 });
+    const d = declaration({ pieces: [{ empreinte: EMPREINTE_B, role: 'photo' }] });
+    await file.ajouter(d);
+
+    await sync.cycle();
+
+    assert.deepEqual(api.appels.map((a) => `${a.methode} ${a.chemin}`), [`HEAD /pieces/${EMPREINTE_B}`, 'POST /pieces', 'POST /remises/12/declarations']);
+    const photo = (await file.lister()).find((e) => e.type === 'piece');
+    assert.equal(photo.empreinte, EMPREINTE_B);
+    assert.equal(photo.statut, STATUTS.EN_ATTENTE);
+    assert.equal(pieces.has(EMPREINTE_B), true);
+
+    avancer(31_000);
+    await sync.cycle();
+    assert.equal((await file.lister()).find((e) => e.type === 'piece').statut, STATUTS.SYNCHRONISE);
+    assert.equal(pieces.has(EMPREINTE_B), false);
+});
+
+test('piece refusee (4xx hors 408 et 429) : a verifier, octets gardes ; la declaration part comme avant', async () => {
+    const { file, api, sync, pieces } = pieceInterrompue({ echec: 422 });
+    await mettreEnFile(file);
+    // Toujours refusée.
+    const repondre = api.envoyer.bind(api);
+    api.envoyer = async (m, chemin, options = {}) => {
+        if (chemin === '/pieces' && options.formData.get('empreinte') === EMPREINTE_B) {
+            api.appels.push({ methode: m, chemin, options });
+
+            return { status: 422, corps: { message: 'Le fichier doit être une image JPEG ou PNG.' } };
+        }
+
+        return repondre(m, chemin, options);
+    };
+
+    await sync.cycle();
+
+    const [, photo, envoyee] = await file.lister();
+    assert.equal(photo.statut, STATUTS.A_VERIFIER);
+    assert.equal(photo.message, 'Le fichier doit être une image JPEG ou PNG.');
+    assert.equal(envoyee.statut, STATUTS.SYNCHRONISE);
+    assert.equal(pieces.has(EMPREINTE_B), true);
+});

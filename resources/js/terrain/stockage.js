@@ -134,9 +134,9 @@ export function ouvrirBase({ indexedDB = globalThis.indexedDB, nom = NOM_BASE, m
     });
 }
 
-function execute(base, magasin, mode, action) {
+function execute(base, magasin, mode, action, options = undefined) {
     return new Promise((resolve, reject) => {
-        const transaction = base.transaction(magasin, mode);
+        const transaction = options ? base.transaction(magasin, mode, options) : base.transaction(magasin, mode);
         let resultat;
         transaction.oncomplete = () => resolve(resultat);
         transaction.onerror = () => reject(transaction.error ?? new Error('Transaction IndexedDB en erreur.'));
@@ -145,16 +145,22 @@ function execute(base, magasin, mode, action) {
     });
 }
 
+/** Durabilité stricte : l'écriture n'est confirmée qu'une fois sur le disque (option ignorée là où elle n'existe pas). */
+const STRICTE = Object.freeze({ durability: 'strict' });
+
 /**
  * Un magasin vu comme l'attend file.js : get(id), put(element), list(), delete(id), tous asynchrones.
- * Pas de `clear` : on n'efface jamais un magasin d'un coup.
+ * Pas de `clear` : on n'efface jamais un magasin d'un coup. `durabiliteStricte` : écritures en durabilité stricte
+ * (file d'envoi et octets des pièces : une coupure juste après « Enregistrée » ne doit rien perdre).
  */
-export function magasin(base, nom) {
+export function magasin(base, nom, { durabiliteStricte = false } = {}) {
+    const ecriture = durabiliteStricte ? STRICTE : undefined;
+
     return {
         get: (id) => execute(base, nom, 'readonly', (m) => m.get(id)),
-        put: (valeur) => execute(base, nom, 'readwrite', (m) => m.put(valeur)).then(() => undefined),
+        put: (valeur) => execute(base, nom, 'readwrite', (m) => m.put(valeur), ecriture).then(() => undefined),
         list: () => execute(base, nom, 'readonly', (m) => m.getAll()),
-        delete: (id) => execute(base, nom, 'readwrite', (m) => m.delete(id)).then(() => undefined),
+        delete: (id) => execute(base, nom, 'readwrite', (m) => m.delete(id), ecriture).then(() => undefined),
     };
 }
 
@@ -179,10 +185,29 @@ export function creerStockage(base) {
     return {
         base,
         elements: magasin(base, MAGASINS.ELEMENTS),
-        file: magasin(base, MAGASINS.FILE),
-        pieces: magasin(base, MAGASINS.PIECES),
+        file: magasin(base, MAGASINS.FILE, { durabiliteStricte: true }),
+        pieces: magasin(base, MAGASINS.PIECES, { durabiliteStricte: true }),
         meta: meta(base),
     };
+}
+
+/**
+ * Demande au navigateur de ne pas effacer la base de la tablette sous pression d'espace (stockage persistant).
+ * Ne lève jamais : sans API, sur refus ou en erreur, renvoie false (stockage « non garanti »).
+ *
+ * @param {{storage?: {persisted?: Function, persist?: Function}}} [navigateur]
+ * @returns {Promise<boolean>} true si le stockage est protégé
+ */
+export async function demanderStockagePersistant(navigateur = globalThis.navigator) {
+    const storage = navigateur?.storage;
+    if (typeof storage?.persist !== 'function') return false;
+    try {
+        if (typeof storage.persisted === 'function' && (await storage.persisted()) === true) return true;
+
+        return (await storage.persist()) === true;
+    } catch {
+        return false;
+    }
 }
 
 /**

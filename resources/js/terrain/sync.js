@@ -6,8 +6,11 @@
  * Règles d'envoi :
  *  - une déclaration part avec son bloc chiffré et sa clé d'origine, TELS QUELS à chaque nouvel essai (409,
  *    réseau, 5xx) : le bloc n'est jamais refait ;
- *  - avant une déclaration, chaque pièce est vérifiée (HEAD) : 404 => on envoie les octets (POST). Un HEAD 200
- *    n'est vrai que si CE compte a déposé la pièce ;
+ *  - les pièces partent d'abord ; avant une déclaration, chaque pièce est vérifiée (HEAD) : 404 => on envoie les
+ *    octets (POST). Un HEAD 200 n'est vrai que si CE compte a déposé la pièce ;
+ *  - une pièce interrompue (réseau, 408, 429, 5xx), photo comme signature, ne bloque pas sa déclaration : celle-ci
+ *    part avec l'empreinte de la pièce (« attendue » côté serveur), la pièce reste en file avec ses octets et le
+ *    serveur la rattache à son arrivée. Une pièce refusée (autre 4xx) passe « à vérifier », comme avant ;
  *  - 401 => la file est conservée et suspendue, l'application demande de se reconnecter ; après une reconnexion
  *    réussie, reconnecte() la fait reprendre.
  */
@@ -73,27 +76,37 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         return poster(empreinte, enregistree.blob);
     }
 
-    async function envoyerDeclaration(e) {
+    async function envoyerDeclaration(e, tentes) {
+        const enFile = new Map((await file.lister()).filter((x) => x.type === 'piece').map((x) => [x.empreinte, x]));
         // Le serveur ne garde pas une pièce qu'il n'a pas : on renvoie celles que CE compte n'a pas déposées.
         for (const piece of e.pieces ?? []) {
+            // Pièce encore en file (envoi interrompu) : elle partira seule ; la déclaration ne l'attend pas.
+            if (enFile.get(piece.empreinte)?.statut === STATUTS.EN_ATTENTE) continue;
             const tete = await api.envoyer('HEAD', `/pieces/${piece.empreinte}`);
             if (tete.status === 200) continue;
             if (RETENTABLE(tete.status)) return tete;
             const enregistree = await pieces.lire(piece.empreinte);
             if (!enregistree?.blob) continue; // la déclaration part : la pièce reste « attendue » côté serveur
             const envoi = await poster(piece.empreinte, enregistree.blob);
-            if (RETENTABLE(envoi.status)) return envoi;
+            if (envoi.status === 401) return envoi;
+            if (RETENTABLE(envoi.status)) {
+                // Interrompue : remise en file (avec cet essai compté) pour partir plus tard ; la déclaration part.
+                const reprise = await file.ajouter({ type: 'piece', id: piece.empreinte, empreinte: piece.empreinte, role: piece.role });
+                if (reprise.statut !== STATUTS.EN_ATTENTE) return envoi;
+                if (reprise.tentatives === 0) await file.marquer(piece.empreinte, envoi);
+                tentes?.add(piece.empreinte);
+            }
         }
 
         return api.envoyer('POST', `/remises/${e.remise_id}/declarations`, { json: corpsDeclaration(e) });
     }
 
-    function envoyerElement(e) {
+    function envoyerElement(e, tentes) {
         switch (e.type) {
             case 'piece':
                 return deposerPiece(e.empreinte);
             case 'declaration':
-                return envoyerDeclaration(e);
+                return envoyerDeclaration(e, tentes);
             case 'redistribution':
                 return api.envoyer('POST', `/decharges/${e.decharge_id}/redistributions`, { json: corpsRedistribution(e), avecAppareil: true });
             case 'liberation':
@@ -103,16 +116,19 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
         }
     }
 
-    /** Libère les octets des pièces d'une déclaration enregistrée, sauf celles qui restent à vérifier. */
-    async function allegerPieces(declaration) {
+    /**
+     * Libère les octets de pièces qui n'ont plus à partir : ni encore en file ou à vérifier, ni annoncées par une
+     * déclaration pas encore enregistrée (autre que `sauf`).
+     */
+    async function allegerPieces(empreintes, sauf = null) {
         if (typeof pieces.supprimer !== 'function') return;
         const elements = await file.lister();
-        for (const piece of declaration.pieces ?? []) {
-            const element = elements.find((x) => x.type === 'piece' && x.empreinte === piece.empreinte);
+        for (const empreinte of empreintes) {
+            const element = elements.find((x) => x.type === 'piece' && x.empreinte === empreinte);
             const aGarder = element?.statut === STATUTS.A_VERIFIER || element?.statut === STATUTS.EN_ATTENTE;
-            const utilisee = elements.some((x) => x.type === 'declaration' && x.id !== declaration.id
-                && x.statut !== STATUTS.SYNCHRONISE && (x.pieces ?? []).some((p) => p.empreinte === piece.empreinte));
-            if (!aGarder && !utilisee) await pieces.supprimer(piece.empreinte);
+            const utilisee = elements.some((x) => x.type === 'declaration' && x.id !== sauf
+                && x.statut !== STATUTS.SYNCHRONISE && (x.pieces ?? []).some((p) => p.empreinte === empreinte));
+            if (!aGarder && !utilisee) await pieces.supprimer(empreinte);
         }
     }
 
@@ -145,16 +161,19 @@ export function creerSync({ file, api, pieces, meta, telecharger, estEnLigne = (
             const element = await file.prochain(manuel ? { ignorerPasAvant: true, exclure: tentes } : undefined);
             if (!element) return { envoyes, session: true };
             tentes.add(element.id);
-            const issue = await envoyerElement(element);
+            const issue = await envoyerElement(element, tentes);
             const marque = await file.marquer(element.id, issue);
             if (issue.status === 401) return { envoyes, session: false };
             if (marque.statut === STATUTS.SYNCHRONISE) {
                 envoyes += 1;
-                if (element.type === 'declaration') await allegerPieces(element);
+                if (element.type === 'declaration') await allegerPieces((element.pieces ?? []).map((p) => p.empreinte), element.id);
+                // Une pièce partie après sa déclaration (envoi interrompu) : ses octets ne servent plus.
+                if (element.type === 'piece') await allegerPieces([element.empreinte]);
                 if (element.type === 'redistribution' || element.type === 'liberation') await majReserve(element, issue);
             }
-            // Pas de réponse du serveur ou limite atteinte : inutile d'insister dans ce passage.
-            if (issue.status === 0 || issue.status === 429) return { envoyes, session: true, reseau: issue.status === 0 };
+            // Pas de réponse du serveur ou limite atteinte : inutile d'insister dans ce passage. Une pièce interrompue
+            // (envoi lourd sur un réseau faible) n'arrête pas le passage : sa déclaration, légère, part quand même.
+            if (element.type !== 'piece' && (issue.status === 0 || issue.status === 429)) return { envoyes, session: true, reseau: issue.status === 0 };
         }
     }
 

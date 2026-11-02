@@ -11,6 +11,7 @@
  * Éléments (champ `type`) :
  *   piece         { id = empreinte, empreinte (SHA-256 hex), role }                 -> POST /api/terrain/pieces
  *   declaration   { id, cle, horodatage_terminal, bloc_preuve, pieces: [{empreinte, role}], ... }
+ *                 bloc_preuve : chaîne (code chiffré) ou null (repli « signer sans code », identité non vérifiée)
  *   redistribution{ id, cle, horodatage_terminal, decharge_id, ... }
  *   liberation    { id, decharge_id, ... }                                          -> DELETE .../reserve
  *   autre type    uniquement à l'état `disponible` (données téléchargées, rien à envoyer).
@@ -107,7 +108,8 @@ function valider(element) {
             throw new TypeError('Horodatage invalide : Y-m-dTH:i:s+HH:MM attendu.');
         }
         if (copie.type === 'declaration') {
-            if (typeof copie.bloc_preuve !== 'string' || copie.bloc_preuve === '') {
+            // null : repli sans code, explicitement choisi (le serveur tient l'identité pour non vérifiée).
+            if (copie.bloc_preuve !== null && (typeof copie.bloc_preuve !== 'string' || copie.bloc_preuve === '')) {
                 throw new TypeError('Bloc de preuve manquant.');
             }
             copie.pieces = (copie.pieces ?? []).map((p) => (typeof p === 'string' ? { empreinte: p } : p));
@@ -188,13 +190,16 @@ export function creerFile({ stockage, horloge = () => Date.now(), delaiReessaiMs
             const maintenant = horloge();
             const tous = await stockage.list();
             const enAttente = tous.filter((e) => e.statut === STATUTS.EN_ATTENTE);
-            const piecesEnAttente = new Set(enAttente.filter((e) => e.type === 'piece').map((e) => e.empreinte));
+            // Une déclaration attend ses pièces jamais tentées (elles partent d'abord). Une pièce dont l'envoi a été
+            // interrompu (réseau, 408, 429, 5xx) ne la retient plus : la déclaration est enregistrée sans l'attendre,
+            // la pièce reste en file et le serveur la rattache à son arrivée (§13 « photo interrompue »).
+            const piecesJamaisTentees = new Set(enAttente.filter((e) => e.type === 'piece' && !(e.tentatives > 0)).map((e) => e.empreinte));
             const redistributions = new Set(enAttente.filter((e) => e.type === 'redistribution').map((e) => e.decharge_id));
 
             const envoyable = (e) => {
                 if (exclure?.has(e.id)) return false;
                 if (!ignorerPasAvant && e.pas_avant !== undefined && e.pas_avant > maintenant) return false;
-                if (e.type === 'declaration') return !e.pieces.some((p) => piecesEnAttente.has(p.empreinte));
+                if (e.type === 'declaration') return !e.pieces.some((p) => piecesJamaisTentees.has(p.empreinte));
                 if (e.type === 'liberation') return !redistributions.has(e.decharge_id);
 
                 return true;

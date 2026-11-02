@@ -7,7 +7,7 @@ import { creerApi } from './api.js';
 import { h, remplacer } from './dom.js';
 import { ecranConnexion, ecranListe, ecranReception, ecranRedistribution } from './ecrans.js';
 import { creerFile, STATUTS } from './file.js';
-import { creerStockage, identifiantAppareil, ouvrirBase } from './stockage.js';
+import { creerStockage, demanderStockagePersistant, identifiantAppareil, ouvrirBase } from './stockage.js';
 import { creerSync, telechargerDonnees } from './sync.js';
 import { enAttenteDEnvoi } from './vue.js';
 
@@ -58,6 +58,8 @@ export async function demarrer(racine) {
         enLigne: navigator.onLine !== false,
         miseAJour: null,
         message: null,
+        /** Stockage persistant accordé par le navigateur : undefined tant qu'il n'a pas répondu. */
+        stockageProtege: undefined,
     };
     const api = creerApi({ jeton: () => (etat.sessionExpiree ? null : etat.session?.token ?? null), appareil: () => appareil, base: amorce.api ?? '/api/terrain' });
     const file = creerFile({ stockage: stockage.file });
@@ -199,6 +201,12 @@ export async function demarrer(racine) {
     await rafraichirEntete();
     await dessiner();
     ctx.arreter = sync.demarrer({ fenetre: window });
+    // La file d'envoi ne doit pas être effacée par le navigateur sous pression d'espace : on demande la protection,
+    // sans bloquer le démarrage, et la liste affiche le résultat.
+    demanderStockagePersistant(globalThis.navigator).then((protege) => {
+        etat.stockageProtege = protege;
+        if (etat.session && !etat.sessionExpiree && ecranSansSaisie()) dessiner();
+    });
     enregistrerServiceWorker(amorce, etat, demanderMiseAJour, rafraichirEntete, ecranSansSaisie);
 
     return ctx;

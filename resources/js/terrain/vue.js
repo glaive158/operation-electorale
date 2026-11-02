@@ -56,6 +56,20 @@ export function detailSynchronisation(declaration) {
     return libelle;
 }
 
+/** Une déclaration signée sans code (repli) : l'identité du signataire n'est pas vérifiée, avant comme après l'envoi. */
+export const identiteNonVerifiee = (declaration) => Boolean(declaration)
+    && (declaration.repli === true || declaration.bloc_preuve === null || declaration.reponse?.declaration?.verification_identite === 'non_verifiee');
+
+export const DETAIL_REPLI = 'Signée sans code : identité non vérifiée.';
+
+function detailLigne(declaration) {
+    if (declaration?.statut === STATUTS.A_VERIFIER || declaration?.statut === STATUTS.EN_ATTENTE) {
+        return declaration.message ?? (identiteNonVerifiee(declaration) ? DETAIL_REPLI : null);
+    }
+
+    return detailSynchronisation(declaration);
+}
+
 /**
  * Statut affiché d'une réception : celui de la file si elle l'a prise en charge, sinon celui de l'affectation.
  * Une déclaration enregistrée mais à vérifier par le central s'affiche « À vérifier ».
@@ -76,7 +90,7 @@ export function statutAffiche(element, declaration) {
  * Les réceptions à afficher : les affectations téléchargées (hors préparations de redistribution, qui relèvent
  * de l'écran de l'appareil désigné) et les déclarations de la file dont l'affectation n'est plus téléchargée.
  *
- * @returns {Array<{id: string, remise_id: number, titre: string, de: string, a: string, etape: string, statut: string, detail: ?string, element: ?object, declaration: ?object}>}
+ * @returns {Array<{id: string, remise_id: number, titre: string, de: string, a: string, etape: string, statut: string, detail: ?string, element: ?object, declaration: ?object, lecture_seule: boolean, identite_non_verifiee: boolean}>}
  */
 export function construireListe(elements, file, utilisateurId = null) {
     const declarations = declarationsActives(utilisateurId === null ? file : duCompte(file, utilisateurId));
@@ -90,6 +104,9 @@ export function construireListe(elements, file, utilisateurId = null) {
         const declaration = parRemise.get(element.remise.id) ?? null;
         vus.add(element.remise.id);
         lignes.push({
+            // Ce compte ne la déclare pas sur sa tablette (autre signataire attendu) : consultation seulement.
+            lecture_seule: element.peut_declarer_tablette === false,
+            identite_non_verifiee: identiteNonVerifiee(declaration),
             id: element.id,
             remise_id: element.remise.id,
             titre: `Décharge n° ${element.decharge.numero ?? element.decharge.identifiant}`,
@@ -97,8 +114,7 @@ export function construireListe(elements, file, utilisateurId = null) {
             a: element.remise.a ?? '',
             etape: element.remise.etape,
             statut: statutAffiche(element, declaration),
-            detail: declaration?.statut === STATUTS.A_VERIFIER || declaration?.statut === STATUTS.EN_ATTENTE
-                ? (declaration.message ?? null) : detailSynchronisation(declaration),
+            detail: detailLigne(declaration),
             element,
             declaration,
         });
@@ -107,6 +123,8 @@ export function construireListe(elements, file, utilisateurId = null) {
         if (vus.has(declaration.remise_id)) continue;
         const resume = declaration.resume ?? {};
         lignes.push({
+            lecture_seule: false,
+            identite_non_verifiee: identiteNonVerifiee(declaration),
             id: `remise-${declaration.remise_id}`,
             remise_id: declaration.remise_id,
             titre: `Décharge n° ${resume.numero ?? resume.decharge ?? declaration.decharge_id}`,
@@ -114,8 +132,7 @@ export function construireListe(elements, file, utilisateurId = null) {
             a: resume.a ?? '',
             etape: resume.etape ?? 'livraison',
             statut: statutAffiche(null, declaration),
-            detail: declaration.statut === STATUTS.A_VERIFIER || declaration.statut === STATUTS.EN_ATTENTE
-                ? (declaration.message ?? null) : detailSynchronisation(declaration),
+            detail: detailLigne(declaration),
             element: null,
             declaration,
         });
@@ -189,6 +206,14 @@ export function indicateurHorsLigne({ coquille, cle, donnees }) {
 }
 
 export const TEXTE_HORS_LIGNE_PRET = 'Tout est disponible hors ligne';
+
+/** État du stockage persistant (navigator.storage.persist) : null tant que le navigateur n'a pas répondu. */
+export function texteStockage(protege) {
+    if (protege === true) return 'Stockage protégé';
+    if (protege === false) return 'Stockage non garanti par le navigateur';
+
+    return null;
+}
 
 export function texteHorsLigne({ pret, manque }) {
     return pret ? TEXTE_HORS_LIGNE_PRET : `Pas encore disponible hors ligne : à télécharger (${manque.join(', ')}). Connectez-vous au réseau.`;

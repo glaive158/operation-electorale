@@ -3,15 +3,16 @@
  * (stockage, file, api, sync, état) et renvoie un nœud DOM. Style repris des écrans de terrain existants.
  */
 
+import { rogner } from './canonique.js';
 import { h, remplacer } from './dom.js';
 import { horodatage, STATUTS } from './file.js';
 import { identifiantAleatoire, sha256Hex } from './octets.js';
 import { preparerPhoto } from './photo.js';
-import { construireBloc, contenuPreuve, importerCle } from './preuve.js';
+import { construireBloc, contenuPreuve, importerCle, normaliserLignes } from './preuve.js';
 import { creerSignature } from './signature.js';
 import {
     CLASSES_STATUT, construireListe, dechargesDeRedistribution, indicateurHorsLigne, LIBELLES_ETAPE, LIBELLES_STATUT,
-    duCompte, reserveRestante, texteHorsLigne,
+    duCompte, identiteNonVerifiee, reserveRestante, texteHorsLigne, texteStockage,
 } from './vue.js';
 
 const CARTE = 'bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-4';
@@ -29,6 +30,17 @@ const alerte = (texte, type = 'erreur') => h('div', {
 }, texte);
 
 const lien = (hash, texte) => h('a', { href: hash, class: BOUTON_SECONDAIRE }, texte);
+
+/** Signée sans code : dit partout que l'identité du signataire n'est pas vérifiée. */
+const badgeIdentite = () => h('span', { class: 'px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800' }, 'Identité non vérifiée');
+
+const TEXTE_LECTURE_SEULE = 'À signer sur la tablette de l\'agent, ou à confirmer depuis votre compte.';
+
+/** Une réception que ce compte ne déclare pas sur sa tablette : renvoi vers la page web de la décharge. */
+const lectureSeule = (dechargeId) => [
+    h('p', { class: 'text-sm text-slate-600' }, TEXTE_LECTURE_SEULE),
+    h('div', { class: 'flex justify-end' }, h('a', { href: `/terrain/decharges/${dechargeId}`, class: BOUTON_SECONDAIRE }, 'Ouvrir la décharge')),
+];
 
 /* ───────────── Connexion ───────────── */
 
@@ -79,7 +91,8 @@ export async function ecranListe(ctx) {
         const declaration = ligne.declaration;
         const actions = [];
         const aVerifier = declaration?.statut === STATUTS.A_VERIFIER;
-        if (ligne.statut === STATUTS.DISPONIBLE && ligne.element) {
+        const consultation = ligne.statut === STATUTS.DISPONIBLE && ligne.element && ligne.lecture_seule;
+        if (ligne.statut === STATUTS.DISPONIBLE && ligne.element && !ligne.lecture_seule) {
             actions.push(h('a', { href: `#/reception/${ligne.id}`, class: BOUTON }, 'Réceptionner'));
         } else if (declaration) {
             if (aVerifier) {
@@ -97,13 +110,17 @@ export async function ecranListe(ctx) {
                 h('div', {},
                     h('p', { class: 'font-semibold text-slate-800' }, ligne.titre),
                     h('p', { class: 'text-xs text-slate-500' }, `${LIBELLES_ETAPE[ligne.etape] ?? ligne.etape} : ${ligne.de} → ${ligne.a}`)),
-                badge(ligne.statut)),
+                h('div', { class: 'flex flex-col items-end gap-1' }, badge(ligne.statut), ligne.identite_non_verifiee ? badgeIdentite() : null)),
             ligne.detail ? h('p', { class: 'text-sm text-slate-600' }, ligne.detail) : null,
+            ...(consultation ? lectureSeule(ligne.element.decharge.id) : []),
             actions.length ? h('div', { class: 'flex flex-wrap gap-2 justify-end' }, actions) : null);
     };
+    const stockage = texteStockage(ctx.etat.stockageProtege);
 
     return h('div', { class: 'max-w-2xl mx-auto space-y-4' },
-        h('div', { class: `p-3 rounded-xl text-sm ${indicateur.pret ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`, id: 'indicateur-hors-ligne' }, texteHorsLigne(indicateur)),
+        h('div', { class: 'space-y-1' },
+            h('div', { class: `p-3 rounded-xl text-sm ${indicateur.pret ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`, id: 'indicateur-hors-ligne' }, texteHorsLigne(indicateur)),
+            stockage ? h('p', { class: `text-xs text-right ${ctx.etat.stockageProtege ? 'text-slate-500' : 'text-amber-700'}`, id: 'etat-stockage' }, stockage) : null),
         lignes.length
             ? h('ul', { class: 'space-y-3' }, lignes.map(carte))
             : h('div', { class: CARTE }, h('p', { class: 'text-sm text-slate-600' }, 'Aucune réception à faire pour le moment. Synchronisez avec le réseau pour télécharger vos affectations.')));
@@ -149,6 +166,11 @@ export async function ecranReception(ctx, id) {
     if (!element?.remise || element.remise.statut === 'a_arbitrer') {
         return h('div', { class: `${CARTE} max-w-xl mx-auto` }, h('p', { class: 'text-sm text-slate-600' }, 'Cette réception n\'est plus à faire.'), lien('#/', 'Retour à la liste'));
     }
+    if (element.peut_declarer_tablette === false) {
+        return h('div', { class: `${CARTE} max-w-xl mx-auto` },
+            h('h2', { class: 'font-semibold text-slate-800' }, `Décharge n° ${element.decharge.numero ?? element.decharge.identifiant}`),
+            ...lectureSeule(element.decharge.id), lien('#/', 'Retour à la liste'));
+    }
 
     const racine = h('div', { class: 'max-w-2xl mx-auto space-y-4' });
     const attendue = element.autorite_attendue ?? {};
@@ -159,7 +181,9 @@ export async function ecranReception(ctx, id) {
     const choix = signataires.find((s) => s.user_id === ctx.etat.session?.utilisateur?.id) ?? signataires[0] ?? null;
 
     const saisies = element.lignes.map((l) => ({ materiel_id: l.materiel_id, libelle: l.libelle, attendu: l.quantite, recu: String(l.quantite), defectueux: '0', observation: '' }));
-    const etat = { etape: 'lignes', signataire: choix, photo: null, gps: null, occupe: false, signature: null, canvas: null };
+    const etat = { etape: 'lignes', signataire: choix, photo: null, gps: null, occupe: false, signature: null, canvas: null, repli: false };
+    // Sans autorité rattachée (aucun compte) : le nom et la qualité sont saisis, la signature se fait sans code.
+    const saisieSignataire = { nom: rogner(String(attendue.nom ?? '')), qualite: rogner(String(attendue.qualite ?? '')) };
 
     function entete() {
         return h('div', { class: CARTE },
@@ -257,32 +281,50 @@ export async function ecranReception(ctx, id) {
                 }, signataires.map((s) => h('option', { value: String(s.user_id), selected: s.user_id === etat.signataire?.user_id }, `${s.titre} : ${s.nom} (${s.qualite})`))))
             : null;
 
-        const bouton = h('button', { type: 'button', class: BOUTON }, 'Valider la réception');
-        bouton.addEventListener('click', async () => {
+        const champNom = signataires.length ? null : h('input', { type: 'text', maxlength: '255', value: saisieSignataire.nom, class: CHAMP, 'aria-label': 'Nom du signataire', oninput: (e) => { saisieSignataire.nom = e.target.value; } });
+        const champQualite = signataires.length ? null : h('input', { type: 'text', maxlength: '255', value: saisieSignataire.qualite, class: CHAMP, 'aria-label': 'Qualité du signataire', oninput: (e) => { saisieSignataire.qualite = e.target.value; } });
+
+        const bouton = signataires.length ? h('button', { type: 'button', class: BOUTON }, 'Valider la réception') : null;
+        const boutonRepli = h('button', { type: 'button', class: BOUTON_SECONDAIRE }, 'Signer sans code (identité non vérifiée)');
+        const boutons = [bouton, boutonRepli].filter(Boolean);
+
+        /** Enregistre la réception : avec le code (bloc chiffré) ou, en repli, sans code (aucun bloc). */
+        async function enregistrer(repli) {
             if (etat.occupe) return;
             remplacer(erreur);
-            // Toute vérification préalable qui échoue efface aussi le code saisi.
+            // Toute vérification préalable qui échoue efface aussi le code saisi. Le repli n'utilise jamais le code.
             const refuser = (texte) => { code.value = ''; remplacer(erreur, alerte(texte)); };
-            if (!etat.signataire) { refuser('Aucune autorité n\'est rattachée à ce destinataire : la réception ne peut pas être signée ici.'); return; }
-            if (!/^[0-9]{6}$/.test(code.value)) { refuser('Le code personnel comporte 6 chiffres.'); return; }
+            if (repli) code.value = '';
+            let signataire = etat.signataire;
+            if (!signataires.length) {
+                const nom = rogner(champNom.value ?? '');
+                const qualite = rogner(champQualite.value ?? '');
+                if (nom === '' || qualite === '') { refuser('Le nom et la qualité du signataire sont obligatoires.'); return; }
+                signataire = { user_id: null, nom, qualite };
+            }
+            if (!repli && !/^[0-9]{6}$/.test(code.value)) { refuser('Le code personnel comporte 6 chiffres.'); return; }
             if (etat.signature.estVide()) { refuser('La signature est obligatoire : signez dans le cadre.'); return; }
+            if (repli && !etat.photo && !window.confirm('Sans code, l\'identité du signataire ne sera pas vérifiée : une photo de la réception est fortement conseillée. Enregistrer sans photo ?')) return;
             etat.occupe = true;
-            bouton.disabled = true;
+            boutons.forEach((b) => { b.disabled = true; });
             try {
-                await valider({ code });
+                await valider({ code, repli, signataire });
+                etat.repli = repli;
                 etat.etape = 'enregistree';
                 dessiner();
             } catch (e) {
                 remplacer(erreur, alerte(e.message || 'Validation impossible.'));
-                bouton.disabled = false;
+                boutons.forEach((b) => { b.disabled = false; });
             } finally {
                 code.value = '';
                 etat.occupe = false;
             }
-        });
+        }
+        bouton?.addEventListener('click', () => enregistrer(false));
+        boutonRepli.addEventListener('click', () => enregistrer(true));
 
         const bloqueur = !signataires.length
-            ? alerte('Aucune autorité n\'est rattachée à ce destinataire : la réception ne peut pas être signée sur la tablette.')
+            ? h('div', { role: 'status', class: 'p-3 rounded-xl text-sm bg-amber-50 text-amber-800 border border-amber-200' }, 'Aucune autorité n\'est rattachée à ce destinataire : pas de code possible. Saisissez le nom et la qualité du signataire ; la réception sera enregistrée sans vérification d\'identité.')
             : null;
 
         return h('div', { class: 'space-y-4' }, entete(),
@@ -292,39 +334,57 @@ export async function ecranReception(ctx, id) {
                     ? h('div', { class: 'text-sm text-slate-700', id: 'signataire-attendu' }, h('p', {}, h('span', { class: 'text-xs text-slate-500' }, 'Nom attendu : '), etat.signataire.nom), h('p', {}, h('span', { class: 'text-xs text-slate-500' }, 'Qualité attendue : '), etat.signataire.qualite))
                     : null,
                 bloqueur, selection,
-                h('div', {}, h('label', { class: ETIQUETTE, for: 'reception-code' }, 'Code personnel (6 chiffres)'), code,
-                    h('p', { class: 'text-xs text-slate-500 mt-1' }, 'Le code est chiffré à la validation puis effacé : il n\'est jamais conservé sur la tablette.')),
+                signataires.length ? null : h('div', { class: 'grid grid-cols-1 sm:grid-cols-2 gap-3' },
+                    h('div', {}, h('label', { class: ETIQUETTE }, 'Nom du signataire'), champNom),
+                    h('div', {}, h('label', { class: ETIQUETTE }, 'Qualité du signataire'), champQualite)),
+                signataires.length ? h('div', {}, h('label', { class: ETIQUETTE, for: 'reception-code' }, 'Code personnel (6 chiffres)'), code,
+                    h('p', { class: 'text-xs text-slate-500 mt-1' }, 'Le code est chiffré à la validation puis effacé : il n\'est jamais conservé sur la tablette.'),
+                    h('p', { class: 'text-xs text-slate-500 mt-1' }, 'Code oublié ou verrouillé : « Signer sans code » enregistre la réception, identité non vérifiée (à confirmer depuis le compte du signataire ou par le service logistique).')) : null,
                 h('div', {}, h('p', { class: ETIQUETTE }, 'Signature (au doigt)'), etat.canvas,
                     h('button', { type: 'button', class: `${BOUTON_SECONDAIRE} mt-2`, onclick: () => etat.signature.effacer() }, 'Effacer la signature')),
                 h('div', {}, h('label', { class: ETIQUETTE }, 'Photo de la réception (facultative)'), entreePhoto, apercu),
                 h('div', { class: 'space-y-1' }, boutonGps, etatGps),
                 erreur,
-                h('div', { class: 'flex justify-between gap-2' }, h('button', { type: 'button', class: BOUTON_SECONDAIRE, onclick: () => { code.value = ''; etat.etape = 'lignes'; dessiner(); } }, 'Retour'), bouton)));
+                h('div', { class: 'flex flex-wrap justify-between gap-2' }, h('button', { type: 'button', class: BOUTON_SECONDAIRE, onclick: () => { code.value = ''; etat.etape = 'lignes'; dessiner(); } }, 'Retour'),
+                    h('div', { class: 'flex flex-wrap justify-end gap-2' }, boutonRepli, bouton))));
     }
 
-    /* Validation : le bloc est chiffré une fois, avec le code effacé aussitôt, puis tout part dans la file. */
-    async function valider({ code }) {
-        const cleServeur = await ctx.stockage.meta.lire('cle_preuve');
-        if (!cleServeur?.pem) throw new Error('Clé de preuve non téléchargée : connectez la tablette au réseau puis synchronisez.');
-        const clePublique = await importerCle(cleServeur.pem);
-
-        const signataire = etat.signataire;
+    /*
+     * Validation : le bloc est chiffré une fois, avec le code effacé aussitôt, puis tout part dans la file.
+     * Repli (code oublié ou verrouillé, aucune autorité rattachée) : aucun bloc (`bloc_preuve: null`) ; le serveur
+     * enregistre la réception « à vérifier », identité non vérifiée. Clé d'idempotence et contenu suivent les mêmes règles.
+     */
+    async function valider({ code, repli = false, signataire }) {
         const cle = identifiantAleatoire();
         const horodatage_terminal = horodatage();
-        const contenu = contenuPreuve({
-            decharge_id: element.decharge.id,
-            decharge_identifiant: element.decharge.identifiant,
-            remise_id: element.remise.id,
-            cle,
-            signataire: { user_id: signataire.user_id, nom: signataire.nom, qualite: signataire.qualite },
-            lignes: saisies.map((s) => ({ materiel_id: s.materiel_id, recu: Number(s.recu), defectueux: Number(s.defectueux), observation: s.observation })),
-            horodatage_terminal,
-        });
+        const lignes = saisies.map((s) => ({ materiel_id: s.materiel_id, recu: Number(s.recu), defectueux: Number(s.defectueux), observation: s.observation }));
+        let contenu;
+        let bloc = null;
+        if (repli) {
+            code.value = '';
+            contenu = {
+                signataire: { user_id: signataire.user_id ?? null, nom: rogner(String(signataire.nom ?? '')), qualite: rogner(String(signataire.qualite ?? '')) },
+                lignes: normaliserLignes(lignes),
+            };
+        } else {
+            const cleServeur = await ctx.stockage.meta.lire('cle_preuve');
+            if (!cleServeur?.pem) throw new Error('Clé de preuve non téléchargée : connectez la tablette au réseau puis synchronisez.');
+            const clePublique = await importerCle(cleServeur.pem);
+            contenu = contenuPreuve({
+                decharge_id: element.decharge.id,
+                decharge_identifiant: element.decharge.identifiant,
+                remise_id: element.remise.id,
+                cle,
+                signataire: { user_id: signataire.user_id, nom: signataire.nom, qualite: signataire.qualite },
+                lignes,
+                horodatage_terminal,
+            });
 
-        // Le code n'est lu qu'ici, passé à construireBloc et effacé du champ dans la foulée.
-        const promesse = construireBloc({ code: code.value, cle, contenu, clePublique });
-        code.value = '';
-        const { bloc } = await promesse;
+            // Le code n'est lu qu'ici, passé à construireBloc et effacé du champ dans la foulée.
+            const promesse = construireBloc({ code: code.value, cle, contenu, clePublique });
+            code.value = '';
+            ({ bloc } = await promesse);
+        }
 
         const pieces = [];
         const signaturePng = await etat.signature.versPng();
@@ -343,6 +403,7 @@ export async function ecranReception(ctx, id) {
             decharge_id: element.decharge.id,
             horodatage_terminal,
             bloc_preuve: bloc,
+            ...(repli ? { repli: true } : {}),
             signataire: contenu.signataire,
             lignes: contenu.lignes,
             pieces: pieces.map(({ empreinte, role }) => ({ empreinte, role })),
@@ -357,6 +418,14 @@ export async function ecranReception(ctx, id) {
     }
 
     function etapeEnregistree() {
+        if (etat.repli) {
+            return h('div', { class: `${CARTE}`, id: 'reception-enregistree' },
+                h('div', { class: 'flex items-start justify-between gap-3' }, h('h2', { class: 'font-semibold text-slate-800' }, 'Enregistrée — identité non vérifiée'),
+                    h('div', { class: 'flex flex-col items-end gap-1' }, badge(STATUTS.EN_ATTENTE), badgeIdentite())),
+                h('p', { class: 'text-sm text-slate-600' }, 'La réception est enregistrée sur la tablette et sera envoyée dès que le réseau le permet. Signée sans code, l\'identité du signataire n\'est pas vérifiée : le signataire peut la confirmer depuis son compte, sinon le service logistique la vérifie.'),
+                h('div', { class: 'flex justify-end' }, lien('#/', 'Retour à la liste')));
+        }
+
         return h('div', { class: `${CARTE}`, id: 'reception-enregistree' },
             h('div', { class: 'flex items-start justify-between gap-3' }, h('h2', { class: 'font-semibold text-slate-800' }, 'Enregistrée — vérification d\'identité en attente'), badge(STATUTS.EN_ATTENTE)),
             h('p', { class: 'text-sm text-slate-600' }, 'La réception est enregistrée sur la tablette. Elle sera envoyée dès que le réseau le permet ; le serveur vérifie alors l\'identité du signataire avec le code chiffré. Le code n\'a pas été conservé.'),
@@ -373,11 +442,14 @@ export async function ecranReception(ctx, id) {
 
 function recapitulatif(ctx, declaration) {
     const statut = declaration.statut === STATUTS.SYNCHRONISE && declaration.reponse?.declaration?.statut === 'a_verifier' ? STATUTS.A_VERIFIER : declaration.statut;
+    const sansCode = identiteNonVerifiee(declaration);
+    const titre = declaration.statut !== STATUTS.EN_ATTENTE ? 'Réception enregistrée'
+        : (sansCode ? 'Enregistrée — identité non vérifiée' : 'Enregistrée — vérification d\'identité en attente');
 
     return h('div', { class: `${CARTE} max-w-xl mx-auto`, id: 'reception-recapitulatif' },
         h('div', { class: 'flex items-start justify-between gap-3' },
-            h('h2', { class: 'font-semibold text-slate-800' }, declaration.statut === STATUTS.EN_ATTENTE ? 'Enregistrée — vérification d\'identité en attente' : 'Réception enregistrée'),
-            badge(statut)),
+            h('h2', { class: 'font-semibold text-slate-800' }, titre),
+            h('div', { class: 'flex flex-col items-end gap-1' }, badge(statut), sansCode ? badgeIdentite() : null)),
         h('p', { class: 'text-sm text-slate-600' }, `Signée le ${declaration.horodatage_terminal.replace('T', ' à ').slice(0, 21)} par ${declaration.signataire?.nom ?? ''}.`),
         declaration.message ? h('p', { class: 'text-sm text-slate-600' }, declaration.message) : null,
         h('ul', { class: 'text-sm text-slate-700 list-disc pl-5' }, (declaration.lignes ?? []).map((l) => h('li', {}, `Article ${l.materiel_id} : reçu ${l.recu}, défectueux ${l.defectueux}${l.observation ? ` — ${l.observation}` : ''}`))),
