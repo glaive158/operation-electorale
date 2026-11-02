@@ -3,6 +3,7 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\Declaration;
@@ -758,33 +759,85 @@ class AvisContestationTest extends TestCase
         $this->assertSame(['retenue', 'ecartee'], [$a->refresh()->statut, $b->refresh()->statut]);
         $this->assertSame('recue', $livraison->refresh()->statut);
         $this->assertSame(60, $this->solde($decharge)['reliquat']);
+        $this->assertGreaterThanOrEqual(0, $this->solde($decharge)['reliquat']);
     }
 
-    public function test_une_retenue_figee_s_arbitre(): void
+    public function test_une_retenue_figee_ne_s_ecarte_pas_tant_que_la_redistribution_vit(): void
     {
         [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
-        $b = $this->compte($livraison->load('lignes'), 90);
+        $b = $this->compte($livraison->load('lignes'), 10);
+        $refus = 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+        $reliquat = $this->solde($decharge);
+        $this->assertSame(60, $reliquat['reliquat']);
 
-        // Rejeter l'autre déclaration relance le rapprochement : la figée reste retenue, la remise revient à reçue.
+        // Retenir B écarterait A : refusé, rien ne bouge.
+        $this->refus(fn () => app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.'), $refus);
+        $this->assertSame(['retenue', 'a_verifier'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame($reliquat, $this->solde($decharge));
+
+        // Rejeter A seule : refusé aussi, le reliquat ne devient pas négatif.
+        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.'), $refus);
+        $this->assertSame('retenue', $a->refresh()->statut);
+        $this->assertSame($reliquat, $this->solde($decharge));
+        $this->assertSame(0, Arbitrage::where('remise_id', $livraison->id)->count());
+
+        // Rejeter B relance le rapprochement : la figée reste retenue, la remise revient à reçue.
         app(ArbitrageService::class)->rejeter($b, 'Quantité erronée.');
         $this->assertSame(['retenue', 'ecartee'], [$a->refresh()->statut, $b->refresh()->statut]);
         $this->assertSame('recue', $livraison->refresh()->statut);
         $this->assertSame('contestee', $a->contestation);
-
-        // Le responsable peut écarter la figée elle-même : la remise attend alors une nouvelle déclaration.
-        app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.');
-        $this->assertSame('ecartee', $a->refresh()->statut);
-        $this->assertSame('en_attente', $livraison->refresh()->statut);
+        $this->assertGreaterThanOrEqual(0, $this->solde($decharge)['reliquat']);
     }
 
-    public function test_retenir_une_autre_declaration_ecarte_la_figee(): void
+    public function test_apres_l_annulation_de_la_redistribution_la_figee_s_ecarte(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+        $redistribution = Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')->sole();
+        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+
+        $this->en($this->prefet, fn () => app(RemiseService::class)->annulerRedistribution($redistribution, 'Réception contestée.'));
+        app(ArbitrageService::class)->rejeter($a, 'Signataire non reconnu.');
+
+        $this->assertSame('ecartee', $a->refresh()->statut);
+        $this->assertSame('en_attente', $livraison->refresh()->statut);
+        $this->assertSame(0, $this->solde($decharge)['transfere']);
+    }
+
+    public function test_retenir_la_figee_leve_la_contestation(): void
     {
         [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
         $b = $this->compte($livraison->load('lignes'), 90);
 
-        app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.');
+        app(ArbitrageService::class)->retenir($a, 'Réception confirmée.');
 
-        $this->assertSame(['ecartee', 'retenue'], [$a->refresh()->statut, $b->refresh()->statut]);
+        $this->assertSame(['retenue', 'levee', 'ecartee'], [$a->refresh()->statut, $a->contestation, $b->refresh()->statut]);
         $this->assertSame('recue', $livraison->refresh()->statut);
+        $this->assertSame(['recu_utilisable' => 100, 'transfere' => 40, 'reliquat' => 60], $this->solde($decharge));
+        $this->assertSame(1, JournalEntree::where('objet_id', $a->id)->where('action', 'levee_contestation')->count());
+        $this->assertSame(1, Arbitrage::where('declaration_id', $a->id)->where('decision', 'retenue')->count());
+    }
+
+    public function test_retenir_la_figee_seule_sur_une_remise_recue(): void
+    {
+        [$decharge, $livraison, $a] = $this->livraisonContesteeUtilisee();
+
+        app(ArbitrageService::class)->retenir($a, 'Réception confirmée.');
+
+        $this->assertSame(['retenue', 'levee'], [$a->refresh()->statut, $a->contestation]);
+        $this->assertSame('recue', $livraison->refresh()->statut);
+        $this->assertSame(60, $this->solde($decharge)['reliquat']);
+    }
+
+    public function test_l_exemplaire_emis_protege_aussi_la_figee(): void
+    {
+        $a = $this->tablette();
+        $this->actingAs($this->responsable);
+        app(DechargePdfService::class)->emettre($this->chargee->refresh(), 'reception');
+        $this->contester($a);
+        $b = $this->compte($this->remise, 10);
+
+        $this->refus(fn () => app(ArbitrageService::class)->retenir($b, 'Le compte fait foi.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+        $this->refus(fn () => app(ArbitrageService::class)->rejeter($a, 'Non.'), 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.');
+        $this->assertSame('retenue', $a->refresh()->statut);
     }
 }

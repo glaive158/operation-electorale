@@ -140,9 +140,10 @@ class AvisReceptionService
      * - une redistribution non annulée est partie de la décharge (réception d'une livraison au préfet) ;
      * - l'exemplaire de réception de la décharge a été émis ;
      * - la décharge est un remplacement dont la réception a déjà résolu la réclamation d'origine.
-     * Ce qui a été remis plus loin ou clos ne se défait pas d'un geste : le responsable tranche.
+     * Ce qui a été remis plus loin ou clos ne se défait pas d'un geste : le responsable tranche. Seule
+     * implémentation de la règle, partagée avec l'arbitrage ; à lire sous les verrous cycle, décharge, remise.
      */
-    private function receptionUtilisee(Remise $remise, Decharge $decharge): bool
+    public function receptionUtilisee(Remise $remise, Decharge $decharge): bool
     {
         // Une redistribution ne se prépare que sur une livraison retenue : toute redistribution non annulée en dépend.
         if ($remise->etape === 'livraison' && Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')

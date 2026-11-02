@@ -27,6 +27,8 @@ class ArbitrageService
 {
     private const MAX_TEXTE = 500;
 
+    private const RECEPTION_UTILISEE = 'Réception utilisée en aval : annulez la redistribution (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+
     public function __construct(
         private readonly DeclarationService $declarations,
         private readonly EngagementService $engagement,
@@ -208,10 +210,20 @@ class ArbitrageService
             $actives = Declaration::where('remise_id', $remise->id)->orderBy('id')->lockForUpdate()->get();
             $actuelle = $actives->firstWhere('id', $declaration->id);
 
-            // Une retenue contestée dont la réception sert en aval, figée par le rapprochement, s'arbitre aussi.
+            // Une retenue contestée dont la réception sert en aval est figée par le rapprochement : elle s'arbitre
+            // même si la remise est reçue, mais pas au détriment de ce qui en dépend.
             $figee = $actuelle !== null && $actuelle->statut === 'retenue' && $actuelle->contestation === 'contestee';
-            if ($actuelle === null || ! $figee && ($remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true))) {
+            if ($actuelle === null || (! $figee && ($remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true)))) {
                 throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
+            }
+
+            // Écarter une retenue contestée (la rejeter, ou en retenir une autre) défait la réception sur laquelle
+            // reposent la redistribution, l'exemplaire de réception ou le remplacement : refusé tant qu'elle sert.
+            $ecarteraUneFigee = $retenir
+                ? $actives->contains(fn (Declaration $autre) => $autre->id !== $actuelle->id && $autre->statut === 'retenue' && $autre->contestation === 'contestee')
+                : $figee;
+            if ($ecarteraUneFigee && app(AvisReceptionService::class)->receptionUtilisee($remise, $decharge)) {
+                throw new RegleLogistique(self::RECEPTION_UTILISEE);
             }
 
             $avant = $actuelle->statut;
@@ -224,10 +236,20 @@ class ArbitrageService
                     }
                 }
             }
-            $this->changerStatut($actuelle, $retenir ? 'retenue' : 'ecartee', $remise);
+            if ($figee && $retenir) {
+                // Confirmer la retenue contestée : elle reste retenue et la contestation est levée.
+                $actuelle->forceFill(['contestation' => 'levee'])->save();
+                Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
+                    'contestation' => 'levee', 'statut' => 'retenue', 'remise_id' => $remise->id,
+                ], $motif);
+            } else {
+                $this->changerStatut($actuelle, $retenir ? 'retenue' : 'ecartee', $remise);
+            }
 
             if ($retenir) {
-                $this->changerStatutRemise($remise, 'recue');
+                if ($remise->statut !== 'recue') {
+                    $this->changerStatutRemise($remise, 'recue');
+                }
             } else {
                 $restantes = Declaration::where('remise_id', $remise->id)->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
                 if ($restantes) {
