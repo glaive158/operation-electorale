@@ -173,7 +173,8 @@ class DechargeService
             $validees = [];
             foreach ($lignes as $ligne) {
                 $engage = $this->engagements->engage($cycle, $destinataire, $ligne->materiel);
-                $besoin = $besoins->get($ligne->materiel_id)['dotation'] ?? 0;
+                $dotation = $besoins->get($ligne->materiel_id)['dotation'] ?? 0;
+                $besoin = $besoins->get($ligne->materiel_id)['besoin'] ?? 0;
                 if ($engage + $ligne->quantite > $besoin) {
                     throw new RegleLogistique(
                         "Plafond du besoin dépassé pour {$ligne->materiel->libelle} : besoin {$besoin}, déjà engagé {$engage}, demandé {$ligne->quantite}."
@@ -184,7 +185,7 @@ class DechargeService
                 $ligne->forceFill(['reservation_id' => $reservation->id, 'deja_engage' => $engage])->save();
                 $validees[] = [
                     'materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite,
-                    'deja_engage' => $engage, 'dotation_approuvee' => $besoin, 'reservation_id' => $reservation->id,
+                    'deja_engage' => $engage, 'dotation_approuvee' => $dotation, 'besoin' => $besoin, 'reservation_id' => $reservation->id,
                 ];
             }
 

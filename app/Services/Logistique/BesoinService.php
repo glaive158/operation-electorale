@@ -3,6 +3,8 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Commande;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Materiel;
@@ -38,12 +40,28 @@ class BesoinService
     ) {
     }
 
-    /** Σ des dotations approuvées du plan en vigueur ; 0 sans plan approuvé. */
+    /**
+     * Σ, sur les destinataires, du besoin de chacun : dotation du plan approuvé en vigueur + remplacements
+     * autorisés − expéditions annulées par clôture d'écart (jamais négatif par destinataire). Une
+     * requête par source, pas par destinataire.
+     */
     public function besoinExpedition(Cycle $cycle, Materiel $materiel): int
     {
         $plan = PlanDotation::courantApprouve($cycle);
+        $dotations = $plan === null ? collect() : PlanDotationLigne::where('plan_dotation_id', $plan->id)
+            ->where('materiel_id', $materiel->id)->groupBy('destinataire_id')
+            ->selectRaw('destinataire_id, SUM(dotation_approuvee) as total')->pluck('total', 'destinataire_id');
+        $remplacements = BesoinRemplacement::where('cycle_id', $cycle->id)->where('materiel_id', $materiel->id)
+            ->groupBy('destinataire_id')->selectRaw('destinataire_id, SUM(quantite) as total')->pluck('total', 'destinataire_id');
+        $annulees = Arbitrage::where('cycle_id', $cycle->id)->where('objet', 'cloture_ecart')->where('materiel_id', $materiel->id)
+            ->groupBy('destinataire_id')->selectRaw('destinataire_id, SUM(quantite_expedition_annulee) as total')->pluck('total', 'destinataire_id');
 
-        return $plan ? $this->besoinDuPlan($plan, $materiel->id) : 0;
+        $besoin = 0;
+        foreach ($dotations->keys()->merge($remplacements->keys())->unique() as $destinataireId) {
+            $besoin += max(0, (int) ($dotations[$destinataireId] ?? 0) + (int) ($remplacements[$destinataireId] ?? 0) - (int) ($annulees[$destinataireId] ?? 0));
+        }
+
+        return $besoin;
     }
 
     /**
@@ -200,13 +218,6 @@ class BesoinService
 
             return $commande;
         }, attempts: 3);
-    }
-
-    private function besoinDuPlan(PlanDotation $plan, int $materielId): int
-    {
-        return (int) PlanDotationLigne::where('plan_dotation_id', $plan->id)
-            ->where('materiel_id', $materielId)
-            ->sum('dotation_approuvee');
     }
 
     private function reserveCibleDuPlan(PlanDotation $plan, int $materielId): int
