@@ -4,8 +4,11 @@ namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\User;
+use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\PersonalAccessToken;
 use Tests\TestCase;
 
@@ -117,5 +120,47 @@ class JetonTest extends TestCase
         }
 
         $this->demander($agent)->assertStatus(429);
+    }
+
+    public function test_messages_de_l_api_en_francais(): void
+    {
+        Route::middleware('api')->get('api/terrain/_test-droit', fn () => throw new AuthorizationException('This action is unauthorized.'));
+        Route::middleware('api')->get('api/terrain/_test-modele', fn () => throw (new ModelNotFoundException)->setModel(User::class, [1]));
+        Route::middleware('api')->get('api/terrain/_test-validation', fn () => throw ValidationException::withMessages(['quantite' => 'Quantité requise.']));
+
+        $this->getJson('/api/terrain/_test-droit')->assertForbidden()->assertExactJson(['message' => 'Accès refusé.']);
+        $this->getJson('/api/terrain/_test-modele')->assertNotFound()->assertExactJson(['message' => 'Ressource introuvable.']);
+        $this->getJson('/api/terrain/_inconnue')->assertNotFound()->assertExactJson(['message' => 'Ressource introuvable.']);
+        $this->getJson('/api/terrain/_test-validation')->assertStatus(422)->assertJsonValidationErrors(['quantite']);
+
+        $this->deleteJson('/api/terrain/jetons/courant')->assertUnauthorized()->assertExactJson(['message' => 'Authentification requise.']);
+
+        $jeton = $this->agent()->createToken('Autre usage', ['lecture'], now()->addDay());
+        $this->withToken($jeton->plainTextToken)->deleteJson('/api/terrain/jetons/courant')
+            ->assertForbidden()->assertExactJson(['message' => 'Accès refusé.']);
+    }
+
+    public function test_limitation_de_debit_en_francais_avec_retry_after(): void
+    {
+        $agent = $this->agent();
+
+        for ($i = 0; $i < 5; $i++) {
+            $this->demander($agent, 'mauvais');
+        }
+
+        $this->demander($agent)->assertStatus(429)
+            ->assertExactJson(['message' => 'Trop de tentatives, réessayez plus tard.'])
+            ->assertHeader('Retry-After');
+    }
+
+    public function test_compte_desactive_avec_un_jeton_valide_refuse(): void
+    {
+        $agent = $this->agent();
+        $jeton = $agent->createToken('Tablette', ['terrain'], now()->addDay());
+
+        $agent->update(['actif' => false]);
+
+        $this->withToken($jeton->plainTextToken)->deleteJson('/api/terrain/jetons/courant')
+            ->assertForbidden()->assertExactJson(['message' => 'Accès refusé.']);
     }
 }
