@@ -27,6 +27,7 @@ use App\Http\Controllers\Logistique\GeographieController;
 use App\Http\Controllers\Logistique\IndicateurController;
 use App\Http\Controllers\Logistique\InstantaneController;
 use App\Http\Controllers\Logistique\MaterielController;
+use App\Http\Controllers\Logistique\PieceController;
 use App\Http\Controllers\Logistique\PlanDotationController;
 use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\ReclamationController;
@@ -37,6 +38,7 @@ use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController
 use App\Http\Controllers\Terrain\DeclarationController as TerrainDeclarationController;
 use App\Http\Controllers\Terrain\DelegationController as TerrainDelegationController;
 use App\Http\Controllers\Terrain\IndicateurController as TerrainIndicateurController;
+use App\Http\Controllers\Terrain\PieceController as TerrainPieceController;
 use App\Http\Controllers\Terrain\ReclamationController as TerrainReclamationController;
 use App\Http\Controllers\Terrain\RedistributionController as TerrainRedistributionController;
 use App\Http\Controllers\DashboardController;
@@ -150,6 +152,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
             Route::post('remises/{remise}/annulation', [TerrainRedistributionController::class, 'annuler'])->name('redistributions.annuler');
             Route::post('decharges/{decharge}/reclamations', [TerrainReclamationController::class, 'store'])->name('reclamations.store');
+            Route::get('pieces/{empreinte}', [TerrainPieceController::class, 'show'])->where('empreinte', '[0-9a-f]{64}')->name('pieces.show');
             Route::get('delegations', [TerrainDelegationController::class, 'index'])->name('delegations.index');
             Route::post('delegations', [TerrainDelegationController::class, 'store'])->name('delegations.store');
             Route::post('delegations/{delegation}/revocation', [TerrainDelegationController::class, 'revoquer'])->whereNumber('delegation')->name('delegations.revoquer');
@@ -207,6 +210,7 @@ Route::middleware(['auth'])->group(function () {
         Route::put('decharges/{decharge}/agent', [RemiseController::class, 'affecter'])->name('decharges.agent');
         Route::post('decharges/{decharge}/chargement', [RemiseController::class, 'charger'])->name('decharges.charger');
         Route::get('cycles/{cycle}/a-verifier', [DeclarationController::class, 'aVerifier'])->name('declarations.a-verifier');
+        Route::get('pieces/{empreinte}', [PieceController::class, 'show'])->where('empreinte', '[0-9a-f]{64}')->name('pieces.show');
         Route::get('cycles/{cycle}/reclamations', [ReclamationController::class, 'index'])->name('reclamations.index');
         Route::get('reclamations/{reclamation}', [ReclamationController::class, 'show'])->name('reclamations.show');
         Route::post('reclamations/{reclamation}/prise-en-charge', [ReclamationController::class, 'prendre'])->name('reclamations.prendre');

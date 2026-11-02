@@ -465,6 +465,7 @@ class EspaceTerrainTest extends TestCase
             'terrain.declarations.store', 'terrain.redistributions.store', 'terrain.redistributions.annuler', 'terrain.reclamations.store',
             'terrain.code.edit', 'terrain.code.update',
             'terrain.delegations.index', 'terrain.delegations.store', 'terrain.delegations.revoquer',
+            'terrain.pieces.show',
         ], $routes->keys()->all());
 
         foreach ($routes as $nom => $route) {

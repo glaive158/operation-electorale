@@ -27,6 +27,12 @@ return [
     */
     'disque_decharges' => env('LOGISTIQUE_DISQUE_DECHARGES', 'local'),
 
+    /*
+    | Disque où sont rangées les signatures et photos envoyées par les tablettes. Jamais un disque public :
+    | les pièces ne sont servies que par les contrôleurs, après contrôle des droits.
+    */
+    'disque_pieces' => env('LOGISTIQUE_DISQUE_PIECES', 'local'),
+
     'lieu_document' => 'Dakar',
 
     /*

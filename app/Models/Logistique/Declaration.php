@@ -52,6 +52,7 @@ class Declaration extends Model
         'version_annulee' => 'Décharge annulée depuis',
         'affectation_retiree' => 'Agent n\'étant plus affecté',
         'divergence' => 'Divergence avec l\'autre déclaration',
+        'identite' => 'Identité du signataire non établie',
     ];
 
     // Le statut et les anomalies ne sont pas assignables en masse.
@@ -96,6 +97,11 @@ class Declaration extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function pieces(): HasMany
+    {
+        return $this->hasMany(DeclarationPiece::class)->orderBy('id');
     }
 
     /** Le compte qui a signé : l'autorité destinataire ou son délégué. */

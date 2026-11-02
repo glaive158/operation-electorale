@@ -18,6 +18,7 @@ use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
@@ -348,6 +349,16 @@ class PreuveTest extends TestCase
         $this->assertSame('verifiee_code', $this->verifier($contenu, $this->bloc($contenu))['verification']);
     }
 
+    public function test_remise_sans_date_de_creation_echec_sans_compter(): void
+    {
+        DB::table('remises')->where('id', $this->remise->id)->update(['created_at' => null]);
+
+        $contenu = $this->contenu();
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu))['verification']);
+        $this->assertSame('echec', $this->verifier($contenu, $this->bloc($contenu, '000111'))['verification']);
+        $this->assertSame(0, $this->prefet->fresh()->code_echecs);
+    }
+
     public function test_horodatage_different_de_celui_du_contenu_rejete(): void
     {
         $contenu = $this->contenu();
@@ -647,7 +658,8 @@ class PreuveTest extends TestCase
 
         $declaration = Declaration::findOrFail($this->deposerRecue($this->chargee, [])->id);
 
-        $this->assertSame('non_verifiee', Declaration::whereKey($declaration->id)->value('verification_identite'));
+        // Une déclaration au compte tient son identité de la connexion (P5-R2) ; seule la tablette part de « non vérifiée ».
+        $this->assertSame('compte', Declaration::whereKey($declaration->id)->value('verification_identite'));
         $this->assertSame('aucune', Declaration::whereKey($declaration->id)->value('contestation'));
         $this->assertNull($declaration->horodatage_terminal);
     }

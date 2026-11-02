@@ -8,14 +8,18 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
 use App\Models\Logistique\DeclarationLigne;
+use App\Models\Logistique\DeclarationPiece;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
+use App\Models\Logistique\PieceJointe;
 use App\Models\Logistique\Remise;
 use App\Models\Logistique\RemiseLigne;
 use App\Models\User;
 use App\Support\Canonique;
+use Carbon\Carbon;
 use Carbon\CarbonInterface;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
@@ -34,16 +38,35 @@ class DeclarationService
 
     private const MAX_QUANTITE = 10_000_000;
 
+    private const REFUS_CLE_REUTILISEE = "Clé d'idempotence déjà utilisée pour un autre contenu.";
+
+    private const REFUS_BLOC_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
+
+    /** Vérifications qui établissent l'identité du signataire : les autres ajoutent l'anomalie « identite ». */
+    private const IDENTITES_ETABLIES = ['verifiee_code', 'verifiee_appareil', 'compte'];
+
     public function __construct(
         private readonly PerimetreTerrain $perimetre,
         private readonly DelegationService $delegations,
+        private readonly PreuveService $preuves,
+        private readonly PieceJointeService $pieceJointes,
     ) {}
 
     /**
      * Enregistre une déclaration de réception sur une remise de livraison ou de redistribution.
      *
+     * Pour une déclaration de tablette, `$preuve` porte le résultat de la vérification d'identité, déjà
+     * obtenu hors de toute transaction (PreuveService::verifier garde ainsi son journal et son compteur
+     * d'échecs même si l'enregistrement est refusé) : {verification, bloc_empreinte, signataire_user_id,
+     * delegation_id}. Sans `$preuve`, la déclaration est enregistrée comme au plan 4 (aucune vérification).
+     * Une vérification qui n'établit pas l'identité (échec, à vérifier, non vérifiée) ajoute l'anomalie
+     * « identite » : la déclaration n'est jamais retenue automatiquement.
+     *
      * @param  array{nom?: string, qualite?: string}  $signataire
      * @param  array<int, array{recu: int|string, defectueux: int|string, observation?: ?string}>  $lignes  par identifiant d'article
+     * @param  array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null  $preuve
+     * @param  array<string, string>  $pieces  rôle (signature, photo) par empreinte de pièce annoncée
+     * @param  array{lat: float|int|string, lng: float|int|string, precision?: int|string|null}|null  $gps
      */
     public function declarer(
         Remise $remise,
@@ -52,6 +75,9 @@ class DeclarationService
         array $lignes,
         string $cle,
         ?CarbonInterface $horodatageTerminal = null,
+        ?array $preuve = null,
+        array $pieces = [],
+        ?array $gps = null,
     ): Declaration {
         $this->exigerAuteur();
         $auteur = auth()->user();
@@ -64,6 +90,11 @@ class DeclarationService
         }
         $signataire = $this->signataire($signataire);
         $lignes = $this->normaliser($lignes);
+        $preuve = $this->preuve($mode, $preuve);
+        $pieces = $this->pieces($pieces);
+        $gps = $this->gps($gps);
+        // L'instant est stocké tel quel dans une colonne sans fuseau : toujours dans le fuseau de l'application.
+        $horodatageTerminal = $horodatageTerminal?->copy()->setTimezone((string) config('app.timezone'));
         $empreinte = self::empreinte((int) $remise->id, $mode, $signataire, $lignes);
 
         $cycleId = Decharge::whereKey($remise->decharge_id)->value('cycle_id');
@@ -71,90 +102,347 @@ class DeclarationService
             throw new LogicException('Remise sans décharge : invariant rompu.');
         }
 
-        [$declaration, $conflit] = DB::transaction(function () use ($remise, $mode, $signataire, $lignes, $cle, $horodatageTerminal, $empreinte, $cycleId, $auteur) {
-            $cycle = Cycle::whereKey($cycleId)->lockForUpdate()->first();
+        try {
+            [$declaration, $conflit] = DB::transaction(function () use ($remise, $mode, $signataire, $lignes, $cle, $horodatageTerminal, $empreinte, $cycleId, $auteur, $preuve, $pieces, $gps) {
+                $cycle = Cycle::whereKey($cycleId)->lockForUpdate()->first();
 
-            // Rejeu : avant tout autre contrôle.
-            $existante = Declaration::where('cle_idempotence', $cle)->first();
-            if ($existante !== null) {
-                if (hash_equals($existante->empreinte_contenu, $empreinte)) {
-                    return [$existante, false];
+                // Rejeu : avant tout autre contrôle.
+                $existante = Declaration::where('cle_idempotence', $cle)->first();
+                if ($existante !== null) {
+                    if ($this->memeEnvoi($existante, $empreinte, $preuve, $auteur)) {
+                        return [$existante, false];
+                    }
+                    Journal::noter('declaration', $existante->id, 'anomalie_idempotence', null, [
+                        'cle' => $cle, 'remise_id' => $remise->id, 'mode' => $mode, 'empreinte_recue' => $empreinte,
+                    ], "Clé d'idempotence réutilisée pour un autre contenu.");
+
+                    return [$existante, true];
                 }
-                Journal::noter('declaration', $existante->id, 'anomalie_idempotence', null, [
-                    'cle' => $cle, 'remise_id' => $remise->id, 'mode' => $mode, 'empreinte_recue' => $empreinte,
-                ], "Clé d'idempotence réutilisée pour un autre contenu.");
 
-                return [$existante, true];
+                // Une déclaration de réception ne touche à aucun stock central : elle reste possible après la clôture
+                // du cycle (une livraison non déclarée doit pouvoir l'être). Le verrou du cycle suffit à l'ordonner.
+                if ($cycle === null) {
+                    throw new LogicException('Cycle introuvable : invariant rompu.');
+                }
+                $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
+                $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
+
+                $this->controlerEtape($actuelle);
+                ['anomalies' => $anomalies, 'delegation' => $delegation] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
+                $this->controlerStatut($actuelle, $mode);
+
+                $anomalies = array_merge($anomalies, $this->controlerLignes($actuelle, $lignes));
+                if ($decharge->statut_document === 'annulee') {
+                    $anomalies[] = 'version_annulee';
+                }
+                if ($preuve !== null && ! in_array($preuve['verification'], self::IDENTITES_ETABLIES, true)) {
+                    $anomalies[] = 'identite';
+                }
+                $anomalies = array_values(array_unique($anomalies));
+
+                $declaration = new Declaration([
+                    'remise_id' => $actuelle->id, 'mode' => $mode,
+                    'signataire_nom' => $signataire['nom'], 'signataire_qualite' => $signataire['qualite'],
+                    'user_id' => $auteur->id, 'decharge_id' => $decharge->id,
+                    'horodatage_terminal' => $horodatageTerminal, 'cle_idempotence' => $cle, 'empreinte_contenu' => $empreinte,
+                ]);
+                $declaration->forceFill([
+                    'statut' => $anomalies === [] ? 'valide' : 'a_verifier',
+                    'anomalies' => $anomalies === [] ? null : $anomalies,
+                    // Au compte, le signataire est celui qui est connecté : l'autorité, ou son délégué (et la délégation).
+                    // À la tablette, c'est le compte nommé par le bloc de preuve, vérifié avant l'enregistrement.
+                    'signataire_user_id' => $mode === 'compte' ? $auteur->id : ($preuve['signataire_user_id'] ?? null),
+                    'delegation_id' => $mode === 'compte' ? $delegation?->id : ($preuve['delegation_id'] ?? null),
+                    'verification_identite' => $mode === 'compte' ? 'compte' : ($preuve['verification'] ?? 'non_verifiee'),
+                    'bloc_empreinte' => $preuve['bloc_empreinte'] ?? null,
+                    'gps_lat' => $gps['lat'] ?? null, 'gps_lng' => $gps['lng'] ?? null, 'gps_precision' => $gps['precision'] ?? null,
+                ])->save();
+                foreach ($lignes as $ligne) {
+                    DeclarationLigne::create(['declaration_id' => $declaration->id] + $ligne);
+                }
+                foreach ($pieces as $empreintePiece => $role) {
+                    DeclarationPiece::create([
+                        'declaration_id' => $declaration->id, 'empreinte' => $empreintePiece, 'role' => $role,
+                        'piece_jointe_id' => PieceJointe::where('empreinte', $empreintePiece)->value('id'),
+                    ]);
+                }
+
+                $this->rapprocher($actuelle);
+                $declaration->refresh();
+
+                Journal::noter('declaration', $declaration->id, 'declaration_reception', null, [
+                    'remise_id' => $actuelle->id, 'decharge_id' => $decharge->id, 'mode' => $mode,
+                    'statut' => $declaration->statut, 'anomalies' => $declaration->anomalies ?? [],
+                    'signataire_user_id' => $declaration->signataire_user_id, 'delegation_id' => $declaration->delegation_id,
+                    'verification_identite' => $declaration->verification_identite, 'bloc_empreinte' => $declaration->bloc_empreinte,
+                    'cle' => $cle, 'empreinte' => $empreinte, 'signataire' => $signataire, 'lignes' => $lignes,
+                    'pieces' => $pieces, 'gps' => $gps,
+                    'horodatage_terminal' => $horodatageTerminal?->toIso8601String(),
+                ]);
+
+                $this->apresRetenue($actuelle);
+
+                return [$declaration, false];
+            }, attempts: 3);
+        } catch (UniqueConstraintViolationException $e) {
+            // Filet de concurrence : le même bloc de preuve ne sert qu'à une seule déclaration.
+            if (str_contains($e->getMessage(), 'bloc_empreinte')) {
+                $porteur = Declaration::where('bloc_empreinte', $preuve['bloc_empreinte'] ?? '')->value('id');
+                if ($porteur !== null) {
+                    Journal::noter('declaration', (int) $porteur, 'anomalie_preuve', null, [
+                        'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
+                    ], self::REFUS_BLOC_REUTILISE);
+                }
+
+                throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
             }
 
-            // Une déclaration de réception ne touche à aucun stock central : elle reste possible après la clôture
-            // du cycle (une livraison non déclarée doit pouvoir l'être). Le verrou du cycle suffit à l'ordonner.
-            if ($cycle === null) {
-                throw new LogicException('Cycle introuvable : invariant rompu.');
-            }
-            $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
-            $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
-
-            if (! in_array($actuelle->etape, ['livraison', 'redistribution'], true)) {
-                throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
-            }
-            ['anomalies' => $anomalies, 'delegation' => $delegation] = $this->controlerDroit($auteur, $actuelle, $decharge, $mode);
-
-            if (! in_array($actuelle->statut, ['en_attente', 'a_verifier'], true) && ! $this->attendUneConfirmation($actuelle)) {
-                throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
-            }
-            $dejaFaite = Declaration::where('remise_id', $actuelle->id)->where('mode', $mode)
-                ->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
-            if ($dejaFaite) {
-                throw new RegleLogistique('Une déclaration '.mb_strtolower(Declaration::MODES[$mode]).' existe déjà pour cette remise.');
-            }
-
-            $anomalies = array_merge($anomalies, $this->controlerLignes($actuelle, $lignes));
-            if ($decharge->statut_document === 'annulee') {
-                $anomalies[] = 'version_annulee';
-            }
-            $anomalies = array_values(array_unique($anomalies));
-
-            $declaration = new Declaration([
-                'remise_id' => $actuelle->id, 'mode' => $mode,
-                'signataire_nom' => $signataire['nom'], 'signataire_qualite' => $signataire['qualite'],
-                'user_id' => $auteur->id, 'decharge_id' => $decharge->id,
-                'horodatage_terminal' => $horodatageTerminal, 'cle_idempotence' => $cle, 'empreinte_contenu' => $empreinte,
-            ]);
-            $declaration->forceFill([
-                'statut' => $anomalies === [] ? 'valide' : 'a_verifier',
-                'anomalies' => $anomalies === [] ? null : $anomalies,
-                // Au compte, le signataire est celui qui est connecté : l'autorité, ou son délégué (et la délégation).
-                'signataire_user_id' => $mode === 'compte' ? $auteur->id : null,
-                'delegation_id' => $delegation?->id,
-            ])->save();
-            foreach ($lignes as $ligne) {
-                DeclarationLigne::create(['declaration_id' => $declaration->id] + $ligne);
-            }
-
-            $this->rapprocher($actuelle);
-            $declaration->refresh();
-
-            Journal::noter('declaration', $declaration->id, 'declaration_reception', null, [
-                'remise_id' => $actuelle->id, 'decharge_id' => $decharge->id, 'mode' => $mode,
-                'statut' => $declaration->statut, 'anomalies' => $declaration->anomalies ?? [],
-                'signataire_user_id' => $declaration->signataire_user_id, 'delegation_id' => $declaration->delegation_id,
-                'cle' => $cle, 'empreinte' => $empreinte, 'signataire' => $signataire, 'lignes' => $lignes,
-                'horodatage_terminal' => $horodatageTerminal?->toIso8601String(),
-            ]);
-
-            $this->apresRetenue($actuelle);
-
-            return [$declaration, false];
-        }, attempts: 3);
+            throw $e;
+        }
 
         if ($conflit) {
-            throw new RegleLogistique("Clé d'idempotence déjà utilisée pour un autre contenu.");
+            throw new RegleLogistique(self::REFUS_CLE_REUTILISEE);
         }
 
         $remise->refresh();
 
+        // Les pièces envoyées pendant l'enregistrement ont pu manquer le rattachement : on le refait.
+        if ($pieces !== [] && $declaration->wasRecentlyCreated) {
+            $this->pieceJointes->rattacherEnAttente(array_keys($pieces));
+        }
+
         return $declaration->load('lignes');
+    }
+
+    /**
+     * Déclaration envoyée par la tablette : rejeu idempotent, vérification de l'identité par le bloc de preuve,
+     * puis enregistrement.
+     *
+     * 1. Même clé : même contenu, même bloc et même auteur ⇒ la déclaration enregistrée est renvoyée telle
+     *    quelle, sans vérifier à nouveau le code (aucun échec n'est compté deux fois) ; sinon refus.
+     * 2. Les droits et l'état de la remise sont contrôlés avant de toucher au code : un agent hors périmètre
+     *    ne peut ni tester ni verrouiller le code d'une autorité.
+     * 3. PreuveService::verifier est appelée HORS de toute transaction : son journal et son compteur d'échecs
+     *    survivent à un refus de l'enregistrement.
+     * 4. declarer() enregistre dans une transaction.
+     *
+     * @param  array{nom?: string, qualite?: string}  $signataire
+     * @param  array<int|string, array<string, mixed>>  $lignes  liste portant `materiel_id`, ou par identifiant d'article
+     * @param  array<string, string>  $pieces  rôle par empreinte de pièce
+     * @param  array{lat: float|int|string, lng: float|int|string, precision?: int|string|null}|null  $gps
+     * @return array{0: Declaration, 1: bool} la déclaration et vrai si elle vient d'être créée (faux : rejeu)
+     */
+    public function declarerParTablette(
+        Remise $remise,
+        array $signataire,
+        array $lignes,
+        string $cle,
+        string $horodatageTerminal,
+        int $signataireUserId,
+        ?string $blocPreuve,
+        array $pieces = [],
+        ?array $gps = null,
+    ): array {
+        $this->exigerAuteur();
+        $auteur = auth()->user();
+
+        if (preg_match('/^[A-Za-z0-9-]{16,64}$/', $cle) !== 1) {
+            throw new InvalidArgumentException("La clé d'idempotence doit compter de 16 à 64 caractères (lettres, chiffres, tirets).");
+        }
+        $signataire = $this->signataire($signataire);
+        $parArticle = [];
+        foreach ($lignes as $position => $ligne) {
+            $materielId = is_array($ligne) ? ($ligne['materiel_id'] ?? $position) : $position;
+            if (! is_int($materielId) && ! (is_string($materielId) && preg_match('/^\d{1,12}$/', $materielId) === 1)) {
+                throw new InvalidArgumentException('Chaque ligne de la remise doit être déclarée.');
+            }
+            if (isset($parArticle[(int) $materielId])) {
+                throw new InvalidArgumentException('Un article ne peut être déclaré qu\'une fois.');
+            }
+            $parArticle[(int) $materielId] = $ligne;
+        }
+        $lignes = $this->normaliser($parArticle);
+        $horodatage = $this->horodatage($horodatageTerminal);
+        $empreinte = self::empreinte((int) $remise->id, 'tablette', $signataire, $lignes);
+        $bloc = PreuveService::empreinteBloc($blocPreuve);
+
+        $rejeu = $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur);
+        if ($rejeu !== null) {
+            return [$rejeu, false];
+        }
+
+        $decharge = Decharge::findOrFail($remise->decharge_id);
+        $actuelle = Remise::findOrFail($remise->id);
+        $this->controlerEtape($actuelle);
+        $this->controlerDroit($auteur, $actuelle, $decharge, 'tablette');
+        $this->controlerStatut($actuelle, 'tablette');
+
+        $preuve = $this->verifierIdentite(
+            $actuelle, $signataire, $lignes, $cle, $horodatageTerminal, $horodatage, $signataireUserId, $blocPreuve, $bloc,
+        );
+
+        try {
+            $declaration = $this->declarer(
+                $actuelle, 'tablette', $signataire, array_column($lignes, null, 'materiel_id'), $cle, $horodatage, $preuve, $pieces, $gps,
+            );
+        } catch (UniqueConstraintViolationException $e) {
+            // Deux envois simultanés de la même clé : le second retrouve le premier.
+            $rejeu = str_contains($e->getMessage(), 'cle_idempotence') ? $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur) : null;
+            if ($rejeu === null) {
+                throw $e;
+            }
+
+            return [$rejeu, false];
+        }
+
+        return [$declaration, $declaration->wasRecentlyCreated];
+    }
+
+    /**
+     * La déclaration déjà enregistrée sous cette clé, si l'envoi est le même ; null si la clé est libre ;
+     * refus si elle a servi à autre chose.
+     */
+    private function rejeuTablette(string $cle, Remise $remise, string $empreinte, ?string $bloc, User $auteur): ?Declaration
+    {
+        $existante = Declaration::where('cle_idempotence', $cle)->first();
+        if ($existante === null) {
+            return null;
+        }
+        if ($this->memeEnvoi($existante, $empreinte, ['bloc_empreinte' => $bloc], $auteur)) {
+            return $existante->load('lignes');
+        }
+
+        Journal::noter('declaration', $existante->id, 'anomalie_idempotence', null, [
+            'cle' => $cle, 'remise_id' => $remise->id, 'mode' => 'tablette', 'empreinte_recue' => $empreinte,
+        ], "Clé d'idempotence réutilisée pour un autre contenu.");
+
+        throw new RegleLogistique(self::REFUS_CLE_REUTILISEE);
+    }
+
+    /**
+     * Même contenu ; pour une tablette, même bloc de preuve et même compte connecté (une clé ne se rejoue pas
+     * depuis un autre appareil).
+     *
+     * @param  array{bloc_empreinte?: ?string}|null  $preuve
+     */
+    private function memeEnvoi(Declaration $existante, string $empreinte, ?array $preuve, User $auteur): bool
+    {
+        if (! hash_equals((string) $existante->empreinte_contenu, $empreinte)) {
+            return false;
+        }
+        if ($preuve === null) {
+            return true;
+        }
+
+        return ($existante->bloc_empreinte === null && ($preuve['bloc_empreinte'] ?? null) === null
+                || $existante->bloc_empreinte !== null && hash_equals($existante->bloc_empreinte, (string) ($preuve['bloc_empreinte'] ?? '')))
+            && (int) $existante->user_id === (int) $auteur->id;
+    }
+
+    /**
+     * Résultat de la vérification d'identité d'une déclaration de tablette. Sans bloc (repli : tablette qui n'a
+     * pu chiffrer), l'identité n'est pas vérifiée ; signataire inconnu, elle est en échec.
+     *
+     * @param  array{nom: string, qualite: string}  $signataire
+     * @param  list<array{materiel_id: int, recu: int, defectueux: int, observation: ?string}>  $lignes
+     * @return array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}
+     */
+    private function verifierIdentite(Remise $remise, array $signataire, array $lignes, string $cle, string $horodatageTerminal, CarbonInterface $horodatage, int $signataireUserId, ?string $blocPreuve, ?string $bloc): array
+    {
+        $utilisateur = User::find($signataireUserId);
+        $base = ['bloc_empreinte' => $bloc, 'signataire_user_id' => $utilisateur?->id, 'delegation_id' => null];
+
+        if ($blocPreuve === null || $blocPreuve === '') {
+            return ['verification' => 'non_verifiee'] + $base;
+        }
+        if ($utilisateur === null) {
+            return ['verification' => 'echec'] + $base;
+        }
+
+        // Un délégué signe au titre de la délégation en vigueur à l'instant de sa signature, pas de celle d'aujourd'hui.
+        $delegation = null;
+        $destinataire = $remise->a_type === 'destinataire' && $remise->a_id !== null ? Destinataire::find($remise->a_id) : null;
+        if ($destinataire !== null && ! $this->perimetre->estTitulaireDe($utilisateur, $destinataire)) {
+            $delegation = $this->delegations->activeA($destinataire, $utilisateur, $horodatage);
+        }
+
+        $contenu = $this->preuves->contenuPreuve($remise, $signataire, $utilisateur->id, $lignes, $cle, $horodatageTerminal);
+        $resultat = $this->preuves->verifier($contenu, $cle, $blocPreuve, $utilisateur, $horodatage, $delegation);
+
+        return ['verification' => $resultat['verification'], 'bloc_empreinte' => $resultat['bloc_empreinte'], 'delegation_id' => $delegation?->id] + $base;
+    }
+
+    private function horodatage(string $texte): Carbon
+    {
+        $instant = Carbon::createFromFormat('Y-m-d\TH:i:sP', $texte);
+        if ($instant === false || $instant->format('Y-m-d\TH:i:sP') !== $texte) {
+            throw new InvalidArgumentException("L'horodatage doit être au format ISO 8601 avec décalage, par exemple 2026-11-05T10:00:00+00:00.");
+        }
+
+        return $instant;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $preuve
+     * @return array{verification: string, bloc_empreinte: ?string, signataire_user_id: ?int, delegation_id: ?int}|null
+     */
+    private function preuve(string $mode, ?array $preuve): ?array
+    {
+        if ($preuve === null) {
+            return null;
+        }
+        if ($mode !== 'tablette') {
+            throw new InvalidArgumentException('La preuve ne concerne que les déclarations de tablette.');
+        }
+        $verification = $preuve['verification'] ?? null;
+        if (! is_string($verification) || ! array_key_exists($verification, Declaration::VERIFICATIONS) || $verification === 'compte') {
+            throw new InvalidArgumentException("Vérification d'identité inconnue.");
+        }
+        $bloc = $preuve['bloc_empreinte'] ?? null;
+        if ($bloc !== null && (! is_string($bloc) || preg_match('/^[0-9a-f]{64}$/', $bloc) !== 1)) {
+            throw new InvalidArgumentException('Empreinte du bloc de preuve invalide.');
+        }
+
+        return [
+            'verification' => $verification, 'bloc_empreinte' => $bloc,
+            'signataire_user_id' => isset($preuve['signataire_user_id']) ? (int) $preuve['signataire_user_id'] : null,
+            'delegation_id' => isset($preuve['delegation_id']) ? (int) $preuve['delegation_id'] : null,
+        ];
+    }
+
+    /**
+     * @param  array<string, string>  $pieces
+     * @return array<string, string>
+     */
+    private function pieces(array $pieces): array
+    {
+        $retenues = [];
+        foreach ($pieces as $empreinte => $role) {
+            $empreinte = (string) $empreinte;
+            if (preg_match('/^[0-9a-f]{64}$/', $empreinte) !== 1 || ! is_string($role) || ! array_key_exists($role, DeclarationPiece::ROLES)) {
+                throw new InvalidArgumentException('Pièce annoncée invalide : empreinte SHA-256 et rôle (signature ou photo) attendus.');
+            }
+            $retenues[$empreinte] = $role;
+        }
+
+        return $retenues;
+    }
+
+    /** @return array{lat: float, lng: float, precision: ?int}|null */
+    private function gps(?array $gps): ?array
+    {
+        if ($gps === null) {
+            return null;
+        }
+        $lat = $gps['lat'] ?? null;
+        $lng = $gps['lng'] ?? null;
+        $precision = $gps['precision'] ?? null;
+        if (! is_numeric($lat) || ! is_numeric($lng) || abs((float) $lat) > 90 || abs((float) $lng) > 180
+            || ($precision !== null && (! is_numeric($precision) || (int) $precision < 0 || (int) $precision > 100_000_000))) {
+            throw new InvalidArgumentException('Position GPS invalide.');
+        }
+
+        return ['lat' => round((float) $lat, 6), 'lng' => round((float) $lng, 6), 'precision' => $precision === null ? null : (int) $precision];
     }
 
     /**
@@ -199,6 +487,25 @@ class DeclarationService
             // Service résolu à l'appel : le service des réclamations dépend lui-même de celui-ci.
             app(ReclamationService::class)->verifierRemplacements($decharge);
         }, attempts: 3);
+    }
+
+    private function controlerEtape(Remise $remise): void
+    {
+        if (! in_array($remise->etape, ['livraison', 'redistribution'], true)) {
+            throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
+        }
+    }
+
+    private function controlerStatut(Remise $remise, string $mode): void
+    {
+        if (! in_array($remise->statut, ['en_attente', 'a_verifier'], true) && ! $this->attendUneConfirmation($remise)) {
+            throw new RegleLogistique("Cette remise n'attend pas de déclaration.");
+        }
+        $dejaFaite = Declaration::where('remise_id', $remise->id)->where('mode', $mode)
+            ->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
+        if ($dejaFaite) {
+            throw new RegleLogistique('Une déclaration '.mb_strtolower(Declaration::MODES[$mode]).' existe déjà pour cette remise.');
+        }
     }
 
     /**

@@ -110,6 +110,20 @@ class PreuveService
     }
 
     /**
+     * Empreinte (SHA-256 des octets chiffrés) sous laquelle un bloc est mémorisé ; null pour un bloc absent,
+     * vide ou qui n'est pas du base64 : il n'y a alors rien à mémoriser.
+     */
+    public static function empreinteBloc(?string $blocBase64): ?string
+    {
+        if ($blocBase64 === null || $blocBase64 === '') {
+            return null;
+        }
+        $chiffre = base64_decode($blocBase64, true);
+
+        return $chiffre === false || $chiffre === '' ? null : hash('sha256', $chiffre);
+    }
+
+    /**
      * Contrôle le bloc d'une déclaration encore à créer.
      *
      * Rejets (RegleLogistique, journal « anomalie_preuve ») : bloc déjà porté par une déclaration ; bloc qui
@@ -196,7 +210,9 @@ class PreuveService
             return false;
         }
 
-        if ($horodatage->greaterThan(now()->addMinutes(self::TOLERANCE_HORLOGE_MINUTES))
+        // Sans date de création, la borne basse est invérifiable : l'identité n'est pas tenue pour établie.
+        if ($remise->created_at === null
+            || $horodatage->greaterThan(now()->addMinutes(self::TOLERANCE_HORLOGE_MINUTES))
             || $horodatage->lessThan(Carbon::instance($remise->created_at)->subMinutes(self::TOLERANCE_HORLOGE_MINUTES))) {
             return false;
         }
