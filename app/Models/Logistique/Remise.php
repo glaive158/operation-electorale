@@ -63,5 +63,8 @@ class Remise extends Model
         return $this->belongsTo(User::class, 'preparee_par');
     }
 
-    // declarations() : ajoutée avec le modèle Déclaration (tâche 4).
+    public function declarations(): HasMany
+    {
+        return $this->hasMany(Declaration::class)->orderBy('id');
+    }
 }
