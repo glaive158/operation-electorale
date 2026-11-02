@@ -13,6 +13,7 @@ use App\Http\Controllers\Logistique\BesoinController;
 use App\Http\Controllers\Logistique\ArbitrageController;
 use App\Http\Controllers\Logistique\CircuitController;
 use App\Http\Controllers\Logistique\CleController;
+use App\Http\Controllers\Logistique\CodeReceptionController;
 use App\Http\Controllers\Logistique\CommandeController;
 use App\Http\Controllers\Logistique\CommissionController;
 use App\Http\Controllers\Logistique\CorrespondanceController;
@@ -31,6 +32,7 @@ use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\ReclamationController;
 use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
+use App\Http\Controllers\Terrain\CodeController as TerrainCodeController;
 use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController;
 use App\Http\Controllers\Terrain\DeclarationController as TerrainDeclarationController;
 use App\Http\Controllers\Terrain\IndicateurController as TerrainIndicateurController;
@@ -137,6 +139,11 @@ Route::middleware(['auth'])->group(function () {
         // La page d'une décharge répond 404 hors périmètre ou à un profil sans accès, pour ne rien révéler.
         Route::get('decharges/{decharge}', [TerrainDechargeController::class, 'show'])->name('decharges.show');
         Route::middleware('can:logistique-terrain')->group(function () {
+            // Choix du code personnel de réception : seule page terrain ouverte avant le premier choix.
+            Route::get('code', [TerrainCodeController::class, 'edit'])->name('code.edit');
+            Route::post('code', [TerrainCodeController::class, 'update'])->middleware('throttle:10,1')->name('code.update');
+        });
+        Route::middleware(['can:logistique-terrain', 'premier-acces'])->group(function () {
             Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
             Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
             Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
@@ -238,6 +245,9 @@ Route::middleware(['auth'])->group(function () {
             Route::post('plans/{plan}/approbation', [PlanDotationController::class, 'approuver'])->name('plans.approuver');
 
             Route::post('cycles/{cycle}/besoin/commande', [BesoinController::class, 'commander'])->name('besoin.commander');
+
+            Route::get('utilisateurs/codes', [CodeReceptionController::class, 'index'])->name('utilisateurs.codes');
+            Route::post('utilisateurs/{user}/code/reinitialisation', [CodeReceptionController::class, 'reinitialiser'])->whereNumber('user')->name('utilisateurs.code.reinitialiser');
 
             Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');

@@ -398,6 +398,7 @@ class EcransDotationTest extends TestCase
             'logistique.plan-lignes.annuler-correction' => [$ligne],
             'logistique.plans.approuver'       => [$this->plan],
             'logistique.besoin.commander'      => [$this->cycle],
+            'logistique.utilisateurs.code.reinitialiser' => [User::factory()->create(['role' => 'chef_poste'])],
         ];
 
         $this->assertGreaterThan(15, count($ecritures));

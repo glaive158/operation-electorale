@@ -6,6 +6,7 @@
     ];
     if (\Illuminate\Support\Facades\Gate::allows('logistique-administrer')) {
         $onglets[] = ['Postes à l\'étranger', 'logistique.postes.index', null, 'logistique.postes.*'];
+        $onglets[] = ['Codes de réception', 'logistique.utilisateurs.codes', null, 'logistique.utilisateurs.*'];
     }
     if ($cycleOnglet) {
         $onglets = array_merge($onglets, [

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Services\Logistique\CodeReceptionService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -62,7 +63,11 @@ class UserController extends Controller
         $data['password'] = Hash::make($data['password']);
         $data['actif']    = $request->boolean('actif', true);
 
-        User::create($data);
+        $user = User::create($data);
+        // Une autorité de terrain choisit son code personnel de réception à sa première connexion.
+        if (in_array($user->role, CodeReceptionService::ROLES_AUTORITE, true)) {
+            $user->forceFill(['doit_choisir_code' => true])->save();
+        }
         return redirect()->route('users.index')->with('success', 'Utilisateur créé avec succès.');
     }
 
@@ -115,7 +120,12 @@ class UserController extends Controller
         }
         $data['actif'] = $request->boolean('actif');
 
+        $ancienRole = $user->role;
         $user->update($data);
+        // Un compte qui devient autorité, ou change d'autorité, choisit un nouveau code de réception.
+        if ($user->role !== $ancienRole && in_array($user->role, CodeReceptionService::ROLES_AUTORITE, true)) {
+            $user->forceFill(['doit_choisir_code' => true])->save();
+        }
         return redirect()->route('users.index')->with('success', 'Utilisateur mis à jour.');
     }
 

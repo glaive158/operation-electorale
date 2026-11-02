@@ -2,6 +2,7 @@
 
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Http\Middleware\CheckRole;
+use App\Http\Middleware\ExigerChoixCodeReception;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -27,11 +28,15 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'role' => CheckRole::class,
+            'premier-acces' => ExigerChoixCodeReception::class,
             'abilities' => CheckAbilities::class,
             'ability' => CheckForAnyAbility::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // Le code personnel de réception et les mots de passe ne reviennent jamais dans un formulaire ni en session.
+        $exceptions->dontFlash(['code', 'code_confirmation', 'nouveau_mot_de_passe', 'nouveau_mot_de_passe_confirmation']);
+
         // L'API ne rend que du JSON ; une règle métier violée n'est jamais une erreur serveur.
         $exceptions->shouldRenderJsonWhen(fn (Request $request, \Throwable $e) => $request->is('api/*') || $request->expectsJson());
 
