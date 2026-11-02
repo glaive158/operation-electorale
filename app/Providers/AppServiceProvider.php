@@ -23,5 +23,6 @@ class AppServiceProvider extends ServiceProvider
     {
         Gate::define('logistique-gerer', fn (User $user) => $user->hasRole(['admin', 'logistique_gestionnaire', 'logistique_responsable']));
         Gate::define('logistique-administrer', fn (User $user) => $user->hasRole(['admin', 'logistique_responsable']));
+        Gate::define('logistique-terrain', fn (User $user) => $user->actif && $user->hasRole(['prefet', 'sous_prefet', 'chef_poste', 'agent_transport']));
     }
 }

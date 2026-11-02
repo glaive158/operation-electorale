@@ -9,6 +9,7 @@ use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\ReservationStock;
+use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -257,6 +258,43 @@ class DechargeService
                 'statut_document' => 'annulee', 'numero' => $actuelle->numero,
                 'vers_stock_commun' => $versStockCommun, 'lignes' => $liberees,
             ], $motif);
+        }, attempts: 3);
+
+        $decharge->refresh();
+    }
+
+    /**
+     * Affecte (ou retire, avec null) l'agent de transport d'une décharge validée qui n'est pas partie.
+     * Le motif est obligatoire ; le changement est journalisé avec l'ancien et le nouvel agent.
+     */
+    public function affecterAgent(Decharge $decharge, ?User $agent, string $motif): void
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit();
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        DB::transaction(function () use ($decharge, $agent, $motif) {
+            $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : affectation d\'agent impossible.');
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->statut_document !== 'validee' || $actuelle->estPartie()) {
+                throw new RegleLogistique('Agent modifiable seulement sur une décharge validée non partie.');
+            }
+
+            if ($agent !== null) {
+                $courant = User::find($agent->id);
+                if ($courant === null || $courant->role !== 'agent_transport' || ! $courant->actif) {
+                    throw new RegleLogistique("Cet utilisateur n'est pas un agent de transport actif.");
+                }
+            }
+
+            $avant = $actuelle->agent_id === null ? null : (int) $actuelle->agent_id;
+            $apres = $agent?->id;
+            $actuelle->forceFill(['agent_id' => $apres])->save();
+
+            Journal::noter('decharge', $actuelle->id, 'affectation_agent', ['agent_id' => $avant], ['agent_id' => $apres], $motif);
         }, attempts: 3);
 
         $decharge->refresh();
