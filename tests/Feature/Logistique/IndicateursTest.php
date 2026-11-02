@@ -192,6 +192,20 @@ class IndicateursTest extends TestCase
         $this->assertSame(100, $this->ligne($this->prefecture)['reste_a_receptionner']);
     }
 
+    public function test_defectueux_chez_le_prefet_ne_sont_pas_en_transit(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $this->deposerRecue($decharge, [$this->urnes->id => ['recu' => 100, 'defectueux' => 10]]);
+
+        $this->assertLigne(['expedie' => 100, 'chez_intermediaire' => 90, 'en_transit' => 0, 'recu' => 0], $this->ligne($this->sousPrefecture1));
+
+        $redistribution = $this->en($this->autoriteFictive($this->prefecture), fn () => app(RemiseService::class)->preparerRedistribution($decharge->refresh(), [$this->urnes->id => 80]));
+        $this->assertLigne(['chez_intermediaire' => 10, 'en_transit' => 80, 'recu' => 0], $this->ligne($this->sousPrefecture1));
+
+        $this->declarerRecu($this->autoriteFictive($this->sousPrefecture1), $redistribution->load('lignes'), 80);
+        $this->assertLigne(['chez_intermediaire' => 10, 'en_transit' => 0, 'recu' => 80, 'recu_utilisable' => 80], $this->ligne($this->sousPrefecture1));
+    }
+
     public function test_ecart_accepte_etat_cloture(): void
     {
         $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 80]);

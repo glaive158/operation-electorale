@@ -67,7 +67,8 @@ class IndicateurService
             $expedie = $expedies[$cle] ?? 0;
             $recu = $recus[$cle]['recu'] ?? 0;
             $utilisable = $recus[$cle]['utilisable'] ?? 0;
-            $intermediaire = $chez[$cle] ?? 0;
+            $intermediaire = $chez[$cle]['utilisable'] ?? 0;
+            $detenu = $chez[$cle]['detenu'] ?? 0;
             $actives = $reclamations[$cle] ?? 0;
 
             $lignes[] = [
@@ -80,7 +81,7 @@ class IndicateurService
                 'expedie' => $expedie,
                 'reste_a_expedier' => max(0, $besoin - $expedie),
                 'surplus_expedie' => max(0, $expedie - $besoin),
-                'en_transit' => max(0, $expedie - $recu - $intermediaire),
+                'en_transit' => max(0, $expedie - $recu - $detenu),
                 'chez_intermediaire' => $intermediaire,
                 'recu' => $recu,
                 'recu_utilisable' => $utilisable,
@@ -272,10 +273,12 @@ class IndicateurService
     /**
      * Reliquat chez le préfet, par destinataire final : pour chaque décharge livrée à un autre destinataire que le
      * sien, reçu utilisable retenu à la livraison moins ce qui est redistribué (remises non annulées), jamais
-     * négatif. Même règle que RemiseService::soldePrefet, pour toutes les décharges à la fois.
+     * négatif. Même règle que RemiseService::soldePrefet, pour toutes les décharges à la fois. « detenu » compte aussi
+     * les défectueux déclarés au préfet (physiquement chez lui, donc pas en transit) ; « utilisable » seul est exposé
+     * comme chez_intermediaire.
      *
      * @param  list<int>|null  $ids
-     * @return array<string, int>
+     * @return array<string, array{utilisable: int, detenu: int}>
      */
     private function chezIntermediaire(Cycle $cycle, ?array $ids): array
     {
@@ -291,7 +294,7 @@ class IndicateurService
             ->where('remises.statut', '!=', 'annulee')
             ->where('declarations.statut', 'retenue')
             ->groupBy('decharges.id', 'decharges.destinataire_id', 'declaration_lignes.materiel_id')
-            ->selectRaw('decharges.id as decharge_id, decharges.destinataire_id as destinataire_id, declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu - declaration_lignes.defectueux) as utilisable')
+            ->selectRaw('decharges.id as decharge_id, decharges.destinataire_id as destinataire_id, declaration_lignes.materiel_id as materiel_id, SUM(declaration_lignes.recu - declaration_lignes.defectueux) as utilisable, SUM(declaration_lignes.recu) as brut')
             ->get();
         $transferts = DB::table('remise_lignes')
             ->join('remises', 'remises.id', '=', 'remise_lignes.remise_id')
@@ -307,9 +310,10 @@ class IndicateurService
 
         $chez = [];
         foreach ($recus as $l) {
-            $reliquat = max(0, (int) $l->utilisable - ($transferts[$l->decharge_id.'|'.$l->materiel_id] ?? 0));
+            $transfere = $transferts[$l->decharge_id.'|'.$l->materiel_id] ?? 0;
             $cle = $l->destinataire_id.'|'.$l->materiel_id;
-            $chez[$cle] = ($chez[$cle] ?? 0) + $reliquat;
+            $chez[$cle]['utilisable'] = ($chez[$cle]['utilisable'] ?? 0) + max(0, (int) $l->utilisable - $transfere);
+            $chez[$cle]['detenu'] = ($chez[$cle]['detenu'] ?? 0) + max(0, (int) $l->brut - $transfere);
         }
 
         return $chez;
