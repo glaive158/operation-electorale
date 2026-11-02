@@ -12,6 +12,7 @@ use App\Models\Logistique\Remise;
 use App\Models\User;
 use App\Services\Logistique\ArbitrageService;
 use App\Services\Logistique\DeclarationService;
+use App\Services\Logistique\RemiseService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
@@ -134,11 +135,36 @@ class ArbitrageDeclarationTest extends TestCase
 
     public function test_une_remise_arbitree_n_accepte_plus_l_autre_mode(): void
     {
-        [, $remise, $tablette, $compte] = $this->divergentes();
+        [$decharge, , , $compte] = $this->divergentes();
         app(ArbitrageService::class)->retenir($compte, 'Le compte du préfet fait foi.');
 
-        $this->expectException(RegleLogistique::class);
-        $this->declarer($this->autoriteFictive($this->prefecture), $remise, 'compte', 90);
+        // Le mode de la déclaration écartée (tablette de l'agent) ne rouvre pas la remise arbitrée.
+        try {
+            $this->declarer($decharge->agent, $this->livraison($decharge), 'tablette', 100);
+            $this->fail('Une remise arbitrée n\'attend plus de déclaration.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame("Cette remise n'attend pas de déclaration.", $e->getMessage());
+        }
+        $this->assertSame(2, Declaration::where('decharge_id', $decharge->id)->count());
+    }
+
+    public function test_seule_la_declaration_retenue_compte_dans_le_solde_du_prefet(): void
+    {
+        $decharge = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $remise = $this->livraison($decharge);
+        $this->assertSame($this->prefecture->id, $remise->a_id);
+        $tablette = $this->declarer($decharge->agent, $remise, 'tablette', 100);
+        $compte = $this->declarer($this->autoriteFictive($this->prefecture), $remise, 'compte', 90, 10);
+        $solde = fn () => app(RemiseService::class)->soldePrefet($decharge)->get($this->urnes->id);
+
+        // Tant que rien n'est retenu, aucune déclaration ne compte.
+        $this->assertSame(['recu_utilisable' => 0, 'transfere' => 0, 'reliquat' => 0], $solde());
+
+        app(ArbitrageService::class)->retenir($compte, 'Le compte du préfet fait foi.');
+
+        // 90 reçus moins 10 défectueux : la tablette écartée (100) ne s'ajoute ni ne remplace.
+        $this->assertSame('ecartee', $tablette->refresh()->statut);
+        $this->assertSame(['recu_utilisable' => 80, 'transfere' => 0, 'reliquat' => 80], $solde());
     }
 
     public function test_gestionnaire_ne_peut_pas_arbitrer(): void
