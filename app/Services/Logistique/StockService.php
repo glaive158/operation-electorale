@@ -10,6 +10,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
+use App\Models\Logistique\Remise;
 use App\Models\Logistique\ReservationStock;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
@@ -287,6 +288,15 @@ class StockService
                 ->where('statut_document', 'validee')->where('statut_acheminement', 'a_preparer')->count();
             if ($nonParties > 0) {
                 throw new RegleLogistique("Clôture impossible : {$nonParties} décharge(s) validée(s) non partie(s) — annulez-les ou chargez-les d'abord.");
+            }
+
+            // Une remise qui attend sa réception ou sa vérification laisse du matériel en route : on déclare,
+            // on arbitre ou on clôture avec écart d'abord.
+            $enAttente = Remise::query()
+                ->whereIn('decharge_id', Decharge::where('cycle_id', $actuel->id)->select('id'))
+                ->whereIn('statut', ['en_attente', 'a_verifier'])->exists();
+            if ($enAttente) {
+                throw new RegleLogistique('Des remises sont encore en attente de réception ou à vérifier : déclarez, arbitrez ou clôturez avec écart avant de clôturer le cycle.');
             }
 
             // Le cycle tenu en exclusif bloque toute écriture sur ses réservations et

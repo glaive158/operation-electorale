@@ -7,6 +7,10 @@ use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Declaration;
+use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Materiel;
+use App\Models\Logistique\PlanDotation;
+use App\Models\Logistique\PlanDotationLigne;
 use App\Models\Logistique\Remise;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -25,7 +29,10 @@ class ArbitrageService
 {
     private const MAX_TEXTE = 500;
 
-    public function __construct(private readonly DeclarationService $declarations) {}
+    public function __construct(
+        private readonly DeclarationService $declarations,
+        private readonly EngagementService $engagement,
+    ) {}
 
     public function retenir(Declaration $declaration, string $motif): void
     {
@@ -35,6 +42,101 @@ class ArbitrageService
     public function rejeter(Declaration $declaration, string $motif): void
     {
         $this->arbitrer($declaration, $motif, false);
+    }
+
+    /**
+     * Le responsable accepte un écart pour (cycle, destinataire, article) : une part est abandonnée à la
+     * réception (le destinataire n'aura jamais reçu l'objectif), une part de l'expédition est annulée (le besoin
+     * baisse, la proposition de commande aussi).
+     *
+     * - L'expédition annulée ne porte que sur le non engagé (besoin moins engagé validé) : une décharge validée
+     *   non partie qui porte la quantité est annulée d'abord.
+     * - L'abandon est plafonné au reste à réceptionner : objectif de réception (dotation moins les abandons déjà
+     *   acceptés, sans les remplacements) moins le reçu utilisable retenu au destinataire final.
+     */
+    public function cloturerAvecEcart(Cycle $cycle, Destinataire $destinataire, Materiel $materiel, int $abandonReception, int $expeditionAnnulee, string $motif): Arbitrage
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Clôture d\'écart sans auteur.');
+        }
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut clôturer un écart.');
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+        if ($abandonReception < 0 || $expeditionAnnulee < 0 || ($abandonReception === 0 && $expeditionAnnulee === 0)) {
+            throw new InvalidArgumentException('Les quantités doivent être positives et au moins l\'une d\'elles non nulle.');
+        }
+
+        return DB::transaction(function () use ($cycle, $destinataire, $materiel, $abandonReception, $expeditionAnnulee, $motif) {
+            $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->first();
+            if ($actuel === null || ! $actuel->estOuvert()) {
+                throw new RegleLogistique('Cycle clôturé : clôture d\'écart impossible.');
+            }
+
+            // Chiffres relus sous le verrou du cycle : aucune écriture concurrente ne les déplace.
+            $nonEngage = max(0, $this->engagement->besoin($actuel, $destinataire, $materiel) - $this->engagement->engage($actuel, $destinataire, $materiel));
+            if ($expeditionAnnulee > $nonEngage) {
+                throw new RegleLogistique("Expédition annulée supérieure au non engagé pour {$materiel->libelle} : non engagé {$nonEngage}. Annulez d'abord la décharge validée non partie.");
+            }
+
+            $reste = max(0, $this->objectifReception($actuel, $destinataire, $materiel) - $this->recuUtilisableRetenu($actuel, $destinataire, $materiel));
+            if ($abandonReception > $reste) {
+                throw new RegleLogistique("Abandon supérieur au reste à réceptionner pour {$materiel->libelle} : reste {$reste}.");
+            }
+
+            $arbitrage = Arbitrage::create([
+                'cycle_id' => $actuel->id, 'objet' => 'cloture_ecart', 'destinataire_id' => $destinataire->id,
+                'materiel_id' => $materiel->id, 'decision' => 'ecart_accepte',
+                'quantite_abandon_reception' => $abandonReception, 'quantite_expedition_annulee' => $expeditionAnnulee,
+                'motif' => $motif, 'user_id' => auth()->id(),
+            ]);
+            Journal::noter('arbitrage', $arbitrage->id, 'cloture_avec_ecart', null, [
+                'cycle_id' => $actuel->id, 'destinataire_id' => $destinataire->id, 'materiel_id' => $materiel->id,
+                'quantite_abandon_reception' => $abandonReception, 'quantite_expedition_annulee' => $expeditionAnnulee,
+                'non_engage' => $nonEngage, 'reste_a_receptionner' => $reste,
+            ], $motif);
+
+            return $arbitrage;
+        }, attempts: 3);
+    }
+
+    /**
+     * Objectif de réception : dotation du plan approuvé moins les abandons déjà acceptés. Un remplacement
+     * augmente le besoin d'expédition mais pas cet objectif.
+     */
+    private function objectifReception(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): int
+    {
+        $plan = PlanDotation::courantApprouve($cycle);
+        $dotation = $plan === null ? 0 : (int) PlanDotationLigne::where('plan_dotation_id', $plan->id)
+            ->where('destinataire_id', $destinataire->id)->where('materiel_id', $materiel->id)
+            ->sum('dotation_approuvee');
+        $abandons = (int) Arbitrage::where('cycle_id', $cycle->id)->where('objet', 'cloture_ecart')
+            ->where('destinataire_id', $destinataire->id)->where('materiel_id', $materiel->id)
+            ->sum('quantite_abandon_reception');
+
+        return max(0, $dotation - $abandons);
+    }
+
+    /**
+     * Reçu utilisable (reçu moins défectueux) retenu au destinataire final : déclarations retenues des remises
+     * non annulées adressées au destinataire, pour les décharges du cycle. La tâche des indicateurs reprendra
+     * ce calcul.
+     */
+    private function recuUtilisableRetenu(Cycle $cycle, Destinataire $destinataire, Materiel $materiel): int
+    {
+        return (int) DB::table('declaration_lignes')
+            ->join('declarations', 'declarations.id', '=', 'declaration_lignes.declaration_id')
+            ->join('remises', 'remises.id', '=', 'declarations.remise_id')
+            ->join('decharges', 'decharges.id', '=', 'remises.decharge_id')
+            ->where('decharges.cycle_id', $cycle->id)
+            ->where('remises.a_type', 'destinataire')->where('remises.a_id', $destinataire->id)
+            ->where('remises.statut', '!=', 'annulee')
+            ->where('declarations.statut', 'retenue')
+            ->where('declaration_lignes.materiel_id', $materiel->id)
+            ->sum(DB::raw('declaration_lignes.recu - declaration_lignes.defectueux'));
     }
 
     private function arbitrer(Declaration $declaration, string $motif, bool $retenir): void
