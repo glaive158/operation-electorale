@@ -32,6 +32,13 @@ class EcartVersionService
         $clotures = DB::table('arbitrages')->where('cycle_id', $cycle->id)->where('objet', 'cloture_ecart')
             ->whereNotNull('materiel_id')->groupBy('destinataire_id', 'materiel_id')
             ->selectRaw("'cloture' as source, destinataire_id, materiel_id, SUM(quantite_expedition_annulee) as quantite");
+        // Remplacements déjà couverts par un brouillon de décharge vivant : le besoin est servi, pas encore engagé.
+        $couverts = DB::table('besoins_remplacement')->where('cycle_id', $cycle->id)
+            ->whereExists(fn ($q) => $q->selectRaw('1')->from('decharges')
+                ->whereColumn('decharges.besoin_remplacement_id', 'besoins_remplacement.id')
+                ->where('decharges.statut_document', 'brouillon'))
+            ->groupBy('destinataire_id', 'materiel_id')
+            ->selectRaw("'couvert' as source, destinataire_id, materiel_id, SUM(quantite) as quantite");
         $lignesPlan = DB::table('plans_dotation')
             ->leftJoin('plan_dotation_lignes', function ($join) {
                 $join->on('plan_dotation_lignes.plan_dotation_id', '=', 'plans_dotation.id')
@@ -39,7 +46,7 @@ class EcartVersionService
             })
             ->where('plans_dotation.cycle_id', $cycle->id)->where('plans_dotation.statut', 'approuve')
             ->selectRaw("'plan' as source, plan_dotation_lignes.destinataire_id as destinataire_id, plan_dotation_lignes.materiel_id as materiel_id, plan_dotation_lignes.dotation_approuvee as quantite")
-            ->unionAll($remplacements)->unionAll($clotures)
+            ->unionAll($remplacements)->unionAll($clotures)->unionAll($couverts)
             ->get();
         $plan = $lignesPlan->where('source', 'plan');
         if ($plan->isEmpty()) {
@@ -55,6 +62,11 @@ class EcartVersionService
         }
         foreach ($lignesPlan->where('source', 'cloture') as $l) {
             $ajustements[$l->destinataire_id.'|'.$l->materiel_id] = ($ajustements[$l->destinataire_id.'|'.$l->materiel_id] ?? 0) - (int) $l->quantite;
+        }
+
+        $couvertsParPaire = [];
+        foreach ($lignesPlan->where('source', 'couvert') as $l) {
+            $couvertsParPaire[$l->destinataire_id.'|'.$l->materiel_id] = (int) $l->quantite;
         }
 
         // Une ligne par (décharge validée, article) : de quoi totaliser l'engagé, isoler le non parti
@@ -88,7 +100,7 @@ class EcartVersionService
                 continue;
             }
             $bruts[] = ['destinataire_id' => $p['destinataire_id'], 'materiel_id' => $p['materiel_id'], 'dotation' => $dotation, 'besoin' => $besoin, 'engage' => $p['engage']]
-                + ['ecarts' => $this->classer($besoin, $p['engage'], $p['non_parti'], $p['decharges'])];
+                + ['ecarts' => $this->classer($besoin, $p['engage'], $p['non_parti'], $p['decharges'], $couvertsParPaire[$cle] ?? 0)];
         }
         if ($bruts === []) {
             return collect();
@@ -116,12 +128,15 @@ class EcartVersionService
 
     /**
      * @param  list<int>  $decharges  décharges validées non parties portant l'article
+     * @param  int  $couvert  remplacements déjà servis par un brouillon de décharge : ils ne sont pas un reliquat à préparer
      * @return list<array{type: string, quantite: int, decharges: list<int>}>
      */
-    private function classer(int $dotation, int $engage, int $nonParti, array $decharges): array
+    private function classer(int $dotation, int $engage, int $nonParti, array $decharges, int $couvert = 0): array
     {
         if ($dotation > $engage) {
-            return [['type' => 'reliquat', 'quantite' => $dotation - $engage, 'decharges' => []]];
+            $reliquat = $dotation - $engage - $couvert;
+
+            return $reliquat > 0 ? [['type' => 'reliquat', 'quantite' => $reliquat, 'decharges' => []]] : [];
         }
 
         $exces = $engage - $dotation;

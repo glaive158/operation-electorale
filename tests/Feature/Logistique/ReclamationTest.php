@@ -13,6 +13,7 @@ use App\Models\Logistique\Reclamation;
 use App\Models\Logistique\Remise;
 use App\Models\User;
 use App\Services\Logistique\DechargeService;
+use App\Services\Logistique\EcartVersionService;
 use App\Services\Logistique\EngagementService;
 use App\Services\Logistique\IndicateurService;
 use App\Services\Logistique\ReclamationService;
@@ -582,6 +583,59 @@ class ReclamationTest extends TestCase
         $this->refus(fn () => $service->modifierLigne($ligne, 11, null), 'La quantité d\'un remplacement ne peut pas dépasser celle du besoin autorisé (10).');
         $service->modifierLigne($ligne, 6, null);
         $this->assertSame(6, $ligne->refresh()->quantite);
+    }
+
+    public function test_remplacement_autorise_avec_brouillon_n_est_pas_un_reliquat(): void
+    {
+        $decharge = $this->partie(100);
+        $this->service()->resoudre($this->ouvrir($decharge, 10), 'remplacement_autorise', 'Remplacement.', 10);
+        $brouillon = Decharge::where('nature', 'remplacement')->sole();
+
+        // Besoin 110, engagé 100, mais les 10 de remplacement ont leur brouillon : ni ligne d'écart, ni bouton.
+        $this->assertCount(0, app(EcartVersionService::class)->analyser($this->cycle));
+        $this->get(route('logistique.ecarts.index', $this->cycle))->assertOk()->assertDontSee('Préparer le reliquat');
+
+        // Validé, le remplacement est engagé : toujours aucun écart.
+        app(DechargeService::class)->valider($brouillon);
+        $this->assertCount(0, app(EcartVersionService::class)->analyser($this->cycle));
+    }
+
+    public function test_reliquat_reel_reste_signale_a_cote_d_un_remplacement_couvert(): void
+    {
+        $decharge = $this->partie(80);
+        $this->service()->resoudre($this->ouvrir($decharge, 10), 'remplacement_autorise', 'Remplacement.', 10);
+
+        // Besoin 110 = 100 de dotation + 10 de remplacement ; engagé 80 : seul le reliquat de 20 est à préparer.
+        $ecarts = app(EcartVersionService::class)->analyser($this->cycle);
+        $this->assertSame([['reliquat', 20]], $ecarts->map(fn ($e) => [$e['type'], $e['quantite']])->all());
+    }
+
+    public function test_reclamations_en_cours_plafonnees_a_la_quantite_de_la_ligne(): void
+    {
+        $decharge = $this->partie(100);
+        $premiere = $this->ouvrir($decharge, 60);
+        $this->ouvrir($decharge, 30, 'defectueux');
+
+        $this->refus(fn () => $this->ouvrir($decharge, 11), 'Réclamations en cours supérieures à la quantité de la ligne pour Urnes : 10 au plus.');
+        $this->assertSame(2, Reclamation::count());
+        // Le total exact passe ; une réclamation résolue ne compte plus.
+        $this->ouvrir($decharge, 10);
+        $this->service()->resoudre($premiere, 'article_retrouve', 'Retrouvées.');
+        $this->ouvrir($decharge, 10);
+        $this->refus(fn () => $this->ouvrir($decharge, 51), 'Réclamations en cours supérieures à la quantité de la ligne pour Urnes : 50 au plus.');
+    }
+
+    public function test_actualiser_ne_vide_jamais_un_brouillon_de_remplacement(): void
+    {
+        $decharge = $this->partie(80);
+        $this->service()->resoudre($this->ouvrir($decharge, 10), 'remplacement_autorise', 'Remplacement.', 10);
+        $brouillon = Decharge::where('nature', 'remplacement')->sole();
+        // L'article sort de la catégorie du brouillon : l'état de la catégorie ne le contient plus.
+        Materiel::whereKey($this->urnes->id)->update(['categorie' => 'imprime']);
+
+        app(DechargeService::class)->actualiser($brouillon);
+
+        $this->assertSame([[$this->urnes->id, 10]], $brouillon->refresh()->lignes->map(fn ($l) => [$l->materiel_id, $l->quantite])->all());
     }
 
     public function test_service_sans_auteur_refuse(): void

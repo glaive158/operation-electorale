@@ -76,6 +76,13 @@ class ReclamationService
             if ($quantite > $ligne->quantite) {
                 throw new InvalidArgumentException("La quantité réclamée ne peut pas dépasser celle de la décharge ({$ligne->quantite}).");
             }
+            // Un double envoi ou des réclamations successives ne dépassent pas, ensemble, la quantité de la ligne.
+            $enCours = (int) Reclamation::where('decharge_id', $actuelle->id)->where('materiel_id', $materiel->id)
+                ->whereIn('statut', ['ouverte', 'en_traitement'])->sum('quantite');
+            if ($enCours + $quantite > $ligne->quantite) {
+                $possible = max(0, (int) $ligne->quantite - $enCours);
+                throw new RegleLogistique("Réclamations en cours supérieures à la quantité de la ligne pour {$materiel->libelle} : {$possible} au plus.");
+            }
 
             $reclamation = new Reclamation([
                 'decharge_id' => $actuelle->id, 'materiel_id' => $materiel->id, 'motif' => $motif,

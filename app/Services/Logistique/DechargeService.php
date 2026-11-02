@@ -496,6 +496,10 @@ class DechargeService
             foreach ($existantes as $ligne) {
                 $entree = $etat->get($ligne->materiel_id);
                 if ($entree === null) {
+                    // L'unique ligne d'un remplacement autorisé reste à la quantité du besoin : le brouillon ne se vide pas.
+                    if ($estRemplacement && $actuelle->besoin_remplacement_id !== null) {
+                        continue;
+                    }
                     $retirees[] = ['materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite];
                     $ligne->delete();
 
