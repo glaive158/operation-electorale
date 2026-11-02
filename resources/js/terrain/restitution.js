@@ -20,6 +20,9 @@ import { creerSignature } from './signature.js';
 import { duCompte } from './vue.js';
 
 export const MESSAGE_LECTURE_SEULE = 'À déclarer depuis le compte du détenteur';
+
+/** Page web où le détenteur déclare depuis son compte (terrain.restitutions.index). */
+export const PAGE_WEB_RESTITUTIONS = '/terrain/restitutions';
 export const MESSAGE_ARBITRAGE = 'Arbitrage du responsable en attente';
 
 /** Plafond d'une quantité, celui de l'API (lignes.*.restitue). */
@@ -48,6 +51,10 @@ export const idPriseEnCharge = (restitutionId) => `prise-en-charge-${restitution
 /** Une réponse qui ne dit rien du fond (réseau, session, limite, serveur) : la prise en charge part par la file. */
 const A_REESSAYER = (status) => status === 0 || status === 401 || status === 408 || status === 409 || status === 429 || status >= 500;
 
+/** Restitution que cette tablette ne déclare pas : renvoi vers la page web du détenteur. */
+const lectureSeule = () => h('p', { class: 'text-sm text-slate-600' },
+    h('a', { href: PAGE_WEB_RESTITUTIONS, class: 'underline text-sky-700' }, MESSAGE_LECTURE_SEULE));
+
 async function restitutionsLocales(ctx) {
     return (await ctx.stockage.meta.lire('restitutions')) ?? [];
 }
@@ -64,6 +71,9 @@ export function etatRestitution(element, file, utilisateurId = null) {
     const aPreparer = element.statut === 'a_preparer';
     const prise = priseEnCharge?.statut === STATUTS.SYNCHRONISE || element.statut !== 'a_preparer';
     const retenueIci = RETENUES.includes(reponse);
+    // La déclaration de la tablette attend encore le réseau : la prise en charge se met en file derrière elle
+    // (file.js l'envoie après la déclaration) ; un refus du serveur la laisse « à vérifier ».
+    const declarationEnFile = declaration?.statut === STATUTS.EN_ATTENTE;
 
     return {
         declaration,
@@ -74,7 +84,7 @@ export function etatRestitution(element, file, utilisateurId = null) {
         arbitrage: element.arbitrage_en_attente === true,
         // Une déclaration attend l'arbitrage du responsable : le serveur refuserait la prise en charge.
         peutPrendreEnCharge: aPreparer && priseEnCharge === null && element.arbitrage_en_attente !== true
-            && (element.peut_prendre_en_charge === true || (element.peut_declarer_tablette === true && retenueIci)),
+            && (element.peut_prendre_en_charge === true || (element.peut_declarer_tablette === true && (retenueIci || declarationEnFile))),
     };
 }
 
@@ -97,7 +107,9 @@ export async function prendreEnCharge(ctx, element) {
 
         return { etat: STATUTS.EN_ATTENTE };
     };
-    if (ctx.etat.enLigne === false) return mettreEnFile();
+    // Sa propre déclaration encore en file : le serveur ne la connaît pas, la prise en charge part après elle.
+    const declarationEnFile = etatRestitution(element, await ctx.file.lister(), base.utilisateur_id).declaration?.statut === STATUTS.EN_ATTENTE;
+    if (ctx.etat.enLigne === false || declarationEnFile) return mettreEnFile();
 
     const reponse = await ctx.api.envoyer('POST', `/restitutions/${element.id}/prise-en-charge`);
     if (reponse.status >= 200 && reponse.status < 300) {
@@ -189,7 +201,7 @@ export async function ecranRestitutions(ctx) {
                 h('div', { class: 'flex flex-col items-end gap-1' }, badge(statut), etat.declaration?.bloc_preuve === null ? badgeIdentite() : null)),
             h('ul', { class: 'text-sm text-slate-700 list-disc pl-5' }, (element.lignes ?? []).map((l) => h('li', {}, `${l.libelle} : ${l.attendu} à rendre`))),
             ...details(etat).map((t) => h('p', { class: 'text-sm text-slate-600' }, t)),
-            etat.lectureSeule ? h('p', { class: 'text-sm text-slate-600' }, MESSAGE_LECTURE_SEULE) : null,
+            etat.lectureSeule ? lectureSeule() : null,
             etat.arbitrage && etat.prise === false ? h('p', { role: 'status', class: 'text-sm text-amber-700' }, `${MESSAGE_ARBITRAGE} : la prise en charge attend sa décision.`) : null,
             zone,
             actions.length ? h('div', { class: 'flex flex-wrap gap-2 justify-end' }, actions) : null);
@@ -246,7 +258,7 @@ export async function ecranRestitution(ctx, id) {
     if (element.peut_declarer_tablette !== true) {
         return carteSimple(
             h('h2', { class: 'font-semibold text-slate-800' }, element.detenteur?.nom ?? `Restitution n° ${element.id}`),
-            h('p', { class: 'text-sm text-slate-600' }, MESSAGE_LECTURE_SEULE));
+            lectureSeule());
     }
 
     const racine = h('div', { class: 'max-w-2xl mx-auto space-y-4' });
@@ -269,8 +281,8 @@ export async function ecranRestitution(ctx, id) {
     function etapeLignes() {
         const erreur = h('div', {});
         const champs = saisies.map((s) => ({
-            restitue: h('input', { type: 'number', inputmode: 'numeric', min: '0', step: '1', value: s.restitue, class: CHAMP, 'aria-label': `Rendu : ${s.libelle}` }),
-            observation: h('input', { type: 'text', maxlength: '500', value: s.observation, class: CHAMP, 'aria-label': `Observation : ${s.libelle}` }),
+            restitue: h('input', { type: 'number', id: `restitution-rendu-${s.materiel_id}`, inputmode: 'numeric', min: '0', step: '1', value: s.restitue, class: CHAMP, 'aria-label': `Rendu : ${s.libelle}` }),
+            observation: h('input', { type: 'text', id: `restitution-observation-${s.materiel_id}`, maxlength: '500', value: s.observation, class: CHAMP, 'aria-label': `Observation : ${s.libelle}` }),
         }));
         const continuer = () => {
             champs.forEach((c, i) => { saisies[i].restitue = c.restitue.value; saisies[i].observation = c.observation.value; });
@@ -297,8 +309,8 @@ export async function ecranRestitution(ctx, id) {
                 h('p', { class: 'text-xs text-slate-500' }, 'Pour chaque article, indiquez ce que le détenteur rend. Un retour supérieur à l\'attendu sera vérifié par le service logistique.'),
                 ...saisies.map((s, i) => h('div', { class: 'border-t border-slate-100 pt-3 space-y-2' },
                     h('p', { class: 'text-sm font-medium text-slate-800' }, `${s.libelle} `, h('span', { class: 'text-xs text-slate-500 font-normal' }, `(à rendre : ${s.attendu})`)),
-                    h('div', {}, h('label', { class: ETIQUETTE }, 'Rendu'), champs[i].restitue),
-                    h('div', {}, h('label', { class: ETIQUETTE }, 'Observation (facultative)'), champs[i].observation))),
+                    h('div', {}, h('label', { class: ETIQUETTE, for: `restitution-rendu-${s.materiel_id}` }, 'Rendu'), champs[i].restitue),
+                    h('div', {}, h('label', { class: ETIQUETTE, for: `restitution-observation-${s.materiel_id}` }, 'Observation (facultative)'), champs[i].observation))),
                 erreur,
                 h('div', { class: 'flex justify-between gap-2' }, lien('#/restitutions', 'Annuler'), h('button', { type: 'button', class: BOUTON, onclick: continuer }, 'Continuer'))));
     }
@@ -319,7 +331,7 @@ export async function ecranRestitution(ctx, id) {
         const image = () => h('img', { src: etat.photo.url, alt: 'Photo du matériel rendu', class: 'max-h-40 rounded-lg border border-slate-200' });
         const apercu = h('div', {}, etat.photo ? image() : null);
         const entreePhoto = h('input', {
-            type: 'file', accept: 'image/*', capture: 'environment', class: 'text-sm', 'aria-label': 'Photo du matériel rendu',
+            type: 'file', id: 'restitution-photo', accept: 'image/*', capture: 'environment', class: 'text-sm', 'aria-label': 'Photo du matériel rendu',
             onchange: async () => {
                 const fichier = entreePhoto.files?.[0];
                 if (!fichier) return;
@@ -340,8 +352,8 @@ export async function ecranRestitution(ctx, id) {
                     onchange: (e) => { etat.signataire = signataires.find((s) => String(s.user_id) === e.target.value) ?? etat.signataire; },
                 }, signataires.map((s) => h('option', { value: String(s.user_id), selected: s.user_id === etat.signataire?.user_id }, `${s.titre} : ${s.nom} (${s.qualite})`))))
             : null;
-        const champNom = signataires.length ? null : h('input', { type: 'text', maxlength: '150', value: saisieSignataire.nom, class: CHAMP, 'aria-label': 'Nom du signataire', oninput: (e) => { saisieSignataire.nom = e.target.value; } });
-        const champQualite = signataires.length ? null : h('input', { type: 'text', maxlength: '150', value: saisieSignataire.qualite, class: CHAMP, 'aria-label': 'Qualité du signataire', oninput: (e) => { saisieSignataire.qualite = e.target.value; } });
+        const champNom = signataires.length ? null : h('input', { type: 'text', id: 'restitution-signataire-nom', maxlength: '150', value: saisieSignataire.nom, class: CHAMP, 'aria-label': 'Nom du signataire', oninput: (e) => { saisieSignataire.nom = e.target.value; } });
+        const champQualite = signataires.length ? null : h('input', { type: 'text', id: 'restitution-signataire-qualite', maxlength: '150', value: saisieSignataire.qualite, class: CHAMP, 'aria-label': 'Qualité du signataire', oninput: (e) => { saisieSignataire.qualite = e.target.value; } });
         const bouton = signataires.length ? h('button', { type: 'button', class: BOUTON }, 'Valider la restitution') : null;
         const boutonRepli = h('button', { type: 'button', class: BOUTON_SECONDAIRE }, 'Signer sans code (identité non vérifiée)');
         const boutons = [bouton, boutonRepli].filter(Boolean);
@@ -387,13 +399,13 @@ export async function ecranRestitution(ctx, id) {
                     : h('div', { role: 'status', class: 'p-3 rounded-xl text-sm bg-amber-50 text-amber-800 border border-amber-200' }, 'Aucune autorité n\'est rattachée à ce détenteur : pas de code possible. Saisissez le nom et la qualité du signataire ; la restitution sera enregistrée sans vérification d\'identité.'),
                 selection,
                 signataires.length ? null : h('div', { class: 'grid grid-cols-1 sm:grid-cols-2 gap-3' },
-                    h('div', {}, h('label', { class: ETIQUETTE }, 'Nom du signataire'), champNom),
-                    h('div', {}, h('label', { class: ETIQUETTE }, 'Qualité du signataire'), champQualite)),
+                    h('div', {}, h('label', { class: ETIQUETTE, for: 'restitution-signataire-nom' }, 'Nom du signataire'), champNom),
+                    h('div', {}, h('label', { class: ETIQUETTE, for: 'restitution-signataire-qualite' }, 'Qualité du signataire'), champQualite)),
                 signataires.length ? h('div', {}, h('label', { class: ETIQUETTE, for: 'restitution-code' }, 'Code personnel (6 chiffres)'), code,
                     h('p', { class: 'text-xs text-slate-500 mt-1' }, 'Le code est chiffré à la validation puis effacé : il n\'est jamais conservé sur la tablette.')) : null,
                 h('div', {}, h('p', { class: ETIQUETTE }, 'Signature (au doigt)'), etat.canvas,
                     h('button', { type: 'button', class: `${BOUTON_SECONDAIRE} mt-2`, onclick: () => etat.signature.effacer() }, 'Effacer la signature')),
-                h('div', {}, h('label', { class: ETIQUETTE }, 'Photo du matériel rendu (facultative)'), entreePhoto, apercu),
+                h('div', {}, h('label', { class: ETIQUETTE, for: 'restitution-photo' }, 'Photo du matériel rendu (facultative)'), entreePhoto, apercu),
                 erreur,
                 h('div', { class: 'flex flex-wrap justify-between gap-2' },
                     h('button', { type: 'button', class: BOUTON_SECONDAIRE, onclick: () => { code.value = ''; etat.etape = 'lignes'; dessiner(); } }, 'Retour'),

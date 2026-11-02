@@ -212,6 +212,31 @@ test('restitution : lecture seule quand la tablette ne peut pas la declarer', as
     const liste = await ecranRestitutions(ctx);
     assert.match(texte(liste), /À déclarer depuis le compte du détenteur/);
     assert.equal(trouverTous(liste, (e) => e.tagName === 'A' && e.getAttribute('href') === '#/restitution/41' && e.textContent === 'Déclarer').length, 0);
+
+    // Le message mène à la page web où le détenteur déclare depuis son compte.
+    for (const racine of [ecran, liste]) {
+        assert.equal(parTexte(racine, 'a', MESSAGE_LECTURE_SEULE)?.getAttribute('href'), '/terrain/restitutions');
+    }
+});
+
+test('restitution : chaque etiquette designe son champ', async () => {
+    const ctx = await contexte({ restitutions: [elementRestitution({ autorite_attendue: {} })] });
+    const racine = await ecranRestitution(ctx, '41');
+    const designe = (texteEtiquette, aria) => {
+        const etiquettes = trouverTous(racine, (e) => e.tagName === 'LABEL' && e.textContent === texteEtiquette);
+        assert.ok(etiquettes.length > 0, texteEtiquette);
+        const ids = etiquettes.map((l) => l.getAttribute('for'));
+        assert.ok(ids.every(Boolean), `${texteEtiquette} : attribut for`);
+        assert.equal(new Set(ids).size, ids.length, `${texteEtiquette} : identifiants uniques`);
+        if (aria) assert.ok(ids.includes(parAria(racine, aria).getAttribute('id')), `${texteEtiquette} → ${aria}`);
+    };
+
+    designe('Rendu', 'Rendu : Urnes');
+    designe('Observation (facultative)', 'Observation : Isoloirs');
+    await passerALaSignature(racine);
+    designe('Nom du signataire', 'Nom du signataire');
+    designe('Qualité du signataire', 'Qualité du signataire');
+    designe('Photo du matériel rendu (facultative)', 'Photo du matériel rendu');
 });
 
 test('restitution : liste, declaration a faire puis refus du serveur affiche avec Renvoyer', async () => {
@@ -328,7 +353,7 @@ test('prise en charge : proposee des que la declaration de la tablette est reten
         signataire: { user_id: 7, nom: 'Awa BA', qualite: 'Sous-préfète' }, lignes: [{ materiel_id: 3, restitue: 90, observation: null }],
     });
     let etat = etatRestitution(elementRestitution(), await ctx.file.lister(), 3);
-    assert.equal(etat.peutPrendreEnCharge, false, 'pas avant l\'envoi de la déclaration');
+    assert.equal(etat.peutPrendreEnCharge, true, 'mise en file derrière la déclaration, avant son envoi');
 
     await ctx.file.marquer('cle-restitution-000002', { status: 201, corps: { declaration: { id: 8, statut: 'retenue', verification_identite: 'verifiee_code', anomalies: [] } } });
     etat = etatRestitution(elementRestitution(), await ctx.file.lister(), 3);
@@ -338,6 +363,34 @@ test('prise en charge : proposee des que la declaration de la tablette est reten
     // Une déclaration enregistrée « à vérifier » attend l'arbitrage : pas de prise en charge proposée.
     await ctx.stockage.file.put({ ...(await ctx.file.lister())[0], reponse: { declaration: { id: 8, statut: 'a_verifier' } } });
     assert.equal(etatRestitution(elementRestitution(), await ctx.file.lister(), 3).peutPrendreEnCharge, false);
+});
+
+test('prise en charge : mise en file derriere la declaration de la tablette encore en attente', async () => {
+    const ctx = await contexte();
+    await ctx.file.ajouter({
+        type: 'declaration_restitution', id: 'cle-restitution-000005', cle: 'cle-restitution-000005', restitution_id: 41,
+        horodatage_terminal: '2026-11-20T09:30:00+00:00', bloc_preuve: 'QkxPQw==', pieces: [], utilisateur_id: 3,
+        signataire: { user_id: 7, nom: 'Awa BA', qualite: 'Sous-préfète' }, lignes: [{ materiel_id: 3, restitue: 90, observation: null }],
+    });
+    assert.equal(etatRestitution(elementRestitution(), await ctx.file.lister(), 3).peutPrendreEnCharge, true);
+    // La déclaration d'un autre compte de la tablette ne compte pas.
+    assert.equal(etatRestitution(elementRestitution(), await ctx.file.lister(), 4).peutPrendreEnCharge, false);
+
+    // En ligne, rien ne part encore : le serveur n'a pas la déclaration. La prise en charge attend dans la file.
+    const liste = await ecranRestitutions(ctx);
+    await parTexte(liste, 'button', 'Prise en charge').click();
+    assert.equal(ctx.appelsApi.length, 0);
+    const elements = await ctx.file.lister();
+    const prise = elements.find((e) => e.type === 'prise_en_charge');
+    assert.deepEqual([prise.id, prise.statut, prise.utilisateur_id], [idPriseEnCharge(41), STATUTS.EN_ATTENTE, 3]);
+    assert.equal((await ctx.file.prochain()).type, 'declaration_restitution', 'la déclaration part la première');
+    assert.equal(parTexte(await ecranRestitutions(ctx), 'button', 'Prise en charge'), null, 'une seule prise en charge');
+
+    // Déclaration refusée par le serveur (à vérifier sur la tablette) : rien de nouveau n'est proposé.
+    const autre = await contexte();
+    await autre.file.ajouter({ ...elements.find((e) => e.type === 'declaration_restitution'), statut: undefined });
+    await autre.file.marquer('cle-restitution-000005', { status: 422, corps: { message: 'Refusée.' } });
+    assert.equal(etatRestitution(elementRestitution(), await autre.file.lister(), 3).peutPrendreEnCharge, false);
 });
 
 /* ───────────── File et synchronisation ───────────── */
