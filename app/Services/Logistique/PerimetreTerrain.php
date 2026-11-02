@@ -6,6 +6,7 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\User;
+use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 
@@ -92,8 +93,8 @@ class PerimetreTerrain
         return $this->decharges($utilisateur)->whereKey($decharge->id)->exists();
     }
 
-    /** Vrai pour le titulaire du destinataire comme pour un adjoint à qui il l'a délégué, maintenant. */
-    public function estAutoriteDe(User $utilisateur, Destinataire $destinataire): bool
+    /** Vrai pour le titulaire du destinataire comme pour un adjoint à qui il l'a délégué, à l'instant (maintenant par défaut). */
+    public function estAutoriteDe(User $utilisateur, Destinataire $destinataire, ?CarbonInterface $instant = null): bool
     {
         if ($this->estTitulaireDe($utilisateur, $destinataire)) {
             return true;
@@ -102,7 +103,7 @@ class PerimetreTerrain
         return (bool) $utilisateur->actif
             && in_array($utilisateur->role, CodeReceptionService::ROLES_AUTORITE, true)
             && Delegation::where('destinataire_id', $destinataire->id)->where('delegue_user_id', $utilisateur->id)
-                ->activesA(now())->exists();
+                ->activesA($instant ?? now())->exists();
     }
 
     /** Vrai pour le seul compte d'autorité du destinataire : un délégué n'est jamais titulaire. */

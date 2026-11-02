@@ -120,7 +120,11 @@ class DelegationService
         $x->refresh();
     }
 
-    /** La délégation de $u sur $d qui était en vigueur à cet instant (même si elle a été révoquée depuis). */
+    /**
+     * La délégation de $u sur $d qui était en vigueur à cet instant (même si elle a été révoquée depuis). Elle doit
+     * avoir été accordée par l'autorité actuelle du destinataire : sans historique des titulaires, celle-ci vaut
+     * aussi pour un instant passé.
+     */
     public function activeA(Destinataire $d, User $u, CarbonInterface $instant): ?Delegation
     {
         return Delegation::where('destinataire_id', $d->id)->where('delegue_user_id', $u->id)

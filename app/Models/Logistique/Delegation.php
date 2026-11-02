@@ -41,25 +41,26 @@ class Delegation extends Model
         ];
     }
 
-    /** Délégations en vigueur à l'instant : du <= instant < min(au, revoquee_le). */
+    /**
+     * Délégations en vigueur à l'instant : du <= instant < min(au, revoquee_le), et tant que l'autorité qui a
+     * délégué est toujours celle du destinataire. Une délégation ne survit pas à un changement de titulaire (ni à
+     * la perte de son compte d'autorité) ; aucun historique des titulaires n'existe, donc pour un instant passé
+     * aussi c'est l'autorité actuelle du destinataire qui est comparée.
+     */
     public function scopeActivesA(Builder $query, CarbonInterface $instant): Builder
     {
-        return $query->where('du', '<=', $instant)
-            ->where(fn (Builder $q) => $q->whereNull('au')->orWhere('au', '>', $instant))
-            ->where(fn (Builder $q) => $q->whereNull('revoquee_le')->orWhere('revoquee_le', '>', $instant));
+        return $query->where('delegations.du', '<=', $instant)
+            ->where(fn (Builder $q) => $q->whereNull('delegations.au')->orWhere('delegations.au', '>', $instant))
+            ->where(fn (Builder $q) => $q->whereNull('delegations.revoquee_le')->orWhere('delegations.revoquee_le', '>', $instant))
+            ->whereExists(fn ($q) => $q->from('destinataires')
+                ->whereColumn('destinataires.id', 'delegations.destinataire_id')
+                ->whereColumn('destinataires.autorite_user_id', 'delegations.autorite_user_id'));
     }
 
     /** Fin effective : la première des dates de fin et de révocation (null : sans fin). */
     public function fin(): ?CarbonInterface
     {
         return collect([$this->au, $this->revoquee_le])->filter()->sort()->first();
-    }
-
-    public function estActiveA(CarbonInterface $instant): bool
-    {
-        $fin = $this->fin();
-
-        return $this->du <= $instant && ($fin === null || $fin > $instant);
     }
 
     public function destinataire(): BelongsTo

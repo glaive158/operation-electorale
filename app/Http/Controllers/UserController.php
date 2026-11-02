@@ -17,6 +17,12 @@ class UserController extends Controller
         'mouvements_stock', 'reservations_stock', 'journal_logistique', 'commandes', 'receptions_fournisseur',
     ];
 
+    /** Autres colonnes qui désignent un compte dans les écritures logistiques (délégations, signataire des déclarations). */
+    private const REFERENCES_LOGISTIQUES = [
+        'declarations' => ['user_id', 'signataire_user_id'],
+        'delegations' => ['autorite_user_id', 'delegue_user_id', 'cree_par'],
+    ];
+
     public function index(Request $request)
     {
         $query = User::query();
@@ -141,6 +147,11 @@ class UserController extends Controller
         $liaisonLogistique = 'Utilisateur lié à des opérations logistiques : désactivez le compte au lieu de le supprimer.';
         foreach (self::TABLES_LOGISTIQUES as $table) {
             if (DB::table($table)->where('user_id', $user->id)->exists()) {
+                return back()->with('error', $liaisonLogistique);
+            }
+        }
+        foreach (self::REFERENCES_LOGISTIQUES as $table => $colonnes) {
+            if (DB::table($table)->where(fn ($q) => collect($colonnes)->each(fn ($c) => $q->orWhere($c, $user->id)))->exists()) {
                 return back()->with('error', $liaisonLogistique);
             }
         }

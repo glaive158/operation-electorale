@@ -583,4 +583,135 @@ class DelegationTest extends TestCase
         $this->post(route('terrain.delegations.revoquer', $delegation), ['motif' => 'Encore'])->assertSessionHas('error');
         $this->post(route('terrain.delegations.revoquer', $delegation), [])->assertSessionHasErrors('motif');
     }
+
+    public function test_delegation_liee_a_l_autorite_en_titre(): void
+    {
+        $ancien = $this->autoriteFictive($this->prefecture);
+        $adjoint = $this->adjoint();
+        $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
+        $remise = $this->livraison($decharge);
+        $delegation = $this->deleguer($ancien, $this->prefecture, $adjoint);
+        $perimetre = app(PerimetreTerrain::class);
+        $service = app(DelegationService::class);
+        $this->assertTrue($perimetre->estAutoriteDe($adjoint, $this->prefecture));
+
+        foreach ([$this->adjoint('prefet')->id, null] as $nouveau) {
+            // Le titulaire change (ou le destinataire perd son compte d'autorité) : la délégation ne suit pas.
+            $this->prefecture->forceFill(['autorite_user_id' => $nouveau])->save();
+
+            $this->assertSame([], $perimetre->destinataireIds($adjoint->fresh())->all());
+            $this->assertSame([], $perimetre->portee($adjoint->fresh())['delegues']->all());
+            $this->assertFalse($perimetre->estAutoriteDe($adjoint->fresh(), $this->prefecture->fresh()));
+            $this->assertFalse($perimetre->peutVoir($adjoint->fresh(), $decharge));
+            $this->assertNull($service->activeA($this->prefecture, $adjoint, now()));
+            $this->assertSame([], app(AffectationsTerrain::class)->pour($adjoint->fresh()));
+            try {
+                $this->declarer($adjoint->fresh(), $remise);
+                $this->fail('Déclaration acceptée après le changement de titulaire.');
+            } catch (RegleLogistique $e) {
+                $this->assertSame('Déclaration hors de votre périmètre.', $e->getMessage());
+            }
+        }
+
+        // Le nouveau titulaire ne voit pas l'ancienne délégation parmi les délégués de l'autorité attendue.
+        $nouveauTitulaire = $this->adjoint('prefet');
+        $this->prefecture->forceFill(['autorite_user_id' => $nouveauTitulaire->id])->save();
+        $elements = app(AffectationsTerrain::class)->pour($nouveauTitulaire);
+        $this->assertSame([], $elements[0]['autorite_attendue']['delegues']);
+
+        // Si l'ancien titulaire revient, la délégation (jamais révoquée) reprend effet.
+        $this->prefecture->forceFill(['autorite_user_id' => $ancien->id])->save();
+        $this->assertTrue($perimetre->estAutoriteDe($adjoint->fresh(), $this->prefecture->fresh()));
+        $this->assertNull($delegation->refresh()->revoquee_le);
+    }
+
+    public function test_delegue_d_un_destinataire_n_a_aucun_acces_a_un_autre(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $sousPrefet = $this->autoriteFictive($this->sousPrefecture1);
+        $adjoint = $this->adjoint('chef_poste');
+        $deSousPrefecture = $this->deposerChargee($this->sousPrefecture1, [$this->urnes->id => 100]);
+        $dePrefecture = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
+        $this->deleguer($sousPrefet, $this->sousPrefecture1, $adjoint);
+        $perimetre = app(PerimetreTerrain::class);
+
+        $this->assertSame([$this->sousPrefecture1->id], $perimetre->destinataireIds($adjoint)->all());
+        $this->assertTrue($perimetre->peutVoir($adjoint, $deSousPrefecture));
+        $this->assertFalse($perimetre->peutVoir($adjoint, $dePrefecture));
+        $this->assertFalse($perimetre->estAutoriteDe($adjoint, $this->prefecture));
+        $this->assertFalse($perimetre->estAutoriteDe($adjoint, $this->sousPrefecture2));
+
+        try {
+            $this->declarer($adjoint, $this->livraison($dePrefecture));
+            $this->fail('Déclaration acceptée sur un autre destinataire.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Déclaration hors de votre périmètre.', $e->getMessage());
+        }
+        $this->assertSame($prefet->id, $this->prefecture->refresh()->autorite_user_id);
+    }
+
+    public function test_delegation_exactement_a_son_terme_ne_donne_plus_rien(): void
+    {
+        $t0 = Carbon::parse('2026-11-10 08:00:00');
+        Carbon::setTestNow($t0);
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $adjoint = $this->adjoint();
+        $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
+        $remise = $this->livraison($decharge);
+        $au = $t0->copy()->addHour();
+        $this->deleguer($prefet, $this->prefecture, $adjoint, $t0, $au);
+        $perimetre = app(PerimetreTerrain::class);
+
+        Carbon::setTestNow($au->copy()->subSecond());
+        $this->assertTrue($perimetre->estAutoriteDe($adjoint, $this->prefecture));
+
+        // À l'instant de la fin, tout est refusé : périmètre, droit de signer et déclaration.
+        Carbon::setTestNow($au);
+        $this->assertSame([], $perimetre->destinataireIds($adjoint)->all());
+        $this->assertFalse($perimetre->estAutoriteDe($adjoint, $this->prefecture));
+        $this->assertFalse($perimetre->peutVoir($adjoint, $decharge));
+        try {
+            $this->declarer($adjoint, $remise);
+            $this->fail('Déclaration acceptée à l\'instant de la fin.');
+        } catch (RegleLogistique $e) {
+            $this->assertSame('Déclaration hors de votre périmètre.', $e->getMessage());
+        }
+        $this->assertSame(0, Declaration::count());
+    }
+
+    public function test_debut_de_delegation_borne_de_cinq_minutes(): void
+    {
+        $t0 = Carbon::parse('2026-11-10 08:00:00');
+        Carbon::setTestNow($t0);
+        $prefet = $this->autoriteFictive($this->prefecture);
+
+        $acceptee = $this->deleguer($prefet, $this->prefecture, $this->adjoint(), $t0->copy()->subMinutes(5));
+        $this->assertTrue($acceptee->du->equalTo($t0->copy()->subMinutes(5)));
+
+        try {
+            $this->deleguer($prefet, $this->prefecture, $this->adjoint('chef_poste'), $t0->copy()->subMinutes(5)->subSecond());
+            $this->fail('Début trop ancien accepté.');
+        } catch (RegleLogistique $e) {
+            $this->assertStringStartsWith('Cette délégation ne peut pas commencer dans le passé', $e->getMessage());
+        }
+        $this->assertSame(1, Delegation::count());
+    }
+
+    public function test_compte_lie_a_une_delegation_ou_a_une_signature_ne_se_supprime_pas(): void
+    {
+        $prefet = $this->autoriteFictive($this->prefecture);
+        $adjoint = $this->adjoint();
+        $libre = $this->adjoint('chef_poste');
+        $admin = User::factory()->create(['role' => 'admin']);
+        $decharge = $this->deposerChargee($this->prefecture, [$this->urnes->id => 20]);
+        $this->deleguer($prefet, $this->prefecture, $adjoint);
+        $this->declarer($adjoint, $this->livraison($decharge));
+
+        $this->actingAs($admin);
+        foreach ([$adjoint, $prefet] as $lie) {
+            $this->delete(route('users.destroy', $lie))->assertSessionHas('error');
+            $this->assertDatabaseHas('users', ['id' => $lie->id]);
+        }
+        $this->delete(route('users.destroy', $libre))->assertSessionHas('success');
+    }
 }

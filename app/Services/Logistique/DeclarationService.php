@@ -217,11 +217,16 @@ class DeclarationService
 
         if ($mode === 'compte') {
             $destinataire = $remise->a_type === 'destinataire' && $remise->a_id !== null ? Destinataire::find($remise->a_id) : null;
-            if ($destinataire === null || ! $this->perimetre->estAutoriteDe($auteur, $destinataire)) {
+            // Un seul instant pour les deux contrôles : une délégation qui prend fin entre les deux ne passe pas.
+            $maintenant = now();
+            if ($destinataire === null || ! $this->perimetre->estAutoriteDe($auteur, $destinataire, $maintenant)) {
                 throw new RegleLogistique(self::HORS_PERIMETRE);
             }
 
-            $delegation = $this->perimetre->estTitulaireDe($auteur, $destinataire) ? null : $this->delegations->activeA($destinataire, $auteur, now());
+            $delegation = $this->perimetre->estTitulaireDe($auteur, $destinataire) ? null : $this->delegations->activeA($destinataire, $auteur, $maintenant);
+            if ($delegation === null && ! $this->perimetre->estTitulaireDe($auteur, $destinataire)) {
+                throw new RegleLogistique(self::HORS_PERIMETRE);
+            }
 
             return ['anomalies' => [], 'delegation' => $delegation];
         }
