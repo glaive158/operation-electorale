@@ -30,11 +30,35 @@ class Declaration extends Model
         'remplacee' => 'Remplacée',
     ];
 
+    /**
+     * Vérification de l'identité du signataire (le code personnel de réception, ou la connexion au compte) :
+     * libellés affichés par tous les écrans.
+     */
+    public const VERIFICATIONS = [
+        'en_attente' => 'Vérification en attente',
+        'verifiee_code' => 'Vérifiée par code',
+        'verifiee_appareil' => 'Vérifiée par l\'appareil',
+        'non_verifiee' => 'Non vérifiée',
+        'a_verifier' => 'Identité à vérifier',
+        'echec' => 'Échec du code',
+        'compte' => 'Confirmée depuis le compte',
+    ];
+
+    /** Les seules vérifications qui établissent l'identité du signataire. */
+    public const VERIFICATIONS_ETABLIES = ['verifiee_code', 'verifiee_appareil', 'compte'];
+
+    public const CONTESTATIONS = [
+        'aucune' => 'Aucune',
+        'contestee' => 'Contestée',
+        'levee' => 'Contestation levée',
+    ];
+
     public const ANOMALIES = [
         'excedent' => 'Quantité reçue supérieure à la remise',
         'version_annulee' => 'Décharge annulée depuis',
         'affectation_retiree' => 'Agent n\'étant plus affecté',
         'divergence' => 'Divergence avec l\'autre déclaration',
+        'identite' => 'Identité du signataire non établie',
     ];
 
     // Le statut et les anomalies ne sont pas assignables en masse.
@@ -53,6 +77,9 @@ class Declaration extends Model
             'remise_id' => 'integer',
             'user_id' => 'integer',
             'decharge_id' => 'integer',
+            'signataire_user_id' => 'integer',
+            'delegation_id' => 'integer',
+            'gps_precision' => 'integer',
             'horodatage_terminal' => 'datetime',
             'anomalies' => 'array',
         ];
@@ -76,6 +103,35 @@ class Declaration extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function pieces(): HasMany
+    {
+        return $this->hasMany(DeclarationPiece::class)->orderBy('id');
+    }
+
+    /** Le compte qui a signé : l'autorité destinataire ou son délégué. */
+    public function signataireUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'signataire_user_id');
+    }
+
+    /** La délégation au titre de laquelle un délégué a signé (null pour l'autorité elle-même). */
+    public function delegation(): BelongsTo
+    {
+        return $this->belongsTo(Delegation::class);
+    }
+
+    /** Libellé de la vérification d'identité ; une déclaration sans valeur (ancienne) est « Non vérifiée ». */
+    public function libelleVerification(): string
+    {
+        return self::VERIFICATIONS[$this->verification_identite ?? 'non_verifiee'] ?? self::VERIFICATIONS['non_verifiee'];
+    }
+
+    /** Vrai seulement si l'identité du signataire est établie (code, appareil ou connexion au compte). */
+    public function identiteEtablie(): bool
+    {
+        return in_array($this->verification_identite, self::VERIFICATIONS_ETABLIES, true);
     }
 
     /** Vrai tant que la déclaration compte dans le rapprochement (ni écartée ni remplacée). */

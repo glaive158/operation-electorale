@@ -10,6 +10,7 @@ use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\ReserveAppareil;
 use App\Models\User;
 use App\Services\Logistique\CircuitService;
 use App\Services\Logistique\DechargePdfService;
@@ -88,7 +89,8 @@ class DechargeController extends Controller
         $etat = $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie);
 
         $remises = Remise::where('decharge_id', $decharge->id)
-            ->with(['lignes.materiel', 'declarations.lignes.materiel'])->orderBy('id')->get();
+            ->with(['lignes.materiel', 'declarations.lignes.materiel', 'declarations.signataireUser', 'declarations.delegation.autorite', 'declarations.pieces'])
+            ->orderBy('id')->get();
         $affectable = $decharge->statut_document === 'validee' && ! $decharge->estPartie();
 
         return view('logistique.decharges.show', [
@@ -97,6 +99,9 @@ class DechargeController extends Controller
             'etat' => $etat,
             'remises' => $remises,
             'parties' => $this->libelles->pour($remises),
+            // Réserve hors ligne de la tablette de la préfecture sur cette décharge (libérable par le responsable).
+            'reserves' => ReserveAppareil::where('decharge_id', $decharge->id)->where('statut', 'active')
+                ->with(['appareil', 'materiel'])->orderBy('appareil_id')->orderBy('materiel_id')->get(),
             'agents' => $affectable
                 ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
                 : collect(),

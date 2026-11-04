@@ -10,6 +10,7 @@ use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Materiel;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\RemiseLigne;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
@@ -27,10 +28,13 @@ class ArbitrageService
 {
     private const MAX_TEXTE = 500;
 
+    private const RECEPTION_UTILISEE = 'Réception utilisée en aval : annulez la redistribution, libérez la réserve (ou traitez l\'exemplaire ou le remplacement) avant d\'arbitrer.';
+
     public function __construct(
         private readonly DeclarationService $declarations,
         private readonly EngagementService $engagement,
         private readonly IndicateurService $indicateurs,
+        private readonly RemiseService $remises,
     ) {}
 
     public function retenir(Declaration $declaration, string $motif): void
@@ -41,6 +45,132 @@ class ArbitrageService
     public function rejeter(Declaration $declaration, string $motif): void
     {
         $this->arbitrer($declaration, $motif, false);
+    }
+
+    /**
+     * Le responsable lève la contestation d'un signataire (vérification faite auprès de lui). La déclaration
+     * garde son statut : elle reste à arbitrer par retenir() ou rejeter() si elle l'attendait.
+     */
+    public function leverContestation(Declaration $declaration, string $motif): void
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Levée de contestation sans auteur.');
+        }
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut lever une contestation.');
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        $cycleId = Decharge::whereKey($declaration->decharge_id)->value('cycle_id');
+        if ($cycleId === null) {
+            throw new LogicException('Déclaration sans décharge : invariant rompu.');
+        }
+
+        DB::transaction(function () use ($declaration, $motif, $cycleId) {
+            // Pas de refus de cycle clos : aucun stock n'est touché.
+            if (Cycle::whereKey($cycleId)->lockForUpdate()->first() === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
+            }
+            Decharge::whereKey($declaration->decharge_id)->lockForUpdate()->firstOrFail();
+            Remise::whereKey($declaration->remise_id)->lockForUpdate()->firstOrFail();
+            $actuelle = Declaration::whereKey($declaration->id)->lockForUpdate()->firstOrFail();
+
+            if ($actuelle->contestation !== 'contestee') {
+                throw new RegleLogistique('Aucune contestation à lever pour cette réception.');
+            }
+
+            $actuelle->forceFill(['contestation' => 'levee'])->save();
+            Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
+                'contestation' => 'levee', 'statut' => $actuelle->statut, 'remise_id' => $actuelle->remise_id,
+            ], $motif);
+        }, attempts: 3);
+
+        $declaration->refresh();
+    }
+
+    /**
+     * Le responsable tranche une redistribution conservée « à arbitrer » (envoyée par un appareil au-delà de sa
+     * réserve, ou par un appareil non désigné ou révoqué) : aucune quantité n'en compte avant sa décision.
+     *
+     * - `valider` : la remise passe en attente (le sous-préfet peut la déclarer) et ses quantités comptent comme
+     *   transférées ; le plafond est relu sur le mobilisable de ce moment, et la validation est refusée s'il ne
+     *   suffit plus (ou si le cycle est clos).
+     * - `rejeter` : la remise est annulée avec le motif ; rien n'a été compté.
+     */
+    public function arbitrerRemise(Remise $remise, string $decision, string $motif): void
+    {
+        if (auth()->id() === null) {
+            throw new LogicException('Arbitrage sans auteur.');
+        }
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut arbitrer une remise.');
+        }
+        if (! in_array($decision, ['valider', 'rejeter'], true)) {
+            throw new InvalidArgumentException('La décision doit être « valider » ou « rejeter ».');
+        }
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        $cycleId = Decharge::whereKey($remise->decharge_id)->value('cycle_id');
+        if ($cycleId === null) {
+            throw new LogicException('Remise sans décharge : invariant rompu.');
+        }
+
+        DB::transaction(function () use ($remise, $decision, $motif, $cycleId) {
+            $cycle = Cycle::whereKey($cycleId)->lockForUpdate()->first();
+            if ($cycle === null) {
+                throw new LogicException('Cycle introuvable : invariant rompu.');
+            }
+            $decharge = Decharge::whereKey($remise->decharge_id)->lockForUpdate()->firstOrFail();
+            // La livraison précède toujours ses redistributions : verrouillée avant elles, dans l'ordre des identifiants.
+            $livraison = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')
+                ->where('statut', '!=', 'annulee')->orderBy('id')->lockForUpdate()->first();
+            $actuelle = Remise::whereKey($remise->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->etape !== 'redistribution' || $actuelle->statut !== 'a_arbitrer') {
+                throw new RegleLogistique('Rien à arbitrer pour cette remise.');
+            }
+
+            if ($decision === 'valider') {
+                // Mêmes conditions qu'une redistribution en ligne, relues maintenant.
+                if (! $cycle->estOuvert()) {
+                    throw new RegleLogistique('Cycle clôturé : validation impossible.');
+                }
+                if ($decharge->statut_document !== 'validee') {
+                    throw new RegleLogistique('Seule une décharge validée peut être redistribuée.');
+                }
+                if ($livraison?->statut === 'a_verifier') {
+                    throw new RegleLogistique('Réception du préfet à vérifier : validation impossible.');
+                }
+                if ($livraison === null || ! Declaration::where('remise_id', $livraison->id)->where('statut', 'retenue')->exists()) {
+                    throw new RegleLogistique("Le préfet n'a pas encore de réception retenue pour cette décharge.");
+                }
+
+                $solde = $this->remises->soldePrefet($decharge);
+                foreach (RemiseLigne::where('remise_id', $actuelle->id)->orderBy('materiel_id')->get() as $ligne) {
+                    $mobilisable = (int) ($solde->get($ligne->materiel_id)['mobilisable'] ?? 0);
+                    if ($ligne->quantite > $mobilisable) {
+                        $libelle = Materiel::find($ligne->materiel_id)?->libelle ?? "article {$ligne->materiel_id}";
+                        throw new RegleLogistique("Redistribution supérieure au mobilisable du préfet pour {$libelle} : mobilisable {$mobilisable}, demandé {$ligne->quantite}.");
+                    }
+                }
+
+                $actuelle->forceFill(['statut' => 'en_attente'])->save();
+            } else {
+                $actuelle->forceFill(['statut' => 'annulee', 'motif_annulation' => $motif])->save();
+            }
+
+            Journal::noter('remise', $actuelle->id, 'arbitrage_remise', ['statut' => 'a_arbitrer'], [
+                'statut' => $actuelle->statut, 'decision' => $decision, 'decharge_id' => $decharge->id,
+                'raison' => $actuelle->raison_arbitrage, 'appareil_declare' => $actuelle->appareil_declare,
+            ], $motif);
+        }, attempts: 3);
+
+        $remise->refresh();
     }
 
     /**
@@ -164,8 +294,25 @@ class ArbitrageService
             $actives = Declaration::where('remise_id', $remise->id)->orderBy('id')->lockForUpdate()->get();
             $actuelle = $actives->firstWhere('id', $declaration->id);
 
-            if ($actuelle === null || $remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true)) {
+            // Une retenue contestée, ou dont la réception sert en aval (redistribution, réserve de l'appareil,
+            // exemplaire, remplacement), est figée par le rapprochement : elle s'arbitre même si la remise est
+            // reçue (contestée, ou à vérifier à cause d'une autre déclaration), mais pas au détriment de ce qui en
+            // dépend.
+            $utilisee = app(AvisReceptionService::class)->receptionUtilisee($remise, $decharge);
+            $estFigee = fn (?Declaration $d) => $d !== null && $d->statut === 'retenue' && ($d->contestation === 'contestee' || $utilisee);
+            $figee = $estFigee($actuelle) && ($actuelle->contestation === 'contestee' || $remise->statut === 'a_verifier');
+            if ($actuelle === null || (! $figee && ($remise->statut !== 'a_verifier' || ! in_array($actuelle->statut, ['a_verifier', 'valide'], true)))) {
                 throw new RegleLogistique('Rien à arbitrer pour cette déclaration.');
+            }
+
+            // Écarter une retenue figée (la rejeter, ou en retenir une autre) défait la réception sur laquelle
+            // reposent la redistribution, la réserve, l'exemplaire de réception ou le remplacement : refusé tant
+            // qu'elle sert.
+            $ecarteraUneFigee = $retenir
+                ? $actives->contains(fn (Declaration $autre) => $autre->id !== $actuelle->id && $estFigee($autre))
+                : $figee;
+            if ($ecarteraUneFigee && $utilisee) {
+                throw new RegleLogistique(self::RECEPTION_UTILISEE);
             }
 
             $avant = $actuelle->statut;
@@ -178,10 +325,22 @@ class ArbitrageService
                     }
                 }
             }
-            $this->changerStatut($actuelle, $retenir ? 'retenue' : 'ecartee', $remise);
+            if ($figee && $retenir) {
+                // Confirmer la retenue figée : elle reste retenue et, si elle était contestée, la contestation est levée.
+                if ($actuelle->contestation === 'contestee') {
+                    $actuelle->forceFill(['contestation' => 'levee'])->save();
+                    Journal::noter('declaration', $actuelle->id, 'levee_contestation', ['contestation' => 'contestee'], [
+                        'contestation' => 'levee', 'statut' => 'retenue', 'remise_id' => $remise->id,
+                    ], $motif);
+                }
+            } else {
+                $this->changerStatut($actuelle, $retenir ? 'retenue' : 'ecartee', $remise);
+            }
 
             if ($retenir) {
-                $this->changerStatutRemise($remise, 'recue');
+                if ($remise->statut !== 'recue') {
+                    $this->changerStatutRemise($remise, 'recue');
+                }
             } else {
                 $restantes = Declaration::where('remise_id', $remise->id)->whereNotIn('statut', ['ecartee', 'remplacee'])->exists();
                 if ($restantes) {

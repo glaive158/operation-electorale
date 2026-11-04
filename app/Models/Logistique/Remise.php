@@ -25,6 +25,7 @@ class Remise extends Model
         'en_attente' => 'En attente',
         'recue' => 'Reçue',
         'a_verifier' => 'À vérifier',
+        'a_arbitrer' => 'À arbitrer',
         'annulee' => 'Annulée',
     ];
 
@@ -45,6 +46,8 @@ class Remise extends Model
             'de_id' => 'integer',
             'a_id' => 'integer',
             'preparee_par' => 'integer',
+            'appareil_id' => 'integer',
+            'horodatage_terminal' => 'datetime',
         ];
     }
 
@@ -56,6 +59,11 @@ class Remise extends Model
     public function decharge(): BelongsTo
     {
         return $this->belongsTo(Decharge::class);
+    }
+
+    public function appareil(): BelongsTo
+    {
+        return $this->belongsTo(Appareil::class);
     }
 
     public function preparePar(): BelongsTo

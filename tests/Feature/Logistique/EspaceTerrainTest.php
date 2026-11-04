@@ -462,7 +462,10 @@ class EspaceTerrainTest extends TestCase
 
         $this->assertEqualsCanonicalizing([
             'terrain.decharges.index', 'terrain.decharges.show', 'terrain.suivi',
-            'terrain.declarations.store', 'terrain.redistributions.store', 'terrain.redistributions.annuler', 'terrain.reclamations.store',
+            'terrain.declarations.store', 'terrain.declarations.contestation', 'terrain.redistributions.store', 'terrain.redistributions.annuler', 'terrain.reclamations.store',
+            'terrain.code.edit', 'terrain.code.update',
+            'terrain.delegations.index', 'terrain.delegations.store', 'terrain.delegations.revoquer',
+            'terrain.pieces.show', 'terrain.app',
         ], $routes->keys()->all());
 
         foreach ($routes as $nom => $route) {
@@ -476,6 +479,12 @@ class EspaceTerrainTest extends TestCase
             };
             if ($attendu !== null) {
                 $this->assertContains($attendu, $middleware, $nom);
+            }
+            // Tout l'espace terrain mène d'abord au choix du code, sauf les pages du code, le suivi et la page d'une décharge.
+            if (in_array($nom, ['terrain.suivi', 'terrain.decharges.show'], true) || str_starts_with($nom, 'terrain.code.')) {
+                $this->assertNotContains('premier-acces', $middleware, $nom);
+            } else {
+                $this->assertContains('premier-acces', $middleware, $nom);
             }
             $this->assertNotContains('can:logistique-suivi-terrain', array_diff($middleware, $nom === 'terrain.suivi' ? ['can:logistique-suivi-terrain'] : []), "{$nom} : ouvert au gouverneur.");
         }

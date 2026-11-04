@@ -293,7 +293,7 @@ class DechargePdfService
         }
 
         $enCours = Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
-            ->whereIn('statut', ['en_attente', 'a_verifier'])->exists();
+            ->whereIn('statut', ['en_attente', 'a_verifier', 'a_arbitrer'])->exists();
         if ($enCours) {
             return false;
         }

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Terrain">
+  <rect width="512" height="512" rx="96" fill="#009A44"/>
+  <path d="M256 96 118 150v100c0 86 58 147 138 168 80-21 138-82 138-168V150L256 96Z" fill="#ffffff"/>
+  <path d="m198 258 42 42 78-86" fill="none" stroke="#009A44" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

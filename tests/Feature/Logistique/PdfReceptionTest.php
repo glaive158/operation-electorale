@@ -199,14 +199,25 @@ class PdfReceptionTest extends TestCase
         $this->assertSame(hash('sha256', $octets), $premier->empreinte);
         $this->assertSame(strlen($octets), $premier->taille);
 
-        // Une réception arbitrée plus tard n'altère pas l'exemplaire déjà émis : le fichier archivé fait foi.
+        // P5-R65 : une réception dont l'exemplaire est émis est figée. Une déclaration divergente ultérieure passe à
+        // vérifier seule, et la retenir (ce qui défairait la première) est refusé : l'exemplaire archivé fait foi.
         $avant = DonneesDecharge::reception($decharge);
         $remise = Remise::where('decharge_id', $decharge->id)->where('etape', 'livraison')->sole();
+        $retenue = $remise->declarations()->where('statut', 'retenue')->sole();
         $this->declarerTablette($decharge, $remise, 60);
         $this->assertSame('a_verifier', $remise->refresh()->statut);
+        $this->assertSame('retenue', $retenue->fresh()->statut);
         $tablette = $remise->declarations()->where('mode', 'tablette')->sole();
-        app(ArbitrageService::class)->retenir($tablette, 'Constat de l\'agent.');
-        $this->assertNotEquals($avant, DonneesDecharge::reception($decharge->refresh()), 'Les données vivantes de la réception ont bien changé.');
+        $this->assertSame('a_verifier', $tablette->statut);
+        try {
+            app(ArbitrageService::class)->retenir($tablette, 'Constat de l\'agent.');
+            $this->fail('Réception figée défaite par un arbitrage.');
+        } catch (RegleLogistique $e) {
+            $this->assertStringStartsWith('Réception utilisée en aval', $e->getMessage());
+        }
+        $apres = DonneesDecharge::reception($decharge->refresh());
+        $this->assertEquals($avant['lignes'], $apres['lignes']);
+        $this->assertEquals($avant['declarations'], $apres['declarations']);
 
         $second = $this->pdf()->emettre($decharge->refresh(), 'reception');
 
@@ -287,7 +298,8 @@ class PdfReceptionTest extends TestCase
         try {
             app(DeclarationService::class)->declarer(
                 $remise->load('lignes'), 'tablette', ['nom' => 'Agent', 'qualite' => 'Transport'],
-                [$this->urnes->id => ['recu' => $recu, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(),
+                [$this->urnes->id => ['recu' => $recu, 'defectueux' => 0, 'observation' => null]], (string) Str::uuid(), null,
+                ['verification' => 'verifiee_code', 'bloc_empreinte' => null, 'signataire_user_id' => null, 'delegation_id' => null],
             );
         } finally {
             $this->actingAs($auteur);

@@ -272,7 +272,7 @@ class IndicateurService
 
     /**
      * Reliquat chez le préfet, par destinataire final : pour chaque décharge livrée à un autre destinataire que le
-     * sien, reçu utilisable retenu à la livraison moins ce qui est redistribué (remises non annulées), jamais
+     * sien, reçu utilisable retenu à la livraison moins ce qui est redistribué (remises ni annulées ni à arbitrer), jamais
      * négatif. Même règle que RemiseService::soldePrefet, pour toutes les décharges à la fois. « detenu » compte aussi
      * les défectueux déclarés au préfet (physiquement chez lui, donc pas en transit) ; « utilisable » seul est exposé
      * comme chez_intermediaire.
@@ -302,7 +302,7 @@ class IndicateurService
             ->where('decharges.cycle_id', $cycle->id)
             ->when($ids !== null, fn ($q) => $q->whereIn('decharges.destinataire_id', $ids))
             ->where('remises.etape', 'redistribution')
-            ->where('remises.statut', '!=', 'annulee')
+            ->whereNotIn('remises.statut', ['annulee', 'a_arbitrer'])
             ->groupBy('decharges.id', 'remise_lignes.materiel_id')
             ->selectRaw('decharges.id as decharge_id, remise_lignes.materiel_id as materiel_id, SUM(remise_lignes.quantite) as transfere')
             ->get()

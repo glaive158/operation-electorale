@@ -5,10 +5,11 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 
 class User extends Authenticatable
 {
-    use HasFactory, Notifiable;
+    use HasApiTokens, HasFactory, Notifiable;
 
     protected $fillable = [
         'name','prenom','email','password',
@@ -19,7 +20,7 @@ class User extends Authenticatable
         'commune_id','commune_nom',
     ];
 
-    protected $hidden = ['password','remember_token'];
+    protected $hidden = ['password','remember_token','code_reception_hash'];
 
     protected function casts(): array
     {
@@ -27,6 +28,8 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password'          => 'hashed',
             'actif'             => 'boolean',
+            'doit_choisir_code' => 'boolean',
+            'code_verrouille_le' => 'datetime',
         ];
     }
 

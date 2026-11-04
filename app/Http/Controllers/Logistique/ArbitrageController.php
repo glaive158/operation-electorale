@@ -15,7 +15,7 @@ use Illuminate\Http\Request;
 use InvalidArgumentException;
 use Throwable;
 
-/** Arbitrage des déclarations à vérifier et clôture d'un écart, réservés au responsable logistique. */
+/** Arbitrage des déclarations à vérifier, levée des contestations et clôture d'un écart, réservés au responsable logistique. */
 class ArbitrageController extends Controller
 {
     use ExecuteAction;
@@ -37,6 +37,18 @@ class ArbitrageController extends Controller
         $motif = $request->validate(['motif' => 'required|string|max:500'])['motif'];
 
         return $this->arbitrer(fn () => $this->arbitrages->rejeter($declaration, $motif), $declaration, 'Déclaration rejetée.');
+    }
+
+    /** Lève la contestation d'un signataire, une fois la vérification faite auprès de lui. */
+    public function leverContestation(Request $request, Declaration $declaration)
+    {
+        $motif = $request->validate(['motif' => 'required|string|max:500'])['motif'];
+
+        return $this->executerVers(
+            fn () => $this->arbitrages->leverContestation($declaration, $motif),
+            fn () => route('logistique.decharges.show', $declaration->decharge_id),
+            'Contestation levée.',
+        );
     }
 
     public function cloturer(Request $request, Cycle $cycle)

@@ -8,6 +8,7 @@
     $classesDocument = ['brouillon' => 'bg-amber-100 text-amber-700', 'validee' => 'bg-green-100 text-green-700', 'annulee' => 'bg-red-100 text-red-700'];
     $libellesCircuit = ['via_prefet' => 'Via le préfet', 'direct' => 'Direct', 'etranger' => 'Étranger'];
     $n = fn ($v) => number_format((int) $v, 0, ',', ' ');
+    $peutAdministrer = \Illuminate\Support\Facades\Gate::allows('logistique-administrer');
 
     $brouillon = $decharge->estBrouillon();
     $annulee = $decharge->statut_document === 'annulee';
@@ -208,12 +209,35 @@
                             @foreach($declaration->lignes as $l)
                                 {{ $l->materiel?->libelle }} reçu {{ $n($l->recu) }}, défectueux {{ $n($l->defectueux) }}{{ $loop->last ? '' : ' ;' }}
                             @endforeach
+                            @include('logistique.declarations._preuve', ['declaration' => $declaration, 'routePiece' => 'logistique.pieces.show', 'piecesVisibles' => null, 'peutLever' => $peutAdministrer])
                         </div>
                     @endforeach
                 </div>
             @endforeach
             @if($decharge->statut_acheminement === 'a_verifier')
                 <p class="text-sm text-amber-700">Une réception est à vérifier : <a href="{{ route('logistique.declarations.a-verifier', $cycle) }}" class="underline">ouvrir l'écran des vérifications</a>.</p>
+            @endif
+        </div>
+    @endif
+
+    @if($reserves->isNotEmpty())
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-3">
+            <h3 class="font-semibold text-slate-800">Réserve de la tablette de la préfecture</h3>
+            <p class="text-xs text-slate-500">Part du solde du préfet réservée à l'appareil désigné pour redistribuer hors ligne : elle n'est pas mobilisable en ligne tant qu'elle n'est pas consommée ou libérée.</p>
+            @foreach($reserves->groupBy('appareil_id') as $lignesAppareil)
+                <p class="text-sm text-slate-600">
+                    <span class="font-medium text-slate-800">{{ $lignesAppareil->first()->appareil?->nom ?? 'Tablette' }}</span> :
+                    @foreach($lignesAppareil as $l) {{ $l->materiel?->libelle }} {{ $n($l->quantite) }}{{ $loop->last ? '' : ' ;' }} @endforeach
+                </p>
+            @endforeach
+            @if($peutAdministrer)
+                <form method="POST" action="{{ route('logistique.decharges.reserve.liberer', $decharge) }}" class="flex flex-wrap gap-3 items-center"
+                      onsubmit="return confirm('Libérer la réserve de la tablette ? La quantité redevient mobilisable par le préfet ; la tablette ne pourra plus redistribuer hors ligne sur cette décharge.');">
+                    @csrf
+                    <input type="text" name="motif" required maxlength="500" placeholder="Motif de la libération" aria-label="Motif de la libération"
+                           class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none w-full md:w-96">
+                    <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 text-slate-700 hover:bg-slate-50">Libérer la réserve</button>
+                </form>
             @endif
         </div>
     @endif

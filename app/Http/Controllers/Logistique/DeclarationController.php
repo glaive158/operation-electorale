@@ -20,7 +20,7 @@ class DeclarationController extends Controller
             ->with([
                 'decharge.destinataire', 'lignes.materiel',
                 'declarations' => fn ($q) => $q->whereNotIn('statut', ['ecartee', 'remplacee']),
-                'declarations.lignes.materiel', 'declarations.user',
+                'declarations.lignes.materiel', 'declarations.user', 'declarations.signataireUser', 'declarations.delegation.autorite', 'declarations.pieces',
             ])
             ->orderBy('id')
             ->paginate(25)->withQueryString();

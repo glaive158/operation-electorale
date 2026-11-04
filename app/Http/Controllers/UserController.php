@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Services\Logistique\CodeReceptionService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +15,12 @@ class UserController extends Controller
     /** Tables logistiques portant un auteur (user_id) : attributions_stock n'en a pas, ses écritures passent par le journal. */
     private const TABLES_LOGISTIQUES = [
         'mouvements_stock', 'reservations_stock', 'journal_logistique', 'commandes', 'receptions_fournisseur',
+    ];
+
+    /** Autres colonnes qui désignent un compte dans les écritures logistiques (délégations, signataire des déclarations). */
+    private const REFERENCES_LOGISTIQUES = [
+        'declarations' => ['user_id', 'signataire_user_id'],
+        'delegations' => ['autorite_user_id', 'delegue_user_id', 'cree_par'],
     ];
 
     public function index(Request $request)
@@ -62,7 +69,10 @@ class UserController extends Controller
         $data['password'] = Hash::make($data['password']);
         $data['actif']    = $request->boolean('actif', true);
 
-        User::create($data);
+        // Une autorité de terrain choisit son code personnel de réception à sa première connexion.
+        (new User($data))->forceFill([
+            'doit_choisir_code' => in_array($data['role'], CodeReceptionService::ROLES_AUTORITE, true),
+        ])->save();
         return redirect()->route('users.index')->with('success', 'Utilisateur créé avec succès.');
     }
 
@@ -115,7 +125,15 @@ class UserController extends Controller
         }
         $data['actif'] = $request->boolean('actif');
 
-        $user->update($data);
+        // Un changement de rôle, dans un sens ou dans l'autre, annule le code de réception : le compte est
+        // enregistré et son code annulé ensemble.
+        DB::transaction(function () use ($user, $data) {
+            $ancienRole = $user->role;
+            $user->update($data);
+            if ($user->role !== $ancienRole) {
+                app(CodeReceptionService::class)->apresChangementDeRole($user);
+            }
+        }, attempts: 3);
         return redirect()->route('users.index')->with('success', 'Utilisateur mis à jour.');
     }
 
@@ -129,6 +147,11 @@ class UserController extends Controller
         $liaisonLogistique = 'Utilisateur lié à des opérations logistiques : désactivez le compte au lieu de le supprimer.';
         foreach (self::TABLES_LOGISTIQUES as $table) {
             if (DB::table($table)->where('user_id', $user->id)->exists()) {
+                return back()->with('error', $liaisonLogistique);
+            }
+        }
+        foreach (self::REFERENCES_LOGISTIQUES as $table => $colonnes) {
+            if (DB::table($table)->where(fn ($q) => collect($colonnes)->each(fn ($c) => $q->orWhere($c, $user->id)))->exists()) {
                 return back()->with('error', $liaisonLogistique);
             }
         }
