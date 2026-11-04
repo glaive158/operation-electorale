@@ -92,6 +92,10 @@
                         ['url' => $versCycle('logistique.cles.index'), 'match' => ['logistique.cles.*'], 'icon' => 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z', 'label' => 'Clés'],
                         ['url' => $versCycle('logistique.plans.index'), 'match' => ['logistique.plans.*', 'logistique.plan-lignes.*'], 'icon' => 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4', 'label' => 'Plans de dotation'],
                         ['url' => $versCycle('logistique.besoin.show'), 'match' => ['logistique.besoin.*'], 'icon' => 'M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z', 'label' => 'Besoin'],
+                        ['url' => $versCycle('logistique.circuit.show'), 'match' => ['logistique.circuit.*'], 'icon' => 'M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7', 'label' => 'Circuit'],
+                        ['url' => $versCycle('logistique.expeditions.index'), 'match' => ['logistique.expeditions.*'], 'icon' => 'M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10m10 0H3m10 0h2m4 0h1a1 1 0 001-1v-3.65a1 1 0 00-.22-.624l-3.48-4.35A1 1 0 0017.52 8H14m5 8a2 2 0 11-4 0 2 2 0 014 0zM9 16a2 2 0 11-4 0 2 2 0 014 0z', 'label' => 'Expéditions'],
+                        ['url' => $versCycle('logistique.decharges.index'), 'match' => ['logistique.decharges.*', 'logistique.decharge-lignes.*'], 'icon' => 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z', 'label' => 'Décharges'],
+                        ['url' => $versCycle('logistique.ecarts.index'), 'match' => ['logistique.ecarts.*'], 'icon' => 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z', 'label' => 'Écarts'],
                     ]);
                 }
                 $adminItems = [
@@ -261,6 +265,15 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
                     </svg>
                     {{ session('success') }}
+                </div>
+            @endif
+            @if(session('warning'))
+                <div class="mb-4 flex items-center gap-3 p-4 rounded-xl text-white text-sm font-medium shadow"
+                     style="background:#d97706;">
+                    <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    {{ session('warning') }}
                 </div>
             @endif
             @if(session('error'))
