@@ -7,6 +7,7 @@ use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\PerimetreDestinataire;
 use App\Models\Logistique\PosteEtranger;
+use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -19,9 +20,7 @@ use LogicException;
  */
 class DecoupageService
 {
-    public function __construct(private readonly LectureRecensement $recensement)
-    {
-    }
+    public function __construct(private readonly LectureRecensement $recensement) {}
 
     /** @return array{crees:int} */
     public function genererDestinataires(): array
@@ -48,8 +47,8 @@ class DecoupageService
                 $sousPrefecture = Destinataire::firstOrCreate(
                     ['arrondissement_id' => $arrondissement->id],
                     [
-                        'type'          => 'sous_prefecture',
-                        'libelle'       => "Sous-préfecture de {$arrondissement->nom}",
+                        'type' => 'sous_prefecture',
+                        'libelle' => "Sous-préfecture de {$arrondissement->nom}",
                         'prefecture_id' => $prefectures[$arrondissement->departement_id] ?? null,
                     ],
                 );
@@ -341,7 +340,7 @@ class DecoupageService
                     $avantDestinataire = $destinataire->only(['libelle', 'actif']);
                     $destinataire->update([
                         'libelle' => $avant['nom'] !== $retenues['nom'] ? $retenues['nom'] : $destinataire->libelle,
-                        'actif'   => $avant['actif'] !== $retenues['actif'] ? $retenues['actif'] : $destinataire->actif,
+                        'actif' => $avant['actif'] !== $retenues['actif'] ? $retenues['actif'] : $destinataire->actif,
                     ]);
                     $apresDestinataire = $destinataire->only(['libelle', 'actif']);
                     if ($avantDestinataire !== $apresDestinataire) {
@@ -364,7 +363,10 @@ class DecoupageService
     /**
      * Met à jour le signataire (nom, qualité) et l'état d'un destinataire ; les champs absents restent inchangés.
      *
-     * @param  array{signataire_nom?:mixed, signataire_qualite?:mixed, actif?:mixed}  $donnees
+     * `autorite_user_id` (compte de l'autorité : préfet, sous-préfet ou chef de poste selon le type) est facultatif ;
+     * null le retire. Le compte doit être actif et avoir le rôle du type du destinataire.
+     *
+     * @param  array{signataire_nom?:mixed, signataire_qualite?:mixed, actif?:mixed, autorite_user_id?:mixed}  $donnees
      */
     public function modifierDestinataire(Destinataire $destinataire, array $donnees): void
     {
@@ -388,9 +390,21 @@ class DecoupageService
             }
             $retenues['actif'] = $donnees['actif'];
         }
+        $autorite = null;
+        if (array_key_exists('autorite_user_id', $donnees)) {
+            if ($donnees['autorite_user_id'] !== null && $donnees['autorite_user_id'] !== '' && filter_var($donnees['autorite_user_id'], FILTER_VALIDATE_INT) === false) {
+                throw new InvalidArgumentException('Le compte de l\'autorité est invalide.');
+            }
+            $autorite = $donnees['autorite_user_id'] === null || $donnees['autorite_user_id'] === '' ? null : (int) $donnees['autorite_user_id'];
+            $retenues['autorite_user_id'] = $autorite;
+        }
 
-        DB::transaction(function () use ($destinataire, $retenues) {
+        DB::transaction(function () use ($destinataire, $retenues, $autorite) {
             $actuel = Destinataire::whereKey($destinataire->id)->lockForUpdate()->firstOrFail();
+            // Une autorité inchangée n'est pas revalidée : modifier le signataire ne doit pas échouer pour un compte désactivé.
+            if ($autorite !== null && $autorite !== ($actuel->autorite_user_id === null ? null : (int) $actuel->autorite_user_id)) {
+                $this->exigerAutoriteValide($actuel, $autorite);
+            }
             $avant = $actuel->only(array_keys($retenues));
             $actuel->update($retenues);
 
@@ -400,6 +414,24 @@ class DecoupageService
         }, attempts: 3);
 
         $destinataire->refresh();
+    }
+
+    /** Rôle attendu du compte d'autorité selon le type du destinataire. */
+    private const ROLE_AUTORITE = ['prefecture' => 'prefet', 'sous_prefecture' => 'sous_prefet', 'poste' => 'chef_poste'];
+
+    private const LIBELLE_ROLE = ['prefet' => 'préfet', 'sous_prefet' => 'sous-préfet', 'chef_poste' => 'chef de poste'];
+
+    private function exigerAutoriteValide(Destinataire $destinataire, int $userId): void
+    {
+        $role = self::ROLE_AUTORITE[$destinataire->type] ?? null;
+        $compte = User::find($userId);
+        if ($compte === null || ! $compte->actif) {
+            throw new RegleLogistique('Le compte de l\'autorité doit exister et être actif.');
+        }
+        if ($role === null || $compte->role !== $role) {
+            $attendu = self::LIBELLE_ROLE[$role] ?? 'adapté';
+            throw new RegleLogistique("Le compte de l'autorité de {$destinataire->libelle} doit avoir le rôle {$attendu}.");
+        }
     }
 
     /**

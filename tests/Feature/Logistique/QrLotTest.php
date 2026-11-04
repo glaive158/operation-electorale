@@ -105,13 +105,16 @@ class QrLotTest extends TestCase
         $this->get(route('logistique.decharges.qr', $decharge->identifiant))->assertRedirect(route('login'));
     }
 
-    public function test_qr_refuse_sans_droit(): void
+    /** Le QR s'ouvre à tout compte connecté, mais n'oriente que le personnel logistique et le périmètre de terrain. */
+    public function test_qr_refuse_hors_perimetre(): void
     {
         $this->preparerDecor();
         $decharge = $this->valider($this->prefecture);
-        $this->actingAs(User::factory()->create(['role' => 'prefet']));
 
-        $this->get(route('logistique.decharges.qr', $decharge->identifiant))->assertForbidden();
+        foreach (['prefet', 'sous_prefet', 'chef_poste', 'agent_transport', 'gouverneur', 'commission'] as $role) {
+            $this->actingAs(User::factory()->create(['role' => $role]));
+            $this->get(route('logistique.decharges.qr', $decharge->identifiant))->assertForbidden();
+        }
     }
 
     public function test_qr_inconnu_404(): void

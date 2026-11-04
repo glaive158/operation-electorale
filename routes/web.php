@@ -10,6 +10,7 @@ use App\Http\Controllers\ComparaisonFichiersController;
 use App\Http\Controllers\ComparaisonLieuxController;
 use App\Http\Controllers\ImpactDeplacementController;
 use App\Http\Controllers\Logistique\BesoinController;
+use App\Http\Controllers\Logistique\ArbitrageController;
 use App\Http\Controllers\Logistique\CircuitController;
 use App\Http\Controllers\Logistique\CleController;
 use App\Http\Controllers\Logistique\CommandeController;
@@ -17,15 +18,24 @@ use App\Http\Controllers\Logistique\CommissionController;
 use App\Http\Controllers\Logistique\CorrespondanceController;
 use App\Http\Controllers\Logistique\CycleController;
 use App\Http\Controllers\Logistique\DechargeController;
+use App\Http\Controllers\Logistique\DeclarationController;
 use App\Http\Controllers\Logistique\EcartController;
 use App\Http\Controllers\Logistique\EntiteController;
 use App\Http\Controllers\Logistique\ExpeditionController;
 use App\Http\Controllers\Logistique\GeographieController;
+use App\Http\Controllers\Logistique\IndicateurController;
 use App\Http\Controllers\Logistique\InstantaneController;
 use App\Http\Controllers\Logistique\MaterielController;
 use App\Http\Controllers\Logistique\PlanDotationController;
 use App\Http\Controllers\Logistique\PosteController;
+use App\Http\Controllers\Logistique\ReclamationController;
+use App\Http\Controllers\Logistique\RemiseController;
 use App\Http\Controllers\Logistique\StockController;
+use App\Http\Controllers\Terrain\DechargeController as TerrainDechargeController;
+use App\Http\Controllers\Terrain\DeclarationController as TerrainDeclarationController;
+use App\Http\Controllers\Terrain\IndicateurController as TerrainIndicateurController;
+use App\Http\Controllers\Terrain\ReclamationController as TerrainReclamationController;
+use App\Http\Controllers\Terrain\RedistributionController as TerrainRedistributionController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
 use App\Http\Controllers\ListeEmargementController;
@@ -117,6 +127,24 @@ Route::middleware(['auth'])->group(function () {
         Route::resource('users', UserController::class)->middleware('role:admin');
     });
 
+    /* ── Logistique : cible du QR code des décharges, selon le profil (central, terrain ou refus) ── */
+    Route::get('logistique/d/{identifiant}', [DechargeController::class, 'qr'])->name('logistique.decharges.qr');
+
+    /* ── Espace terrain : autorités, agents de transport et gouverneur, dans leur périmètre ── */
+    Route::prefix('terrain')->name('terrain.')->group(function () {
+        // Le gouverneur ne voit que les indicateurs de sa région (§14) : pas de décharges.
+        Route::get('suivi', [TerrainIndicateurController::class, 'index'])->middleware('can:logistique-suivi-terrain')->name('suivi');
+        // La page d'une décharge répond 404 hors périmètre ou à un profil sans accès, pour ne rien révéler.
+        Route::get('decharges/{decharge}', [TerrainDechargeController::class, 'show'])->name('decharges.show');
+        Route::middleware('can:logistique-terrain')->group(function () {
+            Route::get('decharges', [TerrainDechargeController::class, 'index'])->name('decharges.index');
+            Route::post('remises/{remise}/declaration', [TerrainDeclarationController::class, 'store'])->name('declarations.store');
+            Route::post('decharges/{decharge}/redistributions', [TerrainRedistributionController::class, 'store'])->name('redistributions.store');
+            Route::post('remises/{remise}/annulation', [TerrainRedistributionController::class, 'annuler'])->name('redistributions.annuler');
+            Route::post('decharges/{decharge}/reclamations', [TerrainReclamationController::class, 'store'])->name('reclamations.store');
+        });
+    });
+
     /* ── Logistique matériel électoral ── */
     Route::middleware('can:logistique-gerer')->prefix('logistique')->name('logistique.')->group(function () {
         Route::get('stock', [StockController::class, 'index'])->name('stock.index');
@@ -147,8 +175,6 @@ Route::middleware(['auth'])->group(function () {
         Route::get('plans/{plan}', [PlanDotationController::class, 'show'])->name('plans.show');
         Route::get('cycles/{cycle}/besoin', [BesoinController::class, 'show'])->name('besoin.show');
 
-        Route::get('d/{identifiant}', [DechargeController::class, 'qr'])->name('decharges.qr');
-
         Route::get('cycles/{cycle}/circuit', [CircuitController::class, 'show'])->name('circuit.show');
         Route::get('cycles/{cycle}/expeditions', [ExpeditionController::class, 'index'])->name('expeditions.index');
         Route::get('cycles/{cycle}/ecarts', [EcartController::class, 'index'])->name('ecarts.index');
@@ -166,6 +192,15 @@ Route::middleware(['auth'])->group(function () {
         Route::post('decharges/{decharge}/emission', [DechargeController::class, 'emettre'])->name('decharges.emettre');
         Route::get('decharges/{decharge}/apercu', [DechargeController::class, 'apercu'])->name('decharges.apercu');
         Route::get('decharges/{decharge}/pdf/{exemplaire}', [DechargeController::class, 'pdf'])->name('decharges.pdf');
+
+        Route::put('decharges/{decharge}/agent', [RemiseController::class, 'affecter'])->name('decharges.agent');
+        Route::post('decharges/{decharge}/chargement', [RemiseController::class, 'charger'])->name('decharges.charger');
+        Route::get('cycles/{cycle}/a-verifier', [DeclarationController::class, 'aVerifier'])->name('declarations.a-verifier');
+        Route::get('cycles/{cycle}/reclamations', [ReclamationController::class, 'index'])->name('reclamations.index');
+        Route::get('reclamations/{reclamation}', [ReclamationController::class, 'show'])->name('reclamations.show');
+        Route::post('reclamations/{reclamation}/prise-en-charge', [ReclamationController::class, 'prendre'])->name('reclamations.prendre');
+        Route::post('reclamations/{reclamation}/resolution', [ReclamationController::class, 'resoudre'])->name('reclamations.resoudre');
+        Route::get('cycles/{cycle}/suivi', [IndicateurController::class, 'index'])->name('suivi.index');
 
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
@@ -206,6 +241,9 @@ Route::middleware(['auth'])->group(function () {
 
             Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
+            Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
+            Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');
+            Route::post('cycles/{cycle}/clotures-ecart', [ArbitrageController::class, 'cloturer'])->name('clotures-ecart.store');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

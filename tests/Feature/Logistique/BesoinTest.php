@@ -3,6 +3,8 @@
 namespace Tests\Feature\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Commande;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
@@ -12,7 +14,6 @@ use App\Models\Logistique\Materiel;
 use App\Models\Logistique\MouvementStock;
 use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\PlanDotationLigne;
-use App\Models\Logistique\ReservationStock;
 use App\Models\User;
 use App\Services\Logistique\BesoinService;
 use App\Services\Logistique\CleService;
@@ -321,6 +322,38 @@ class BesoinTest extends TestCase
             'besoin' => 200, 'expedie' => 0, 'reste' => 200, 'surplus' => 0, 'reserve_cible' => 0,
             'reserve_stock' => 0, 'attribue' => 0, 'a_recevoir' => 0, 'approvisionnement' => 200,
         ], collect($tableau[1])->except('materiel')->all());
+    }
+
+    public function test_tableau_prend_le_besoin_cumule_remplacements_et_clotures_compris(): void
+    {
+        $this->planApprouve([[$this->urnes, 1000], [$this->isoloirs, 200]]);
+        $autre = Destinataire::create(['type' => 'prefecture', 'libelle' => 'Préfecture de Kaolack']);
+        $enveloppes = Materiel::create(['libelle' => 'Enveloppes', 'categorie' => 'imprime', 'unite_stock' => 'pièce', 'ordre' => 3]);
+        $remplacer = fn (Destinataire $d, Materiel $m, int $q) => BesoinRemplacement::create([
+            'cycle_id' => $this->cycle->id, 'destinataire_id' => $d->id, 'materiel_id' => $m->id,
+            'quantite' => $q, 'motif' => 'Détériorés', 'autorise_par' => $this->responsable->id,
+        ]);
+        $remplacer($this->destinataire, $this->urnes, 30);
+        $remplacer($autre, $this->urnes, 5);
+        // Article absent du plan : seul le remplacement porte un besoin.
+        $remplacer($this->destinataire, $enveloppes, 12);
+        Arbitrage::create([
+            'cycle_id' => $this->cycle->id, 'objet' => 'cloture_ecart', 'destinataire_id' => $this->destinataire->id,
+            'materiel_id' => $this->isoloirs->id, 'decision' => 'ecart_accepte',
+            'quantite_expedition_annulee' => 50, 'motif' => 'Écart accepté', 'user_id' => $this->responsable->id,
+        ]);
+
+        $tableau = $this->besoin()->tableau($this->cycle)->keyBy(fn ($l) => $l['materiel']->id);
+
+        $this->assertSame([$this->urnes->id, $this->isoloirs->id, $enveloppes->id], $tableau->keys()->all());
+        foreach ([$this->urnes, $this->isoloirs, $enveloppes] as $article) {
+            $this->assertSame($this->besoin()->besoinExpedition($this->cycle, $article), $tableau[$article->id]['besoin']);
+            $this->assertSame($this->besoin()->resteAExpedier($this->cycle, $article), $tableau[$article->id]['reste']);
+            $this->assertSame($this->besoin()->surplusExpedie($this->cycle, $article), $tableau[$article->id]['surplus']);
+        }
+        $this->assertSame([1035, 150, 12], [$tableau[$this->urnes->id]['besoin'], $tableau[$this->isoloirs->id]['besoin'], $tableau[$enveloppes->id]['besoin']]);
+        $this->assertSame(0, $tableau[$enveloppes->id]['reserve_cible']);
+        $this->assertSame(12, $tableau[$enveloppes->id]['approvisionnement']);
     }
 
     private function planDeuxArticles(): void

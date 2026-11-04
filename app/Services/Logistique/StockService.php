@@ -232,6 +232,42 @@ class StockService
     }
 
     /**
+     * Consomme une réservation active : le stock réservé sort physiquement (sortie d'expédition, état bon,
+     * référencée à la réservation, que BesoinService::expedie relit). La réservation est marquée consommée
+     * AVANT le mouvement : le contrôle « physique >= engagé » ne compte plus le stock qui sort.
+     */
+    public function consommer(ReservationStock $reservation): MouvementStock
+    {
+        $this->exigerAuteur();
+
+        return DB::transaction(function () use ($reservation) {
+            if (! $this->cycleVerrouille($reservation->cycle_id)->estOuvert()) {
+                throw new RegleLogistique('Cycle clos : consommation impossible.');
+            }
+            $materiel = Materiel::whereKey($reservation->materiel_id)->lockForUpdate()->firstOrFail();
+
+            $actuelle = ReservationStock::whereKey($reservation->id)->lockForUpdate()->firstOrFail();
+            if (! $actuelle->estActive()) {
+                throw new RegleLogistique('Seule une réservation active peut être consommée.');
+            }
+
+            $actuelle->update(['statut' => 'consommee']);
+
+            $mouvement = $this->ecrire($materiel, 'sortie_expedition', -$actuelle->quantite, $actuelle, null, 'bon', null);
+
+            Journal::noter(
+                'reservation_stock', $actuelle->id, 'consommation',
+                ['statut' => 'active'],
+                ['statut' => 'consommee', 'mouvement_id' => $mouvement->id, 'quantite' => $actuelle->quantite],
+            );
+
+            $reservation->setRawAttributes($actuelle->getAttributes(), true);
+
+            return $mouvement;
+        }, attempts: 3);
+    }
+
+    /**
      * Clôt le cycle : ses réservations actives retournent au stock commun et ses
      * attributions tombent à 0. Aucun mouvement de stock : le physique est inchangé.
      */

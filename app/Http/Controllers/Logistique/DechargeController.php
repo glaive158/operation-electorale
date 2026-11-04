@@ -9,12 +9,17 @@ use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Remise;
+use App\Models\User;
 use App\Services\Logistique\CircuitService;
 use App\Services\Logistique\DechargePdfService;
 use App\Services\Logistique\DechargeService;
 use App\Services\Logistique\EngagementService;
 use App\Services\Logistique\LectureRecensement;
+use App\Services\Logistique\LibellesRemises;
+use App\Services\Logistique\PerimetreTerrain;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
 use InvalidArgumentException;
 use Throwable;
@@ -29,8 +34,9 @@ class DechargeController extends Controller
         private readonly EngagementService $engagements,
         private readonly CircuitService $circuits,
         private readonly LectureRecensement $recensement,
-    ) {
-    }
+        private readonly LibellesRemises $libelles,
+        private readonly PerimetreTerrain $perimetre,
+    ) {}
 
     public function index(Request $request, Cycle $cycle)
     {
@@ -74,27 +80,46 @@ class DechargeController extends Controller
         $decharge->load([
             'cycle', 'destinataire', 'remisA', 'plan', 'documents', 'remplacante', 'remplacee',
             'lignes' => fn ($q) => $q->orderBy('materiel_id'),
-            'lignes.materiel',
+            'lignes.materiel', 'reclamations.materiel',
         ]);
 
-        // Un brouillon n'a pas encore figé son engagé : on montre l'état courant du destinataire.
-        $etat = $decharge->estBrouillon()
-            ? $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie)
-            : collect();
+        // Un brouillon n'a pas encore figé son engagé : on montre l'état courant du destinataire. Le besoin
+        // (dotation, remplacements et clôtures) se lit toujours sur l'état courant.
+        $etat = $this->engagements->etat($decharge->cycle, $decharge->destinataire, $decharge->categorie);
+
+        $remises = Remise::where('decharge_id', $decharge->id)
+            ->with(['lignes.materiel', 'declarations.lignes.materiel'])->orderBy('id')->get();
+        $affectable = $decharge->statut_document === 'validee' && ! $decharge->estPartie();
 
         return view('logistique.decharges.show', [
             'decharge' => $decharge,
             'cycle' => $decharge->cycle,
             'etat' => $etat,
+            'remises' => $remises,
+            'parties' => $this->libelles->pour($remises),
+            'agents' => $affectable
+                ? User::where('role', 'agent_transport')->where('actif', true)->orderBy('name')->orderBy('prenom')->get()
+                : collect(),
         ]);
     }
 
-    /** Cible du QR code imprimé sur le document : retrouve la décharge par son identifiant stable. */
+    /**
+     * Cible du QR code imprimé sur le document : retrouve la décharge par son identifiant stable, puis oriente
+     * selon le profil. Le personnel logistique va à la fiche centrale ; une autorité ou un agent
+     * dont la décharge est dans le périmètre va à la page du terrain ; tout autre profil est refusé.
+     */
     public function qr(string $identifiant)
     {
         $decharge = Decharge::where('identifiant', $identifiant)->firstOrFail();
 
-        return redirect()->route('logistique.decharges.show', $decharge);
+        if (Gate::allows('logistique-gerer')) {
+            return redirect()->route('logistique.decharges.show', $decharge);
+        }
+        if (Gate::allows('logistique-terrain') && $this->perimetre->peutVoir(auth()->user(), $decharge)) {
+            return redirect()->route('terrain.decharges.show', $decharge);
+        }
+
+        abort(403);
     }
 
     public function store(Request $request, Cycle $cycle)
@@ -188,7 +213,7 @@ class DechargeController extends Controller
 
     public function emettre(Request $request, Decharge $decharge)
     {
-        $donnees = $request->validate(['exemplaire' => ['required', Rule::in(['initial', 'annulation'])]]);
+        $donnees = $request->validate(['exemplaire' => ['required', Rule::in(DechargeDocument::EXEMPLAIRES)]]);
 
         return $this->executer(fn () => $this->pdf->emettre($decharge, $donnees['exemplaire']), 'PDF émis et archivé.');
     }
@@ -217,7 +242,7 @@ class DechargeController extends Controller
     /** Exemplaire archivé, servi après contrôle de son empreinte. */
     public function pdf(Decharge $decharge, string $exemplaire)
     {
-        abort_unless(in_array($exemplaire, ['initial', 'annulation'], true), 404);
+        abort_unless(in_array($exemplaire, DechargeDocument::EXEMPLAIRES, true), 404);
         $document = DechargeDocument::where('decharge_id', $decharge->id)->where('exemplaire', $exemplaire)->firstOrFail();
 
         try {

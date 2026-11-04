@@ -3,9 +3,11 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
+use App\Models\Logistique\Remise;
 use chillerlan\QRCode\Output\QROutputInterface;
 use chillerlan\QRCode\QRCode;
 use chillerlan\QRCode\QROptions;
@@ -31,12 +33,20 @@ class DechargePdfService
 
     private const ALTERE = 'Fichier archivé altéré ou absent : réimpression refusée.';
 
-    public function __construct(private readonly DechargeService $decharges) {}
+    public function __construct(
+        private readonly DechargeService $decharges,
+        private readonly RemiseService $remises,
+    ) {}
 
     /** HTML du document. Un brouillon ne se rend qu'en aperçu filigrané ; les autres statuts, depuis donnees_gelees. */
     public function html(Decharge $decharge, string $exemplaire, bool $apercu = false): string
     {
         $this->exigerExemplaire($exemplaire);
+
+        // L'exemplaire de réception se rend depuis les remises et déclarations vivantes : jamais d'aperçu.
+        if ($exemplaire === 'reception' && ! $this->receptionEmissible($decharge)) {
+            throw new RegleLogistique(self::NON_EMIS);
+        }
 
         if ($decharge->statut_document === 'brouillon') {
             if (! $apercu) {
@@ -50,6 +60,11 @@ class DechargePdfService
                 throw new LogicException('Décharge sans données figées.');
             }
             $filigrane = $exemplaire === 'annulation' ? 'ANNULÉE' : null;
+        }
+
+        if ($exemplaire === 'reception') {
+            $donnees['titre'] .= ' — EXEMPLAIRE DE RÉCEPTION';
+            $donnees['reception'] = DonneesDecharge::reception($decharge);
         }
 
         // Date et motif d'annulation viennent de la ligne de la décharge (écrits une seule fois, à
@@ -253,12 +268,49 @@ class DechargePdfService
         $permis = match ($exemplaire) {
             'initial' => in_array($decharge->statut_document, ['validee', 'annulee'], true),
             'annulation' => $decharge->statut_document === 'annulee',
+            'reception' => $this->receptionEmissible($decharge),
             default => false,
         };
 
         if (! $permis) {
             throw new RegleLogistique(self::NON_EMIS);
         }
+    }
+
+    /**
+     * Le destinataire final a reçu sa part et rien n'est en cours : décharge validée, « reçue par le destinataire ».
+     * Pour une décharge livrée au préfet, l'exemplaire n'est émissible que lorsque le reliquat du préfet est soldé
+     * (ou couvert par un écart accepté pour le destinataire et l'article) et qu'aucune redistribution de la
+     * décharge n'attend sa déclaration ou une vérification : un exemplaire est archivé pour de bon.
+     */
+    public function receptionEmissible(Decharge $decharge): bool
+    {
+        if ($decharge->statut_document !== 'validee' || $decharge->statut_acheminement !== 'recue_destinataire') {
+            return false;
+        }
+        if ($decharge->remis_a_id === null || (int) $decharge->remis_a_id === (int) $decharge->destinataire_id) {
+            return true;
+        }
+
+        $enCours = Remise::where('decharge_id', $decharge->id)->where('etape', 'redistribution')
+            ->whereIn('statut', ['en_attente', 'a_verifier'])->exists();
+        if ($enCours) {
+            return false;
+        }
+
+        foreach ($this->remises->soldePrefet($decharge) as $materielId => $solde) {
+            if ($solde['reliquat'] <= 0) {
+                continue;
+            }
+            $abandonne = (int) Arbitrage::where('cycle_id', $decharge->cycle_id)->where('objet', 'cloture_ecart')
+                ->where('destinataire_id', $decharge->destinataire_id)->where('materiel_id', $materielId)
+                ->sum('quantite_abandon_reception');
+            if ($solde['reliquat'] > $abandonne) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function exigerExemplaire(string $exemplaire): void

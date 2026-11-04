@@ -12,6 +12,7 @@
     $brouillon = $decharge->estBrouillon();
     $annulee = $decharge->statut_document === 'annulee';
     $ouvert = $decharge->cycle?->estOuvert() ?? false;
+    $peutCharger = $ouvert && $decharge->statut_document === 'validee' && ! $decharge->estPartie();
     $peutAnnuler = $ouvert && $decharge->statut_document === 'validee' && ! $decharge->estPartie()
         && \Illuminate\Support\Facades\Gate::allows('logistique-administrer');
     // Une remplaçante elle-même annulée n'empêche pas d'en préparer une nouvelle.
@@ -20,9 +21,12 @@
     $exemplairesAttendus = array_filter([
         'initial' => $decharge->statut_document !== 'brouillon',
         'annulation' => $annulee,
+        'reception' => $decharge->documents->contains('exemplaire', 'reception')
+            || app(\App\Services\Logistique\DechargePdfService::class)->receptionEmissible($decharge),
     ]);
     $documents = $decharge->documents->keyBy('exemplaire');
-    $libellesExemplaire = ['initial' => 'Décharge', 'annulation' => 'Exemplaire d\'annulation'];
+    $classesStatutRemise = ['en_attente' => 'bg-slate-100 text-slate-600', 'recue' => 'bg-green-100 text-green-700', 'a_verifier' => 'bg-amber-100 text-amber-700', 'annulee' => 'bg-red-100 text-red-700'];
+    $libellesExemplaire = ['initial' => 'Décharge', 'annulation' => 'Exemplaire d\'annulation', 'reception' => 'Exemplaire de réception'];
 @endphp
 
 @section('content')
@@ -69,11 +73,14 @@
         <dl class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
             <div><dt class="text-xs text-slate-500">Nature</dt><dd class="text-slate-800">{{ Decharge::NATURES[$decharge->nature] ?? $decharge->nature }}</dd></div>
             <div><dt class="text-xs text-slate-500">Document</dt><dd class="text-slate-800">{{ $libellesDocument[$decharge->statut_document] ?? $decharge->statut_document }}</dd></div>
-            <div><dt class="text-xs text-slate-500">Acheminement</dt><dd class="text-slate-800">{{ $decharge->statut_acheminement }}</dd></div>
-            <div><dt class="text-xs text-slate-500">Réclamation</dt><dd class="text-slate-800">{{ $decharge->statut_reclamation }}</dd></div>
+            <div><dt class="text-xs text-slate-500">Acheminement</dt><dd class="text-slate-800">{{ Decharge::ACHEMINEMENTS[$decharge->statut_acheminement] ?? $decharge->statut_acheminement }}</dd></div>
+            <div><dt class="text-xs text-slate-500">Réclamation</dt><dd class="text-slate-800">{{ Decharge::RECLAMATIONS[$decharge->statut_reclamation] ?? $decharge->statut_reclamation }}</dd></div>
             <div><dt class="text-xs text-slate-500">Destinataire</dt><dd class="text-slate-800">{{ $decharge->destinataire?->libelle }}</dd></div>
             @if($decharge->remisA)
                 <div><dt class="text-xs text-slate-500">Remis à</dt><dd class="text-slate-800">{{ $decharge->remisA->libelle }}</dd></div>
+            @endif
+            @if($decharge->agent)
+                <div><dt class="text-xs text-slate-500">Agent affecté</dt><dd class="text-slate-800">{{ $decharge->agent->nom_complet }}</dd></div>
             @endif
             @if($decharge->circuit)
                 <div><dt class="text-xs text-slate-500">Circuit</dt><dd class="text-slate-800">{{ $libellesCircuit[$decharge->circuit] ?? $decharge->circuit }}</dd></div>
@@ -95,6 +102,7 @@
                     <tr class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
                         <th class="px-5 py-3 text-left font-semibold">Article</th>
                         <th class="px-5 py-3 text-right font-semibold">Dotation approuvée</th>
+                        <th class="px-5 py-3 text-right font-semibold">Besoin</th>
                         <th class="px-5 py-3 text-right font-semibold">Déjà engagé</th>
                         <th class="px-5 py-3 text-right font-semibold">Cette expédition</th>
                         <th class="px-5 py-3 text-left font-semibold">Observations</th>
@@ -110,6 +118,7 @@
                                 @if($l->cle_affichee) <span class="block text-xs font-normal text-slate-500">{{ $l->cle_affichee }}</span> @endif
                             </td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($l->dotation_approuvee) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-600">{{ $n($etat->get($l->materiel_id)['besoin'] ?? 0) }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($engage) }}</td>
                             @if($brouillon && $ouvert)
                                 <td class="px-5 py-3 text-right">
@@ -130,12 +139,97 @@
                             @endif
                         </tr>
                     @empty
-                        <tr><td colspan="{{ $brouillon && $ouvert ? 6 : 5 }}" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
+                        <tr><td colspan="{{ $brouillon && $ouvert ? 7 : 6 }}" class="px-6 py-10 text-center text-slate-400">Aucune ligne</td></tr>
                     @endforelse
                 </tbody>
             </table>
         </div>
     </div>
+
+    @if($peutCharger)
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-5">
+            <h3 class="font-semibold text-slate-800">Départ du magasin</h3>
+
+            <form method="POST" action="{{ route('logistique.decharges.agent', $decharge) }}" class="space-y-2">
+                @csrf @method('PUT')
+                <p class="text-xs text-slate-500">L'agent de transport affecté prend le matériel au chargement, puis déclare la réception sur sa tablette. Modifiable tant que le matériel n'est pas parti.</p>
+                <div class="flex flex-wrap gap-3 items-center">
+                    <select name="agent_id" aria-label="Agent de transport" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                        <option value="">Aucun agent</option>
+                        @foreach($agents as $agent)
+                            <option value="{{ $agent->id }}" @selected((int) $decharge->agent_id === $agent->id)>{{ $agent->nom_complet }}</option>
+                        @endforeach
+                    </select>
+                    <input type="text" name="motif" required maxlength="500" placeholder="Motif de l'affectation" aria-label="Motif de l'affectation"
+                           class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none w-full md:w-80">
+                    <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 text-slate-700 hover:bg-slate-50">Affecter l'agent</button>
+                </div>
+            </form>
+
+            <form method="POST" action="{{ route('logistique.decharges.charger', $decharge) }}" class="space-y-3"
+                  onsubmit="return confirm('Charger cette décharge ? Le matériel sort du stock et part en transit.');">
+                @csrf
+                @if($decharge->circuit === 'etranger')
+                    <p class="text-xs text-slate-500">Circuit étranger : renseignez le transporteur (les quatre champs) à la place de l'agent.</p>
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                        <input type="text" name="transporteur_nom" maxlength="150" value="{{ old('transporteur_nom') }}" placeholder="Nom du transporteur" aria-label="Nom du transporteur" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                        <input type="text" name="transporteur_qualite" maxlength="150" value="{{ old('transporteur_qualite') }}" placeholder="Qualité" aria-label="Qualité du transporteur" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                        <input type="text" name="transporteur_societe" maxlength="150" value="{{ old('transporteur_societe') }}" placeholder="Société" aria-label="Société du transporteur" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                        <input type="text" name="transporteur_bordereau" maxlength="50" value="{{ old('transporteur_bordereau') }}" placeholder="N° de bordereau" aria-label="Numéro de bordereau" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
+                    </div>
+                @endif
+                <button type="submit" class="px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90" style="background:#009A44;">Charger</button>
+            </form>
+        </div>
+    @endif
+
+    @if($remises->isNotEmpty())
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-4">
+            <h3 class="font-semibold text-slate-800">Remises et déclarations</h3>
+            @foreach($remises as $remise)
+                <div class="border border-slate-200 rounded-xl p-4 space-y-2">
+                    <div class="flex flex-wrap items-center gap-3 text-sm">
+                        <span class="font-medium text-slate-800">{{ \App\Models\Logistique\Remise::ETAPES[$remise->etape] ?? $remise->etape }}</span>
+                        <span class="text-slate-600">{{ $parties[$remise->id]['de'] }} → {{ $parties[$remise->id]['a'] }}</span>
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ $classesStatutRemise[$remise->statut] ?? 'bg-slate-200 text-slate-600' }}">{{ \App\Models\Logistique\Remise::STATUTS[$remise->statut] ?? $remise->statut }}</span>
+                        @if($remise->bordereau_numero) <span class="text-xs text-slate-500">Bordereau {{ $remise->bordereau_numero }}</span> @endif
+                    </div>
+                    @if($remise->transporteur_nom)
+                        <p class="text-xs text-slate-500">Transporteur : {{ $remise->transporteur_nom }}@if($remise->transporteur_qualite), {{ $remise->transporteur_qualite }}@endif@if($remise->transporteur_societe) — {{ $remise->transporteur_societe }}@endif</p>
+                    @endif
+                    <p class="text-xs text-slate-600">
+                        @foreach($remise->lignes as $l) {{ $l->materiel?->libelle }} : {{ $n($l->quantite) }}{{ $loop->last ? '' : ' ;' }} @endforeach
+                    </p>
+                    @foreach($remise->declarations as $declaration)
+                        <div class="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
+                            <span class="font-medium text-slate-800">{{ \App\Models\Logistique\Declaration::STATUTS[$declaration->statut] ?? $declaration->statut }}</span>
+                            — mode : {{ \App\Models\Logistique\Declaration::MODES[$declaration->mode] ?? $declaration->mode }}, {{ $declaration->signataire_nom }}@if($declaration->signataire_qualite), {{ $declaration->signataire_qualite }}@endif,
+                            le {{ $declaration->created_at?->format('d/m/Y H:i') }} :
+                            @foreach($declaration->lignes as $l)
+                                {{ $l->materiel?->libelle }} reçu {{ $n($l->recu) }}, défectueux {{ $n($l->defectueux) }}{{ $loop->last ? '' : ' ;' }}
+                            @endforeach
+                        </div>
+                    @endforeach
+                </div>
+            @endforeach
+            @if($decharge->statut_acheminement === 'a_verifier')
+                <p class="text-sm text-amber-700">Une réception est à vérifier : <a href="{{ route('logistique.declarations.a-verifier', $cycle) }}" class="underline">ouvrir l'écran des vérifications</a>.</p>
+            @endif
+        </div>
+    @endif
+
+    @if($decharge->reclamations->isNotEmpty())
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-2">
+            <h3 class="font-semibold text-slate-800">Réclamations</h3>
+            @foreach($decharge->reclamations as $reclamation)
+                <p class="text-sm text-slate-600">
+                    <a href="{{ route('logistique.reclamations.show', $reclamation) }}" class="underline font-medium text-slate-800">{{ $reclamation->materiel?->libelle }}</a>
+                    — {{ \App\Models\Logistique\Reclamation::MOTIFS[$reclamation->motif] ?? $reclamation->motif }}, {{ $n($reclamation->quantite) }}
+                    ({{ \App\Models\Logistique\Reclamation::STATUTS[$reclamation->statut] ?? $reclamation->statut }})
+                </p>
+            @endforeach
+        </div>
+    @endif
 
     @if($brouillon && $ouvert)
         <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-4">

@@ -44,6 +44,7 @@
                         <th class="px-5 py-3 text-left font-semibold">Destinataire</th>
                         <th class="px-5 py-3 text-left font-semibold">Catégorie</th>
                         <th class="px-5 py-3 text-right font-semibold">Dotation</th>
+                        <th class="px-5 py-3 text-right font-semibold">Besoin</th>
                         <th class="px-5 py-3 text-right font-semibold">Engagé</th>
                         <th class="px-5 py-3 text-right font-semibold">Reste</th>
                         <th class="px-5 py-3 text-left font-semibold">Action</th>
@@ -56,6 +57,7 @@
                             <td class="px-5 py-3 font-medium text-slate-800">{{ $l['destinataire']->libelle }}</td>
                             <td class="px-5 py-3 text-slate-600">{{ \App\Models\Logistique\Decharge::CATEGORIES[$l['categorie']] ?? $l['categorie'] }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($l['dotation']) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-600">{{ $n($l['besoin']) }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($l['engage']) }}</td>
                             <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ $n($l['reste']) }}</td>
                             <td class="px-5 py-3">
@@ -72,7 +74,7 @@
                             </td>
                         </tr>
                     @empty
-                        <tr><td colspan="6" class="px-6 py-10 text-center text-slate-400">Aucune ligne : approuvez d'abord un plan de dotation.</td></tr>
+                        <tr><td colspan="7" class="px-6 py-10 text-center text-slate-400">Aucune ligne : approuvez d'abord un plan de dotation.</td></tr>
                     @endforelse
                 </tbody>
             </table>

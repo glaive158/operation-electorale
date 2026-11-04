@@ -37,6 +37,8 @@ class User extends Authenticatable
     public function isPrefet(): bool        { return $this->role === 'prefet'; }
     public function isSousPrefet(): bool    { return $this->role === 'sous_prefet'; }
     public function isCommission(): bool    { return $this->role === 'commission'; }
+    public function isChefPoste(): bool     { return $this->role === 'chef_poste'; }
+    public function isAgentTransport(): bool { return $this->role === 'agent_transport'; }
 
     public function isLogistique(): bool
     {
@@ -68,6 +70,7 @@ class User extends Authenticatable
             'sous_prefet' => $this->arrondissement_nom ?? '—',
             'commission'  => $this->commune_nom ?? '—',
             'logistique_gestionnaire', 'logistique_responsable' => 'Logistique centrale',
+            'chef_poste', 'agent_transport' => 'Terrain (logistique)',
             default       => 'Toutes zones',
         };
     }

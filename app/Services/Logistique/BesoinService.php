@@ -3,6 +3,8 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\Arbitrage;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Commande;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Materiel;
@@ -35,15 +37,30 @@ class BesoinService
     public function __construct(
         private readonly StockService $stock,
         private readonly CommandeService $commandes,
-    ) {
-    }
+    ) {}
 
-    /** Σ des dotations approuvées du plan en vigueur ; 0 sans plan approuvé. */
+    /**
+     * Σ, sur les destinataires, du besoin de chacun : dotation du plan approuvé en vigueur + remplacements
+     * autorisés − expéditions annulées par clôture d'écart (jamais négatif par destinataire). Une
+     * requête par source, pas par destinataire.
+     */
     public function besoinExpedition(Cycle $cycle, Materiel $materiel): int
     {
         $plan = PlanDotation::courantApprouve($cycle);
+        $dotations = $plan === null ? collect() : PlanDotationLigne::where('plan_dotation_id', $plan->id)
+            ->where('materiel_id', $materiel->id)->groupBy('destinataire_id')
+            ->selectRaw('destinataire_id, SUM(dotation_approuvee) as total')->pluck('total', 'destinataire_id');
+        $remplacements = BesoinRemplacement::where('cycle_id', $cycle->id)->where('materiel_id', $materiel->id)
+            ->groupBy('destinataire_id')->selectRaw('destinataire_id, SUM(quantite) as total')->pluck('total', 'destinataire_id');
+        $annulees = Arbitrage::where('cycle_id', $cycle->id)->where('objet', 'cloture_ecart')->where('materiel_id', $materiel->id)
+            ->groupBy('destinataire_id')->selectRaw('destinataire_id, SUM(quantite_expedition_annulee) as total')->pluck('total', 'destinataire_id');
 
-        return $plan ? $this->besoinDuPlan($plan, $materiel->id) : 0;
+        $besoin = 0;
+        foreach ($dotations->keys()->merge($remplacements->keys())->unique() as $destinataireId) {
+            $besoin += max(0, (int) ($dotations[$destinataireId] ?? 0) + (int) ($remplacements[$destinataireId] ?? 0) - (int) ($annulees[$destinataireId] ?? 0));
+        }
+
+        return $besoin;
     }
 
     /**
@@ -102,7 +119,8 @@ class BesoinService
     }
 
     /**
-     * Une ligne par article du plan approuvé, dans l'ordre du catalogue.
+     * Une ligne par article du plan approuvé ou d'un besoin de remplacement, dans l'ordre du catalogue. Le besoin est
+     * le besoin d'expédition cumulé (dotation + remplacements − expéditions annulées), celui du reste et du surplus.
      *
      * @return Collection<int, array{materiel: Materiel, besoin: int, expedie: int, reste: int, surplus: int, reserve_cible: int, reserve_stock: int, attribue: int, a_recevoir: int, approvisionnement: int}>
      */
@@ -114,27 +132,28 @@ class BesoinService
         }
 
         $lignes = PlanDotationLigne::where('plan_dotation_id', $plan->id)->get()->groupBy('materiel_id');
-        $materiels = Materiel::whereIn('id', $lignes->keys())->orderBy('ordre')->orderBy('libelle')->orderBy('id')->get();
+        $remplaces = BesoinRemplacement::where('cycle_id', $cycle->id)->where('quantite', '>', 0)->pluck('materiel_id');
+        $materiels = Materiel::whereIn('id', $lignes->keys()->merge($remplaces)->unique())->orderBy('ordre')->orderBy('libelle')->orderBy('id')->get();
 
         return $materiels->map(function (Materiel $materiel) use ($cycle, $plan, $lignes) {
-            $besoin = (int) $lignes[$materiel->id]->sum('dotation_approuvee');
+            $besoin = $this->besoinExpedition($cycle, $materiel);
             $expedie = $this->expedie($cycle, $materiel);
             $reste = max(0, $besoin - $expedie);
-            $reserveCible = $this->reserveCibleDesLignes($lignes[$materiel->id], $plan->parametres[$materiel->id]['reserve'] ?? null);
+            $reserveCible = $this->reserveCibleDesLignes($lignes[$materiel->id] ?? collect(), $plan->parametres[$materiel->id]['reserve'] ?? null);
             $reserveStock = $this->stock->reserve($materiel, $cycle);
             $attribue = $this->stock->attribue($materiel, $cycle);
             $aRecevoir = $this->stock->commandeARecevoir($materiel, $cycle);
 
             return [
-                'materiel'          => $materiel,
-                'besoin'            => $besoin,
-                'expedie'           => $expedie,
-                'reste'             => $reste,
-                'surplus'           => max(0, $expedie - $besoin),
-                'reserve_cible'     => $reserveCible,
-                'reserve_stock'     => $reserveStock,
-                'attribue'          => $attribue,
-                'a_recevoir'        => $aRecevoir,
+                'materiel' => $materiel,
+                'besoin' => $besoin,
+                'expedie' => $expedie,
+                'reste' => $reste,
+                'surplus' => max(0, $expedie - $besoin),
+                'reserve_cible' => $reserveCible,
+                'reserve_stock' => $reserveStock,
+                'attribue' => $attribue,
+                'a_recevoir' => $aRecevoir,
                 'approvisionnement' => $this->approvisionnement($reste, $reserveCible, $reserveStock, $attribue, $aRecevoir),
             ];
         })->values();
@@ -202,13 +221,6 @@ class BesoinService
         }, attempts: 3);
     }
 
-    private function besoinDuPlan(PlanDotation $plan, int $materielId): int
-    {
-        return (int) PlanDotationLigne::where('plan_dotation_id', $plan->id)
-            ->where('materiel_id', $materielId)
-            ->sum('dotation_approuvee');
-    }
-
     private function reserveCibleDuPlan(PlanDotation $plan, int $materielId): int
     {
         $lignes = PlanDotationLigne::where('plan_dotation_id', $plan->id)->where('materiel_id', $materielId)->get();
@@ -247,7 +259,7 @@ class BesoinService
      * Quantités saisies, validées ; les quantités nulles sont ignorées.
      *
      * @param  array<int|string, mixed>  $quantites
-     * @return array<int, int>  materiel_id => quantité strictement positive
+     * @return array<int, int> materiel_id => quantité strictement positive
      */
     private function quantitesRetenues(array $quantites): array
     {

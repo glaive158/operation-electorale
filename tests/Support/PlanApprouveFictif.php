@@ -3,6 +3,8 @@
 namespace Tests\Support;
 
 use App\Models\Logistique\Cycle;
+use App\Models\Logistique\Decharge;
+use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\InstantaneEffectifs;
 use App\Models\Logistique\InstantaneLigne;
@@ -11,8 +13,13 @@ use App\Models\Logistique\PerimetreDestinataire;
 use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\PlanDotationLigne;
 use App\Models\Logistique\PosteEtranger;
+use App\Models\Logistique\Remise;
 use App\Models\User;
+use App\Services\Logistique\DechargeService;
+use App\Services\Logistique\DeclarationService;
+use App\Services\Logistique\RemiseService;
 use App\Services\Logistique\StockService;
+use Illuminate\Support\Str;
 
 /**
  * Décor des tests de décharges : un cycle ouvert, une préfecture (département 10), deux
@@ -119,6 +126,83 @@ trait PlanApprouveFictif
         $stock->inventaireInitial($article, $inventaire, 'Stock de test');
         if ($attribue > 0) {
             $stock->attribuer($this->cycle, $article, $attribue, 'Attribution de test');
+        }
+    }
+
+    /**
+     * Décharge chargée : prépare la catégorie du premier article, fixe les quantités, valide,
+     * affecte l'agent (un agent de transport actif est créé à défaut) puis charge.
+     *
+     * @param  array<int, int>  $quantites  quantité à expédier par identifiant d'article
+     */
+    protected function deposerChargee(Destinataire $destinataire, array $quantites, ?User $agent = null): Decharge
+    {
+        $service = app(DechargeService::class);
+        $categorie = Materiel::findOrFail(array_key_first($quantites))->categorie;
+
+        $decharge = $service->preparer($this->cycle, $destinataire, $categorie);
+        foreach ($decharge->lignes as $ligne) {
+            $service->modifierLigne($ligne, $quantites[$ligne->materiel_id] ?? 0, null);
+        }
+        $service->valider($decharge);
+
+        $agent ??= User::factory()->create(['role' => 'agent_transport']);
+        $service->affecterAgent($decharge, $agent, 'Agent de test');
+
+        app(RemiseService::class)->charger($decharge);
+
+        return $decharge->refresh();
+    }
+
+    /**
+     * Autorité du destinataire (compte de terrain créé et rattaché à défaut : préfet, sous-préfet ou chef de poste).
+     */
+    protected function autoriteFictive(Destinataire $destinataire): User
+    {
+        $destinataire->refresh();
+        if ($destinataire->autorite_user_id !== null) {
+            return User::findOrFail($destinataire->autorite_user_id);
+        }
+
+        $role = match ($destinataire->type) {
+            'prefecture' => 'prefet',
+            'sous_prefecture' => 'sous_prefet',
+            default => 'chef_poste',
+        };
+        $autorite = User::factory()->create(['role' => $role]);
+        $destinataire->forceFill(['autorite_user_id' => $autorite->id])->save();
+
+        return $autorite;
+    }
+
+    /**
+     * Déclaration « compte » de l'autorité destinataire sur la remise de livraison d'une décharge chargée.
+     * Chaque quantité vaut le reçu, ou ['recu' => n, 'defectueux' => m, 'observation' => '…'] ; les articles
+     * omis sont reçus en totalité. L'utilisateur connecté est rétabli ensuite.
+     *
+     * @param  array<int, int|array{recu: int, defectueux?: int, observation?: ?string}>  $recus
+     */
+    protected function deposerRecue(Decharge $chargee, array $recus): Declaration
+    {
+        $remise = Remise::where('decharge_id', $chargee->id)->where('etape', 'livraison')->with('lignes')->firstOrFail();
+        $autorite = $this->autoriteFictive(Destinataire::findOrFail($remise->a_id));
+
+        $lignes = [];
+        foreach ($remise->lignes as $ligne) {
+            $valeur = $recus[$ligne->materiel_id] ?? $ligne->quantite;
+            $lignes[$ligne->materiel_id] = is_array($valeur)
+                ? ['recu' => $valeur['recu'], 'defectueux' => $valeur['defectueux'] ?? 0, 'observation' => $valeur['observation'] ?? null]
+                : ['recu' => $valeur, 'defectueux' => 0, 'observation' => null];
+        }
+
+        $auteur = auth()->user();
+        $this->actingAs($autorite);
+        try {
+            return app(DeclarationService::class)->declarer(
+                $remise, 'compte', ['nom' => 'Signataire de test', 'qualite' => 'Autorité'], $lignes, (string) Str::uuid(),
+            );
+        } finally {
+            $this->actingAs($auteur);
         }
     }
 

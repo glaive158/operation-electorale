@@ -3,12 +3,15 @@
 namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
+use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeLigne;
 use App\Models\Logistique\Destinataire;
+use App\Models\Logistique\Materiel;
 use App\Models\Logistique\PlanDotation;
 use App\Models\Logistique\ReservationStock;
+use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -64,6 +67,66 @@ class DechargeService
         }, attempts: 3);
     }
 
+    /**
+     * Prépare le brouillon d'une décharge de remplacement : une ligne de la quantité du besoin, plan approuvé
+     * courant. Un seul brouillon par besoin, quelle que soit la règle des décharges initiales.
+     */
+    public function preparerRemplacement(BesoinRemplacement $besoin): Decharge
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit();
+
+        return DB::transaction(function () use ($besoin) {
+            $cycle = $this->verrouillerCycleOuvert((int) $besoin->cycle_id, 'Cycle clôturé : décharge de remplacement impossible.');
+
+            $actuel = BesoinRemplacement::whereKey($besoin->id)->lockForUpdate()->firstOrFail();
+            $existante = Decharge::where('besoin_remplacement_id', $actuel->id)->lockForUpdate()->first();
+            if ($existante !== null && $existante->statut_document !== 'annulee') {
+                throw new RegleLogistique('Ce remplacement a déjà sa décharge.');
+            }
+            if ($existante !== null) {
+                // Décharge annulée : le besoin passe à sa nouvelle décharge, l'annulée reste consultable.
+                $existante->forceFill(['besoin_remplacement_id' => null])->save();
+                Journal::noter('decharge', $existante->id, 'remplacement_repris', ['besoin_remplacement_id' => $actuel->id], [
+                    'besoin_remplacement_id' => null,
+                ]);
+            }
+            $plan = PlanDotation::courantApprouve($cycle);
+            if ($plan === null) {
+                throw new RegleLogistique(self::AUCUN_PLAN);
+            }
+
+            $materiel = Materiel::findOrFail($actuel->materiel_id);
+            $destinataire = Destinataire::findOrFail($actuel->destinataire_id);
+            $dotation = (int) ($this->engagements->etat($cycle, $destinataire, $materiel->categorie)->get($materiel->id)['dotation'] ?? 0);
+
+            $decharge = Decharge::create([
+                'cycle_id' => $cycle->id,
+                'destinataire_id' => $destinataire->id,
+                'categorie' => $materiel->categorie,
+                'nature' => 'remplacement',
+                'besoin_remplacement_id' => $actuel->id,
+                'plan_dotation_id' => $plan->id,
+                'prepare_par' => auth()->id(),
+            ]);
+            DechargeLigne::create([
+                'decharge_id' => $decharge->id,
+                'materiel_id' => $materiel->id,
+                'dotation_approuvee' => $dotation,
+                'quantite' => $actuel->quantite,
+                'cle_affichee' => $this->cleAffichee($plan, $materiel->id),
+            ]);
+
+            Journal::noter('decharge', $decharge->id, 'preparation_remplacement', null, [
+                'cycle_id' => $cycle->id, 'destinataire_id' => $destinataire->id, 'categorie' => $decharge->categorie,
+                'nature' => 'remplacement', 'besoin_remplacement_id' => $actuel->id, 'plan_dotation_id' => $plan->id,
+                'lignes' => [['materiel_id' => $materiel->id, 'quantite' => $actuel->quantite]],
+            ]);
+
+            return $decharge;
+        }, attempts: 3);
+    }
+
     public function modifierLigne(DechargeLigne $ligne, int $quantite, ?string $observations): void
     {
         $this->exigerAuteur();
@@ -82,6 +145,12 @@ class DechargeService
             $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : décharge non modifiable.');
             $decharge = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
             $this->exigerBrouillon($decharge, 'Seul un brouillon est modifiable.');
+            if ($decharge->nature === 'remplacement' && $decharge->besoin_remplacement_id !== null) {
+                $autorise = (int) BesoinRemplacement::whereKey($decharge->besoin_remplacement_id)->value('quantite');
+                if ($quantite > $autorise) {
+                    throw new RegleLogistique("La quantité d'un remplacement ne peut pas dépasser celle du besoin autorisé ({$autorise}).");
+                }
+            }
 
             $actuelle = DechargeLigne::whereKey($ligne->id)->lockForUpdate()->firstOrFail();
             $avant = ['quantite' => $actuelle->quantite, 'observations' => $actuelle->observations];
@@ -111,6 +180,9 @@ class DechargeService
             $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : décharge non modifiable.');
             $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
             $this->exigerBrouillon($actuelle, 'Seul un brouillon peut être supprimé.');
+            if ($actuelle->nature === 'remplacement' && $actuelle->besoin_remplacement_id !== null) {
+                throw new RegleLogistique('Ce brouillon porte un remplacement autorisé : il ne peut pas être supprimé.');
+            }
 
             $lignes = DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('id')->get();
             $avant = [
@@ -172,7 +244,8 @@ class DechargeService
             $validees = [];
             foreach ($lignes as $ligne) {
                 $engage = $this->engagements->engage($cycle, $destinataire, $ligne->materiel);
-                $besoin = $besoins->get($ligne->materiel_id)['dotation'] ?? 0;
+                $dotation = $besoins->get($ligne->materiel_id)['dotation'] ?? 0;
+                $besoin = $besoins->get($ligne->materiel_id)['besoin'] ?? 0;
                 if ($engage + $ligne->quantite > $besoin) {
                     throw new RegleLogistique(
                         "Plafond du besoin dépassé pour {$ligne->materiel->libelle} : besoin {$besoin}, déjà engagé {$engage}, demandé {$ligne->quantite}."
@@ -183,7 +256,7 @@ class DechargeService
                 $ligne->forceFill(['reservation_id' => $reservation->id, 'deja_engage' => $engage])->save();
                 $validees[] = [
                     'materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite,
-                    'deja_engage' => $engage, 'dotation_approuvee' => $besoin, 'reservation_id' => $reservation->id,
+                    'deja_engage' => $engage, 'dotation_approuvee' => $dotation, 'besoin' => $besoin, 'reservation_id' => $reservation->id,
                 ];
             }
 
@@ -263,6 +336,43 @@ class DechargeService
     }
 
     /**
+     * Affecte (ou retire, avec null) l'agent de transport d'une décharge validée qui n'est pas partie.
+     * Le motif est obligatoire ; le changement est journalisé avec l'ancien et le nouvel agent.
+     */
+    public function affecterAgent(Decharge $decharge, ?User $agent, string $motif): void
+    {
+        $this->exigerAuteur();
+        $this->exigerDroit();
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > self::MAX_TEXTE) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+
+        DB::transaction(function () use ($decharge, $agent, $motif) {
+            $this->verrouillerCycleOuvert((int) $decharge->cycle_id, 'Cycle clôturé : affectation d\'agent impossible.');
+            $actuelle = Decharge::whereKey($decharge->id)->lockForUpdate()->firstOrFail();
+            if ($actuelle->statut_document !== 'validee' || $actuelle->estPartie()) {
+                throw new RegleLogistique('Agent modifiable seulement sur une décharge validée non partie.');
+            }
+
+            if ($agent !== null) {
+                $courant = User::find($agent->id);
+                if ($courant === null || $courant->role !== 'agent_transport' || ! $courant->actif) {
+                    throw new RegleLogistique("Cet utilisateur n'est pas un agent de transport actif.");
+                }
+            }
+
+            $avant = $actuelle->agent_id === null ? null : (int) $actuelle->agent_id;
+            $apres = $agent?->id;
+            $actuelle->forceFill(['agent_id' => $apres])->save();
+
+            Journal::noter('decharge', $actuelle->id, 'affectation_agent', ['agent_id' => $avant], ['agent_id' => $apres], $motif);
+        }, attempts: 3);
+
+        $decharge->refresh();
+    }
+
+    /**
      * Crée le brouillon qui remplace une décharge annulée : mêmes cycle, destinataire, catégorie et
      * nature, plan approuvé courant ; chaque quantité est plafonnée au reste à expédier (les lignes à 0
      * sont omises). L'annulée reste consultable et reliée à sa remplaçante.
@@ -288,15 +398,27 @@ class DechargeService
             }
 
             $destinataire = Destinataire::findOrFail($origine->destinataire_id);
-            if ($this->brouillonExiste($cycle, $destinataire, $origine->categorie)) {
+            $estRemplacement = $origine->nature === 'remplacement';
+            if (! $estRemplacement && $this->brouillonExiste($cycle, $destinataire, $origine->categorie)) {
                 throw new RegleLogistique(self::BROUILLON_EXISTANT);
             }
+            $besoin = null;
+            if ($estRemplacement) {
+                $besoin = $origine->besoin_remplacement_id === null ? null : BesoinRemplacement::find($origine->besoin_remplacement_id);
+                if ($besoin === null) {
+                    throw new RegleLogistique('Le remplacement de cette décharge est déjà repris par une autre décharge.');
+                }
+            }
 
-            $etat = $this->engagements->etat($cycle, $destinataire, $origine->categorie);
+            // Une décharge de remplacement reprend la quantité du besoin ; les autres, le reste hors remplacements.
+            $etat = $estRemplacement
+                ? $this->engagements->etat($cycle, $destinataire, $origine->categorie)
+                : $this->engagements->etatInitial($cycle, $destinataire, $origine->categorie);
             $lignes = [];
             foreach (DechargeLigne::where('decharge_id', $origine->id)->orderBy('id')->get() as $ancienne) {
                 $entree = $etat->get($ancienne->materiel_id);
-                $quantite = min($ancienne->quantite, $entree['reste'] ?? 0);
+                $plafond = $estRemplacement ? (int) $besoin->quantite : ($entree['reste'] ?? 0);
+                $quantite = min($ancienne->quantite, $plafond);
                 if ($quantite > 0) {
                     $lignes[] = ['entree' => $entree, 'materiel_id' => $ancienne->materiel_id, 'quantite' => $quantite, 'ancienne' => $ancienne->quantite];
                 }
@@ -314,6 +436,11 @@ class DechargeService
                 'plan_dotation_id' => $plan->id,
                 'prepare_par' => auth()->id(),
             ]);
+            if ($estRemplacement) {
+                // Le besoin ne garde qu'une décharge : le lien passe de l'annulée à sa remplaçante.
+                $origine->forceFill(['besoin_remplacement_id' => null])->save();
+                $decharge->forceFill(['besoin_remplacement_id' => $besoin->id])->save();
+            }
 
             $journal = [];
             foreach ($lignes as $l) {
@@ -330,7 +457,7 @@ class DechargeService
             Journal::noter('decharge', $decharge->id, 'remplacement_decharge', null, [
                 'decharge_remplacee_id' => $origine->id, 'cycle_id' => $cycle->id, 'destinataire_id' => $destinataire->id,
                 'categorie' => $decharge->categorie, 'nature' => $decharge->nature,
-                'plan_dotation_id' => $plan->id, 'lignes' => $journal,
+                'plan_dotation_id' => $plan->id, 'besoin_remplacement_id' => $besoin?->id, 'lignes' => $journal,
             ]);
 
             return $decharge;
@@ -357,7 +484,10 @@ class DechargeService
             }
 
             $destinataire = Destinataire::findOrFail($actuelle->destinataire_id);
-            $etat = $this->engagements->etat($cycle, $destinataire, $actuelle->categorie);
+            $estRemplacement = $actuelle->nature === 'remplacement';
+            $etat = $estRemplacement
+                ? $this->engagements->etat($cycle, $destinataire, $actuelle->categorie)
+                : $this->engagements->etatInitial($cycle, $destinataire, $actuelle->categorie);
             $existantes = DechargeLigne::where('decharge_id', $actuelle->id)->orderBy('id')->get();
             $planAvant = (int) $actuelle->plan_dotation_id;
 
@@ -366,6 +496,10 @@ class DechargeService
             foreach ($existantes as $ligne) {
                 $entree = $etat->get($ligne->materiel_id);
                 if ($entree === null) {
+                    // L'unique ligne d'un remplacement autorisé reste à la quantité du besoin : le brouillon ne se vide pas.
+                    if ($estRemplacement && $actuelle->besoin_remplacement_id !== null) {
+                        continue;
+                    }
                     $retirees[] = ['materiel_id' => $ligne->materiel_id, 'quantite' => $ligne->quantite];
                     $ligne->delete();
 
@@ -384,7 +518,8 @@ class DechargeService
             $presentes = $existantes->pluck('materiel_id')->flip();
             $ajoutees = [];
             foreach ($etat as $materielId => $entree) {
-                if ($presentes->has($materielId) || $entree['reste'] <= 0) {
+                // Un brouillon de remplacement ne porte que l'article de son besoin.
+                if ($estRemplacement || $presentes->has($materielId) || $entree['reste'] <= 0) {
                     continue;
                 }
                 DechargeLigne::create([
@@ -457,13 +592,14 @@ class DechargeService
             return self::BROUILLON_EXISTANT;
         }
 
-        $aExpedier = $this->engagements->etat($cycle, $destinataire, $categorie)->filter(fn (array $e) => $e['reste'] > 0);
+        $aExpedier = $this->engagements->etatInitial($cycle, $destinataire, $categorie)->filter(fn (array $e) => $e['reste'] > 0);
         if ($aExpedier->isEmpty()) {
             return self::RIEN_A_EXPEDIER;
         }
 
         $dejaValidee = Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
-            ->where('categorie', $categorie)->where('statut_document', 'validee')->exists();
+            ->where('categorie', $categorie)->where('statut_document', 'validee')
+            ->whereIn('nature', ['initiale', 'reliquat'])->exists();
 
         $decharge = Decharge::create([
             'cycle_id' => $cycle->id,
@@ -492,10 +628,12 @@ class DechargeService
         return $decharge;
     }
 
+    /** Seules les décharges initiales et de reliquat partagent un brouillon unique ; chaque remplacement a le sien. */
     private function brouillonExiste(Cycle $cycle, Destinataire $destinataire, string $categorie): bool
     {
         return Decharge::where('cycle_id', $cycle->id)->where('destinataire_id', $destinataire->id)
-            ->where('categorie', $categorie)->where('statut_document', 'brouillon')->exists();
+            ->where('categorie', $categorie)->where('statut_document', 'brouillon')
+            ->whereIn('nature', ['initiale', 'reliquat'])->exists();
     }
 
     /**

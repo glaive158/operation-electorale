@@ -18,7 +18,7 @@
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-100">
             <h3 class="font-semibold text-slate-800">{{ $ecarts->count() }} écart(s)</h3>
-            <p class="text-xs text-slate-500">Différence entre ce que les décharges validées ont engagé et la dotation du plan approuvé courant.</p>
+            <p class="text-xs text-slate-500">Différence entre ce que les décharges validées ont engagé et le besoin d'expédition (dotation du plan approuvé courant, remplacements et clôtures compris).</p>
         </div>
         <div class="overflow-x-auto">
             <table class="w-full text-sm">
@@ -27,6 +27,7 @@
                         <th class="px-5 py-3 text-left font-semibold">Destinataire</th>
                         <th class="px-5 py-3 text-left font-semibold">Article</th>
                         <th class="px-5 py-3 text-right font-semibold">Dotation</th>
+                        <th class="px-5 py-3 text-right font-semibold">Besoin</th>
                         <th class="px-5 py-3 text-right font-semibold">Engagé</th>
                         <th class="px-5 py-3 text-left font-semibold">Écart</th>
                         <th class="px-5 py-3 text-right font-semibold">Quantité</th>
@@ -39,6 +40,7 @@
                             <td class="px-5 py-3 font-medium text-slate-800">{{ $e['destinataire']->libelle }}</td>
                             <td class="px-5 py-3 text-slate-600">{{ $e['materiel']->libelle }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($e['dotation']) }}</td>
+                            <td class="px-5 py-3 text-right text-slate-600">{{ $n($e['besoin']) }}</td>
                             <td class="px-5 py-3 text-right text-slate-600">{{ $n($e['engage']) }}</td>
                             <td class="px-5 py-3"><span class="px-2 py-0.5 rounded-full text-xs font-medium {{ $classes[$e['type']] ?? '' }}">{{ $libelles[$e['type']] ?? $e['type'] }}</span></td>
                             <td class="px-5 py-3 text-right font-semibold text-slate-800">{{ $n($e['quantite']) }}</td>
@@ -66,7 +68,7 @@
                             </td>
                         </tr>
                     @empty
-                        <tr><td colspan="7" class="px-6 py-10 text-center text-slate-400">Aucun écart : les décharges validées correspondent au plan en vigueur.</td></tr>
+                        <tr><td colspan="8" class="px-6 py-10 text-center text-slate-400">Aucun écart : les décharges validées correspondent au plan en vigueur.</td></tr>
                     @endforelse
                 </tbody>
             </table>

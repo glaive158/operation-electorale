@@ -11,7 +11,7 @@
                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
             <select name="role" class="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none">
                 <option value="">Tous les rôles</option>
-                @foreach(['admin'=>'Admin','gouverneur'=>'Gouverneur','prefet'=>'Préfet','sous_prefet'=>'Sous-Préfet','commission'=>'Commission'] as $v => $l)
+                @foreach(['admin'=>'Admin','gouverneur'=>'Gouverneur','prefet'=>'Préfet','sous_prefet'=>'Sous-Préfet','commission'=>'Commission','chef_poste'=>'Chef de poste','agent_transport'=>'Agent de transport'] as $v => $l)
                     <option value="{{ $v }}" {{ request('role') === $v ? 'selected' : '' }}>{{ $l }}</option>
                 @endforeach
             </select>
