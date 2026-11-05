@@ -13,6 +13,7 @@ use App\Models\Logistique\MouvementStock;
 use App\Models\Logistique\ReservationStock;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use InvalidArgumentException;
 use LogicException;
 
@@ -346,6 +347,96 @@ class StockService
         return $this->ecrire($materiel, 'inventaire_initial', $quantite, null, $motif, 'bon', null);
     }
 
+    /**
+     * Remet au magasin du matériel restitué (état bon ou à réparer), référencé à la ligne de restitution.
+     * Usage interne de la restitution : le droit (logistique-gerer) est contrôlé par l'appelant, qui tient
+     * déjà ses verrous (cycle, restitution, puis matériel). Aucun cycle ouvert n'est exigé : un retour
+     * peut être contrôlé après la clôture du cycle.
+     */
+    public function reintegrer(Materiel $materiel, int $quantite, string $etat, Model $reference, string $motif): MouvementStock
+    {
+        if ($quantite <= 0) {
+            throw new InvalidArgumentException('La quantité réintégrée doit être strictement positive.');
+        }
+        $this->exigerEtat($etat);
+        $motif = $this->exigerMotif($motif, 'une réintégration');
+
+        return $this->ecrire($materiel, 'reintegration', $quantite, $reference, $motif, $etat, null);
+    }
+
+    /**
+     * Change l'état de matériel déjà au magasin (réparation : à réparer vers bon ; casse constatée : bon
+     * vers à réparer). Deux mouvements dans une transaction. Le droit de gérer le magasin est reverifié ici :
+     * remettre du matériel à réparer en bon crée du stock libre.
+     *
+     * @return array{0: MouvementStock, 1: MouvementStock} la sortie de l'état d'origine, puis l'entrée dans l'état d'arrivée
+     */
+    public function reclasser(Materiel $materiel, int $quantite, string $de, string $vers, string $motif): array
+    {
+        if ($quantite <= 0) {
+            throw new InvalidArgumentException('La quantité reclassée doit être strictement positive.');
+        }
+        $this->exigerEtat($de);
+        $this->exigerEtat($vers);
+        if ($de === $vers) {
+            throw new InvalidArgumentException('Le reclassement exige deux états différents.');
+        }
+        $motif = $this->exigerMotif($motif, 'un reclassement');
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-gerer')) {
+            throw new RegleLogistique('Vous n\'avez pas le droit de reclasser du matériel.');
+        }
+
+        return DB::transaction(function () use ($materiel, $quantite, $de, $vers, $motif) {
+            $verrouille = Materiel::whereKey($materiel->id)->lockForUpdate()->firstOrFail();
+            $this->exigerSortieDisponible($verrouille, $de, $quantite);
+
+            $sortie = $this->ecrire($verrouille, 'reclassement', -$quantite, null, $motif, $de, null);
+            $entree = $this->ecrire($verrouille, 'reclassement', $quantite, null, $motif, $vers, null);
+
+            Journal::noter(
+                'mouvement_stock', $sortie->id, 'reclassement',
+                null,
+                ['quantite' => $quantite, 'de' => $de, 'vers' => $vers, 'entree_id' => $entree->id],
+                $motif,
+            );
+
+            return [$sortie, $entree];
+        }, attempts: 3);
+    }
+
+    /**
+     * Sort définitivement du stock du matériel irrécupérable. Réservé au responsable logistique.
+     */
+    public function reformer(Materiel $materiel, int $quantite, string $etat, string $motif): MouvementStock
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut réformer du matériel.');
+        }
+        if ($quantite <= 0) {
+            throw new InvalidArgumentException('La quantité réformée doit être strictement positive.');
+        }
+        $this->exigerEtat($etat);
+        $motif = $this->exigerMotif($motif, 'une réforme');
+
+        return DB::transaction(function () use ($materiel, $quantite, $etat, $motif) {
+            $verrouille = Materiel::whereKey($materiel->id)->lockForUpdate()->firstOrFail();
+            $this->exigerSortieDisponible($verrouille, $etat, $quantite);
+
+            $mouvement = $this->ecrire($verrouille, 'reforme', -$quantite, null, $motif, $etat, null);
+
+            Journal::noter(
+                'mouvement_stock', $mouvement->id, 'reforme',
+                null,
+                ['quantite' => $quantite, 'etat' => $etat],
+                $motif,
+            );
+
+            return $mouvement;
+        }, attempts: 3);
+    }
+
     public function compenser(MouvementStock $mouvement, string $motif): MouvementStock
     {
         if ($mouvement->type === 'compensation') {
@@ -432,6 +523,46 @@ class StockService
                 'user_id'               => $auteur,
             ]);
         }, attempts: 3);
+    }
+
+    private function exigerEtat(string $etat): void
+    {
+        if (! in_array($etat, MouvementStock::ETATS, true)) {
+            throw new InvalidArgumentException("État de stock inconnu : {$etat}.");
+        }
+    }
+
+    private function exigerMotif(string $motif, string $pour): string
+    {
+        $motif = trim($motif);
+        if ($motif === '') {
+            throw new InvalidArgumentException("Un motif est obligatoire pour {$pour}.");
+        }
+
+        return $motif;
+    }
+
+    /**
+     * Sortie d'un état, sous le verrou du matériel : hors du bon, il faut que le physique bon couvre la
+     * quantité en plus des réservations actives (le libre ne devient jamais négatif) ; hors de l'état à
+     * réparer, il faut que ce physique la couvre.
+     */
+    private function exigerSortieDisponible(Materiel $materiel, string $etat, int $quantite): void
+    {
+        $disponible = $etat === 'bon'
+            ? $this->libreVerrouille($materiel)
+            : $this->soldeVerrouille($materiel, 'a_reparer');
+
+        if ($disponible < $quantite) {
+            throw new RegleLogistique(sprintf(
+                'Mouvement impossible pour « %s » (état %s) : demandé %d, disponible %d%s.',
+                $materiel->libelle,
+                $etat === 'bon' ? 'bon' : 'à réparer',
+                $quantite,
+                max(0, $disponible),
+                $etat === 'bon' ? ' (le reste est réservé)' : '',
+            ));
+        }
     }
 
     /**

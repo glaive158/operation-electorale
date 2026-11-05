@@ -8,6 +8,8 @@ use App\Models\Logistique\Declaration;
 use App\Models\Logistique\Delegation;
 use App\Models\Logistique\Destinataire;
 use App\Models\Logistique\Remise;
+use App\Models\Logistique\Restitution;
+use App\Models\Logistique\RestitutionDeclaration;
 use App\Models\User;
 use App\Support\Canonique;
 use Carbon\Carbon;
@@ -23,6 +25,9 @@ use LogicException;
  * Le code n'est ni journalisé, ni écrit dans un message d'erreur, ni renvoyé : il ne vit que le temps de
  * la vérification, en mémoire.
  *
+ * L'objet signé (une remise par défaut, ou une restitution) et le signataire attendu forment le contexte de la
+ * preuve (ContextePreuve) : les déclarations de restitution réutilisent la même vérification.
+ *
  * Verrous : ce service ne prend aucun verrou de cycle. L'appelant (DeclarationService::declarer, via l'API)
  * l'invoque avant d'ouvrir sa transaction, une seule fois par nouvelle déclaration, après avoir traité
  * le rejeu idempotent (même clé, même contenu) : un échec de code est compté à chaque appel.
@@ -35,7 +40,7 @@ class PreuveService
     /** Gravité des états, de la meilleure à la pire : le pire l'emporte. */
     private const RANG = ['verifiee_code' => 0, self::DELEGATION_EN_REGLE => 0, 'a_verifier' => 1, 'echec' => 2];
 
-    /** Écart d'horloge toléré de la tablette, avant la création de la remise ou après l'instant présent. */
+    /** Écart d'horloge toléré de la tablette, avant la création de l'objet signé ou après l'instant présent. */
     private const TOLERANCE_HORLOGE_MINUTES = 10;
 
     private const REFUS_REUTILISE = 'Preuve déjà utilisée par une autre déclaration.';
@@ -110,6 +115,41 @@ class PreuveService
     }
 
     /**
+     * Le contenu attesté d'une déclaration de restitution : {restitution_id, cle, signataire, signataire_user_id,
+     * lignes, horodatage_terminal}, les lignes typées et triées par article comme pour une remise. La tablette
+     * construit exactement le même.
+     *
+     * @param  array{nom?: string, qualite?: string}  $signataire
+     * @param  array<int|string, array<string, mixed>>  $lignes  par identifiant d'article, ou liste de lignes portant materiel_id
+     * @return array<string, mixed>
+     */
+    public function contenuPreuveRestitution(Restitution $r, array $signataire, int $signataireUserId, array $lignes, string $cle, string $horodatageTerminal): array
+    {
+        $normalisees = [];
+        foreach ($lignes as $materielId => $ligne) {
+            $observation = isset($ligne['observation']) && is_string($ligne['observation']) ? trim($ligne['observation']) : null;
+            $normalisees[] = [
+                'materiel_id' => (int) ($ligne['materiel_id'] ?? $materielId),
+                'restitue' => (int) ($ligne['restitue'] ?? 0),
+                'observation' => $observation === '' ? null : $observation,
+            ];
+        }
+        usort($normalisees, fn (array $a, array $b) => $a['materiel_id'] <=> $b['materiel_id']);
+
+        return [
+            'restitution_id' => (int) $r->id,
+            'cle' => $cle,
+            'signataire' => [
+                'nom' => (string) ($signataire['nom'] ?? ''),
+                'qualite' => (string) ($signataire['qualite'] ?? ''),
+            ],
+            'signataire_user_id' => $signataireUserId,
+            'lignes' => $normalisees,
+            'horodatage_terminal' => $horodatageTerminal,
+        ];
+    }
+
+    /**
      * Empreinte (SHA-256 des octets chiffrés) sous laquelle un bloc est mémorisé ; null pour un bloc absent,
      * vide ou qui n'est pas du base64 : il n'y a alors rien à mémoriser.
      */
@@ -130,16 +170,31 @@ class PreuveService
      * n'atteste pas ce contenu ou dont l'horodatage n'est pas celui du contenu. Sinon l'état d'identité :
      * « verifiee_code », « a_verifier » (code changé ou réinitialisé, même pas encore rechoisi, ou délégation
      * révoquée depuis la signature hors ligne) ou « echec » (bloc vide, mal formé ou indéchiffrable ; signataire qui
-     * n'est pas l'autorité attendue de la remise ; horodatage hors bornes ; compte verrouillé ; aucun code valide à
-     * l'instant de la signature ; code faux ; délégation jamais en vigueur). Seul un code faux face à un code en
-     * vigueur est compté (trois échecs verrouillent le compte).
+     * n'est pas le signataire attendu de l'objet signé ; horodatage hors bornes ; compte verrouillé ; aucun code
+     * valide à l'instant de la signature ; code faux ; délégation jamais en vigueur). Seul un code faux face à un code
+     * en vigueur est compté (trois échecs verrouillent le compte).
      *
      * bloc_empreinte vaut null quand le bloc est vide ou n'est pas du base64 : rien n'est à mémoriser.
+     *
+     * L'objet signé est la remise du contenu (`remise_id`) ; verifierDans() prend un autre contexte.
      *
      * @param  array<string, mixed>  $contenu  le contenu de contenuPreuve()
      * @return array{verification: string, bloc_empreinte: ?string}
      */
     public function verifier(array $contenu, string $cle, string $blocBase64, User $signataire, CarbonInterface $horodatageTerminal, ?Delegation $delegation): array
+    {
+        return $this->verifierDans(ContextePreuve::depuisContenu($contenu), $contenu, $cle, $blocBase64, $signataire, $horodatageTerminal, $delegation);
+    }
+
+    /**
+     * La vérification de verifier(), pour l'objet signé et le signataire attendu que nomme le contexte (une
+     * restitution, par exemple) : mêmes rejets, mêmes états, même comptage des échecs. Les anomalies de contenu
+     * sont journalisées sur l'objet du contexte.
+     *
+     * @param  array<string, mixed>  $contenu  le contenu de contenuPreuve() ou de contenuPreuveRestitution()
+     * @return array{verification: string, bloc_empreinte: ?string}
+     */
+    public function verifierDans(ContextePreuve $contexte, array $contenu, string $cle, string $blocBase64, User $signataire, CarbonInterface $horodatageTerminal, ?Delegation $delegation): array
     {
         // Les comparaisons en base (codes, délégations) lisent des dates sans fuseau, dans celui de l'application :
         // l'instant de la tablette y est ramené. Le décalage d'origine ne sert qu'au contenu attesté (memeInstant).
@@ -150,10 +205,14 @@ class PreuveService
         }
         $blocEmpreinte = hash('sha256', $chiffre);
 
-        // 1. Un bloc ne sert qu'une fois : il est lié à une déclaration par son empreinte.
+        // 1. Un bloc ne sert qu'une fois : il est lié à une déclaration (de réception ou de restitution) par son empreinte.
         $porteur = Declaration::where('bloc_empreinte', $blocEmpreinte)->value('id');
         if ($porteur !== null) {
             $this->refuser((int) $porteur, 'bloc_reutilise', $signataire, self::REFUS_REUTILISE);
+        }
+        $porteur = RestitutionDeclaration::where('bloc_empreinte', $blocEmpreinte)->value('id');
+        if ($porteur !== null) {
+            $this->refuser((int) $porteur, 'bloc_reutilise', $signataire, self::REFUS_REUTILISE, 'restitution_declaration');
         }
 
         // 2. Déchiffrement ; tout ce qui n'est pas un bloc complet est un échec d'identité.
@@ -163,16 +222,16 @@ class PreuveService
         }
 
         // 3. Le bloc doit attester cette clé d'idempotence et ce contenu, signé par ce compte, à cet instant.
-        $signataireDuContenu = $contenu['signataire']['user_id'] ?? null;
+        $signataireDuContenu = $contexte->signataireDuContenu($contenu);
         if (! hash_equals($cle, $bloc['cle'])
             || ! hash_equals(Canonique::empreinte($contenu), $bloc['empreinte'])
             || ($signataireDuContenu !== null && (int) $signataireDuContenu !== (int) $signataire->id)
             || ! $this->memeInstant($contenu['horodatage_terminal'] ?? null, $horodatageTerminal)) {
-            $this->refuser((int) ($contenu['remise_id'] ?? 0), 'contenu_different', $signataire, self::REFUS_CONTENU, 'remise');
+            $this->refuser($contexte->objetId, 'contenu_different', $signataire, self::REFUS_CONTENU, $contexte->objetType);
         }
 
-        // Qui peut signer cette remise, et quand : un échec ici n'est pas une erreur de code, donc non compté.
-        if (! $this->signataireAttendu($contenu, $signataire, $horodatageTerminal, $delegation)) {
+        // Qui peut signer cet objet, et quand : un échec ici n'est pas une erreur de code, donc non compté.
+        if (! $this->signataireAttendu($contexte, $signataire, $horodatageTerminal, $delegation)) {
             return $this->resultat('echec', $blocEmpreinte);
         }
 
@@ -198,27 +257,26 @@ class PreuveService
     }
 
     /**
-     * La remise du contenu va à un destinataire ; le signataire en est le titulaire, ou le délégué d'une
-     * délégation de CE destinataire ; l'horodatage tient entre la création de la remise et l'instant présent.
-     *
-     * @param  array<string, mixed>  $contenu
+     * Le signataire est celui que le contexte attend : le titulaire du destinataire, ou le délégué d'une délégation
+     * de CE destinataire ; ou le compte attendu lui-même (actif, sans délégation). L'horodatage tient entre la
+     * création de l'objet signé et l'instant présent.
      */
-    private function signataireAttendu(array $contenu, User $signataire, CarbonInterface $horodatage, ?Delegation $delegation): bool
+    private function signataireAttendu(ContextePreuve $contexte, User $signataire, CarbonInterface $horodatage, ?Delegation $delegation): bool
     {
-        $remise = Remise::find((int) ($contenu['remise_id'] ?? 0));
-        if ($remise === null || $remise->a_type !== 'destinataire' || $remise->a_id === null) {
-            return false;
-        }
-        $destinataire = Destinataire::find($remise->a_id);
-        if ($destinataire === null) {
+        $destinataire = $contexte->destinataire;
+        if ($destinataire === null && $contexte->signataireUserId === null) {
             return false;
         }
 
         // Sans date de création, la borne basse est invérifiable : l'identité n'est pas tenue pour établie.
-        if ($remise->created_at === null
+        if ($contexte->creeLe === null
             || $horodatage->greaterThan(now()->addMinutes(self::TOLERANCE_HORLOGE_MINUTES))
-            || $horodatage->lessThan(Carbon::instance($remise->created_at)->subMinutes(self::TOLERANCE_HORLOGE_MINUTES))) {
+            || $horodatage->lessThan(Carbon::instance($contexte->creeLe)->subMinutes(self::TOLERANCE_HORLOGE_MINUTES))) {
             return false;
+        }
+
+        if ($destinataire === null) {
+            return $delegation === null && (bool) $signataire->actif && (int) $signataire->id === $contexte->signataireUserId;
         }
 
         if ($delegation === null) {

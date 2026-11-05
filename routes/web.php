@@ -33,6 +33,7 @@ use App\Http\Controllers\Logistique\PlanDotationController;
 use App\Http\Controllers\Logistique\PosteController;
 use App\Http\Controllers\Logistique\ReclamationController;
 use App\Http\Controllers\Logistique\RemiseController;
+use App\Http\Controllers\Logistique\RestitutionController;
 use App\Http\Controllers\Logistique\StockController;
 use App\Http\Controllers\Terrain\AppController as TerrainAppController;
 use App\Http\Controllers\Terrain\CodeController as TerrainCodeController;
@@ -44,6 +45,7 @@ use App\Http\Controllers\Terrain\IndicateurController as TerrainIndicateurContro
 use App\Http\Controllers\Terrain\PieceController as TerrainPieceController;
 use App\Http\Controllers\Terrain\ReclamationController as TerrainReclamationController;
 use App\Http\Controllers\Terrain\RedistributionController as TerrainRedistributionController;
+use App\Http\Controllers\Terrain\RestitutionController as TerrainRestitutionController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FichierElectoralController;
 use App\Http\Controllers\ListeEmargementController;
@@ -166,6 +168,8 @@ Route::middleware(['auth'])->group(function () {
             Route::get('delegations', [TerrainDelegationController::class, 'index'])->name('delegations.index');
             Route::post('delegations', [TerrainDelegationController::class, 'store'])->name('delegations.store');
             Route::post('delegations/{delegation}/revocation', [TerrainDelegationController::class, 'revoquer'])->whereNumber('delegation')->name('delegations.revoquer');
+            Route::get('restitutions', [TerrainRestitutionController::class, 'index'])->name('restitutions.index');
+            Route::post('restitutions/{restitution}/declaration', [TerrainRestitutionController::class, 'declarer'])->whereNumber('restitution')->name('restitutions.declarer');
         });
     });
 
@@ -228,6 +232,14 @@ Route::middleware(['auth'])->group(function () {
         Route::post('reclamations/{reclamation}/resolution', [ReclamationController::class, 'resoudre'])->name('reclamations.resoudre');
         Route::get('cycles/{cycle}/suivi', [IndicateurController::class, 'index'])->name('suivi.index');
 
+        Route::get('cycles/{cycle}/restitutions', [RestitutionController::class, 'index'])->name('restitutions.index');
+        Route::get('restitutions/{restitution}', [RestitutionController::class, 'show'])->whereNumber('restitution')->name('restitutions.show');
+        Route::post('restitutions/{restitution}/agent', [RestitutionController::class, 'affecterAgent'])->whereNumber('restitution')->name('restitutions.agent');
+        Route::post('restitutions/{restitution}/reception', [RestitutionController::class, 'receptionner'])->whereNumber('restitution')->name('restitutions.receptionner');
+        Route::post('restitutions/{restitution}/controle', [RestitutionController::class, 'controler'])->whereNumber('restitution')->name('restitutions.controler');
+        Route::post('restitution-lignes/{ligne}/justification', [RestitutionController::class, 'justifier'])->whereNumber('ligne')->name('restitutions.justifier');
+        Route::get('restitutions/{restitution}/pdf/{exemplaire}', [RestitutionController::class, 'pdf'])->whereNumber('restitution')->name('restitutions.pdf');
+
         Route::middleware('can:logistique-administrer')->group(function () {
             Route::post('mouvements/{mouvement}/compensation', [StockController::class, 'compenser'])->name('mouvements.compenser');
             Route::put('cycles/{cycle}/attributions/{materiel}', [StockController::class, 'attribuer'])->name('attributions.update');
@@ -269,6 +281,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('utilisateurs/{user}/code/reinitialisation', [CodeReceptionController::class, 'reinitialiser'])->whereNumber('user')->name('utilisateurs.code.reinitialiser');
 
             Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
+            Route::post('cycles/{cycle}/circuit/sous-prefectures/{destinataire}', [CircuitController::class, 'sousPrefecture'])->whereNumber('destinataire')->name('circuit.sous-prefecture');
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
             Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
             Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');
@@ -278,6 +291,11 @@ Route::middleware(['auth'])->group(function () {
             Route::post('appareils/{appareil}/revocation', [AppareilController::class, 'revoquer'])->whereNumber('appareil')->name('appareils.revoquer');
             Route::post('decharges/{decharge}/reserve/liberation', [AppareilController::class, 'libererReserve'])->whereNumber('decharge')->name('decharges.reserve.liberer');
             Route::post('remises/{remise}/arbitrage', [RemiseController::class, 'arbitrer'])->whereNumber('remise')->name('remises.arbitrage');
+
+            Route::post('cycles/{cycle}/restitutions/ouverture', [RestitutionController::class, 'ouvrir'])->name('restitutions.ouvrir');
+            Route::post('restitutions/{restitution}/recalcul', [RestitutionController::class, 'recalculer'])->whereNumber('restitution')->name('restitutions.recalcul');
+            Route::post('restitution-lignes/{ligne}/reforme', [RestitutionController::class, 'reforme'])->whereNumber('ligne')->name('restitutions.reforme');
+            Route::post('restitution-declarations/{declaration}/retenue', [RestitutionController::class, 'retenir'])->whereNumber('declaration')->name('restitutions.retenir');
         });
         Route::resource('cycles', CycleController::class)->only(['index']);
     });

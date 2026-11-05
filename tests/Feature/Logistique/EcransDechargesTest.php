@@ -4,9 +4,12 @@ namespace Tests\Feature\Logistique;
 
 use App\Models\Logistique\BesoinRemplacement;
 use App\Models\Logistique\CircuitDepartement;
+use App\Models\Logistique\CircuitSousPrefecture;
 use App\Models\Logistique\Decharge;
 use App\Models\Logistique\DechargeDocument;
+use App\Models\Logistique\Destinataire;
 use App\Models\User;
+use App\Services\Logistique\CircuitService;
 use App\Services\Logistique\DechargePdfService;
 use App\Services\Logistique\DechargeService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -428,6 +431,71 @@ class EcransDechargesTest extends TestCase
         $this->assertSame(0, CircuitDepartement::count());
     }
 
+    public function test_circuit_par_sous_prefecture_a_l_ecran(): void
+    {
+        $route = route('logistique.circuit.sous-prefecture', [$this->cycle, $this->sousPrefecture1]);
+
+        $this->actingAs($this->gestionnaire);
+        $this->get(route('logistique.circuit.show', $this->cycle))
+            ->assertOk()->assertSee('Sous-préfecture de Sindia')->assertSee('Sous-préfecture de Thiénaba')->assertDontSee($route, false);
+        $this->post($route, ['circuit' => 'direct', 'motif' => 'Accès direct'])->assertForbidden();
+        $this->assertSame(0, CircuitSousPrefecture::count());
+
+        $this->actingAs($this->responsable);
+        $this->get(route('logistique.circuit.show', $this->cycle))
+            ->assertOk()->assertSee($route, false)
+            ->assertSee('Comme le département')
+            ->assertSee('Circuit de Sous-préfecture de Sindia')
+            ->assertSee('Motif pour Sous-préfecture de Sindia');
+        $this->post($route, ['circuit' => 'direct', 'motif' => 'Accès direct'])
+            ->assertSessionHasNoErrors()->assertSessionHas('success', 'Circuit de la sous-préfecture enregistré.');
+        $this->assertSame('direct', CircuitSousPrefecture::where('cycle_id', $this->cycle->id)
+            ->where('destinataire_id', $this->sousPrefecture1->id)->value('circuit'));
+        $this->get(route('logistique.circuit.show', $this->cycle))
+            ->assertOk()->assertSeeInOrder([
+                'Sous-préfecture de Sindia', 'Direct', '>Sous-préfecture</span>',
+                'Sous-préfecture de Thiénaba', 'Via le préfet', '>Cycle</span>',
+            ], false);
+
+        $this->post($route, ['circuit' => 'inconnu', 'motif' => 'x'])->assertSessionHasErrors('circuit');
+        $this->post($route, ['circuit' => 'direct'])->assertSessionHasErrors('motif');
+        $this->post(route('logistique.circuit.sous-prefecture', [$this->cycle, $this->prefecture]), ['circuit' => 'direct', 'motif' => 'x'])
+            ->assertSessionHas('error', 'Ce destinataire n\'est pas une sous-préfecture.');
+        $orpheline = Destinataire::create(['type' => 'sous_prefecture', 'libelle' => 'Sous-préfecture orpheline', 'arrondissement_id' => 200]);
+        $this->post(route('logistique.circuit.sous-prefecture', [$this->cycle, $orpheline]), ['circuit' => 'via_prefet', 'motif' => 'x'])
+            ->assertSessionHas('error', 'Sous-préfecture sans préfecture parente : circuit via le préfet impossible.');
+        $this->assertSame(1, CircuitSousPrefecture::count());
+
+        $this->post($route, ['circuit' => '', 'motif' => 'Comme le département'])->assertSessionHasNoErrors();
+        $this->assertSame(0, CircuitSousPrefecture::count());
+    }
+
+    public function test_ecran_du_circuit_sans_requete_par_sous_prefecture(): void
+    {
+        $this->actingAs($this->responsable);
+        $circuits = app(CircuitService::class);
+        $compter = function (): int {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $this->get(route('logistique.circuit.show', $this->cycle))->assertOk();
+            DB::disableQueryLog();
+
+            return count(DB::getQueryLog());
+        };
+
+        $circuits->definirSousPrefecture($this->cycle, $this->sousPrefecture1, 'direct', 'x');
+        $avant = $compter();
+        foreach (range(1, 5) as $i) {
+            $sousPrefecture = Destinataire::create([
+                'type' => 'sous_prefecture', 'libelle' => "Sous-préfecture {$i}",
+                'arrondissement_id' => 300 + $i, 'prefecture_id' => $this->prefecture->id,
+            ]);
+            $circuits->definirSousPrefecture($this->cycle, $sousPrefecture, 'via_prefet', 'x');
+        }
+
+        $this->assertSame($avant, $compter());
+    }
+
     public function test_menu_decharges_visible(): void
     {
         $this->actingAs($this->gestionnaire);
@@ -472,6 +540,7 @@ class EcransDechargesTest extends TestCase
         // [méthode, URL, corps, droit exigé]
         $ecritures = [
             ['PUT', route('logistique.circuit.update', [$this->cycle, 10]), ['circuit' => 'direct', 'motif' => 'x'], 'administrer'],
+            ['POST', route('logistique.circuit.sous-prefecture', [$this->cycle, $this->sousPrefecture1]), ['circuit' => 'direct', 'motif' => 'x'], 'administrer'],
             ['POST', route('logistique.decharges.annuler', $brouillon), ['motif' => 'x'], 'administrer'],
             ['POST', route('logistique.decharges.store', $this->cycle), ['destinataire_id' => $this->prefecture->id, 'categorie' => 'materiel_lourd'], 'gerer'],
             ['POST', route('logistique.decharges.lot', $this->cycle), ['categorie' => 'materiel_lourd'], 'gerer'],
@@ -497,6 +566,7 @@ class EcransDechargesTest extends TestCase
         $this->assertSame('brouillon', $brouillon->fresh()->statut_document);
         $this->assertSame(100, $ligne->fresh()->quantite);
         $this->assertSame(0, CircuitDepartement::count());
+        $this->assertSame(0, CircuitSousPrefecture::count());
 
         // Aucune écriture de circuit ou de décharge n'échappe à la liste, avec le droit annoncé.
         $declarees = collect($ecritures)->map(fn (array $e) => app('router')->getRoutes()->match(Request::create($e[1], $e[0]))->getName());

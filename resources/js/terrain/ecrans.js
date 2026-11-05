@@ -15,24 +15,24 @@ import {
     duCompte, identiteNonVerifiee, reserveRestante, texteHorsLigne, texteStockage,
 } from './vue.js';
 
-const CARTE = 'bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-4';
-const CHAMP = 'w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none';
-const BOUTON = 'px-6 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90 bg-sen-green disabled:opacity-50';
-const BOUTON_SECONDAIRE = 'px-4 py-2 rounded-lg border border-slate-300 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50';
+export const CARTE = 'bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-4';
+export const CHAMP = 'w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none';
+export const BOUTON = 'px-6 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90 bg-sen-green disabled:opacity-50';
+export const BOUTON_SECONDAIRE = 'px-4 py-2 rounded-lg border border-slate-300 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50';
 const BOUTON_DANGER = 'px-4 py-2 rounded-lg text-white text-sm font-medium hover:opacity-90 bg-sen-red disabled:opacity-50';
-const ETIQUETTE = 'block text-xs text-slate-500 mb-1';
+export const ETIQUETTE = 'block text-xs text-slate-500 mb-1';
 
-const badge = (statut) => h('span', { class: `px-2 py-0.5 rounded-full text-xs font-medium ${CLASSES_STATUT[statut] ?? 'bg-slate-200 text-slate-600'}` }, LIBELLES_STATUT[statut] ?? statut);
+export const badge = (statut) => h('span', { class: `px-2 py-0.5 rounded-full text-xs font-medium ${CLASSES_STATUT[statut] ?? 'bg-slate-200 text-slate-600'}` }, LIBELLES_STATUT[statut] ?? statut);
 
-const alerte = (texte, type = 'erreur') => h('div', {
+export const alerte = (texte, type = 'erreur') => h('div', {
     role: type === 'erreur' ? 'alert' : 'status',
     class: `p-3 rounded-xl text-sm ${type === 'erreur' ? 'bg-sen-red text-white' : 'bg-green-50 text-green-800 border border-green-200'}`,
 }, texte);
 
-const lien = (hash, texte) => h('a', { href: hash, class: BOUTON_SECONDAIRE }, texte);
+export const lien = (hash, texte) => h('a', { href: hash, class: BOUTON_SECONDAIRE }, texte);
 
 /** Signée sans code : dit partout que l'identité du signataire n'est pas vérifiée. */
-const badgeIdentite = () => h('span', { class: 'px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800' }, 'Identité non vérifiée');
+export const badgeIdentite = () => h('span', { class: 'px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800' }, 'Identité non vérifiée');
 
 const TEXTE_LECTURE_SEULE = 'À signer sur la tablette de l\'agent, ou à confirmer depuis votre compte.';
 
@@ -151,7 +151,7 @@ function boutonContestation(ctx, declaration) {
 
 /* ───────────── Réception ───────────── */
 
-function lireEntier(champ) {
+export function lireEntier(champ) {
     const texte = champ.value.trim();
 
     return /^\d{1,8}$/.test(texte) ? Number(texte) : null;

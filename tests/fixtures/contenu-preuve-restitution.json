@@ -1,0 +1,56 @@
+[
+    {
+        "note": "restitution de base : lignes dans le désordre, observation vide => null, observation rognée",
+        "entree": {
+            "restitution_id": 41,
+            "cle": "b7c8d9e0-f1a2-4b3c-8d4e-0123456789ab",
+            "signataire": {
+                "nom": "Éléonore Çelik",
+                "qualite": "Sous-préfète"
+            },
+            "signataire_user_id": 2048,
+            "lignes": [
+                {
+                    "materiel_id": 5,
+                    "restitue": 4,
+                    "observation": "   "
+                },
+                {
+                    "materiel_id": 3,
+                    "restitue": 90,
+                    "observation": " Deux urnes fendues / laissées sur place "
+                },
+                {
+                    "materiel_id": 9,
+                    "restitue": 0,
+                    "observation": null
+                }
+            ],
+            "horodatage_terminal": "2026-11-20T09:30:00+00:00"
+        },
+        "json": "{\"cle\":\"b7c8d9e0-f1a2-4b3c-8d4e-0123456789ab\",\"horodatage_terminal\":\"2026-11-20T09:30:00+00:00\",\"lignes\":[{\"materiel_id\":3,\"observation\":\"Deux urnes fendues / laissées sur place\",\"restitue\":90},{\"materiel_id\":5,\"observation\":null,\"restitue\":4},{\"materiel_id\":9,\"observation\":null,\"restitue\":0}],\"restitution_id\":41,\"signataire\":{\"nom\":\"Éléonore Çelik\",\"qualite\":\"Sous-préfète\"},\"signataire_user_id\":2048}",
+        "empreinte": "ad78b61034ffd3f3b38b27838754d2b9b98ce19abfa33141c35d312f6ebd575f"
+    },
+    {
+        "note": "restitution par un délégué, une seule ligne, décalage horaire non nul",
+        "entree": {
+            "restitution_id": 7,
+            "cle": "01JD0RESTITUTION0000000001",
+            "signataire": {
+                "nom": "Moussa Fall",
+                "qualite": "Sous-préfet (délégué)"
+            },
+            "signataire_user_id": 2051,
+            "lignes": [
+                {
+                    "materiel_id": 12,
+                    "restitue": 1500,
+                    "observation": "RAS"
+                }
+            ],
+            "horodatage_terminal": "2026-11-21T18:05:42+01:00"
+        },
+        "json": "{\"cle\":\"01JD0RESTITUTION0000000001\",\"horodatage_terminal\":\"2026-11-21T18:05:42+01:00\",\"lignes\":[{\"materiel_id\":12,\"observation\":\"RAS\",\"restitue\":1500}],\"restitution_id\":7,\"signataire\":{\"nom\":\"Moussa Fall\",\"qualite\":\"Sous-préfet (délégué)\"},\"signataire_user_id\":2051}",
+        "empreinte": "71623a8f91b87b479d45be8f48dfae031ebd34bb2747b8bedbc9952d5f437b5e"
+    }
+]

@@ -24,6 +24,7 @@
             ['Écarts', 'logistique.ecarts.index', $cycleOnglet, 'logistique.ecarts.*'],
             ['À vérifier', 'logistique.declarations.a-verifier', $cycleOnglet, 'logistique.declarations.*'],
             ['Réclamations', 'logistique.reclamations.index', $cycleOnglet, 'logistique.reclamations.*'],
+            ['Restitution', 'logistique.restitutions.index', $cycleOnglet, 'logistique.restitutions.*'],
             ['Suivi', 'logistique.suivi.index', $cycleOnglet, 'logistique.suivi.*'],
         ]);
     }

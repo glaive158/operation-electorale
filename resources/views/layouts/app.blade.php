@@ -100,6 +100,7 @@
                         ['url' => $versCycle('logistique.ecarts.index'), 'match' => ['logistique.ecarts.*'], 'icon' => 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z', 'label' => 'Écarts'],
                         ['url' => $versCycle('logistique.declarations.a-verifier'), 'match' => ['logistique.declarations.*', 'logistique.clotures-ecart.*'], 'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z', 'label' => 'À vérifier'],
                         ['url' => $versCycle('logistique.reclamations.index'), 'match' => ['logistique.reclamations.*'], 'icon' => 'M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z', 'label' => 'Réclamations'],
+                        ['url' => $versCycle('logistique.restitutions.index'), 'match' => ['logistique.restitutions.*'], 'icon' => 'M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6', 'label' => 'Restitution'],
                         ['url' => $versCycle('logistique.suivi.index'), 'match' => ['logistique.suivi.*'], 'icon' => 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z', 'label' => 'Suivi'],
                         ['url' => route('logistique.appareils.index'), 'match' => ['logistique.appareils.*'], 'icon' => 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z', 'label' => 'Appareils'],
                     ]);
@@ -114,6 +115,7 @@
                 $iconeSuivi = 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z';
                 if (\Illuminate\Support\Facades\Gate::allows('logistique-terrain')) {
                     $terrainItems[] = ['url' => route('terrain.decharges.index'), 'match' => ['terrain.decharges.*'], 'icon' => $iconeDecharges, 'label' => 'Mes décharges'];
+                    $terrainItems[] = ['url' => route('terrain.restitutions.index'), 'match' => ['terrain.restitutions.*'], 'icon' => 'M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6', 'label' => 'Restitution'];
                     $terrainItems[] = ['url' => route('terrain.app'), 'match' => ['terrain.app'], 'icon' => 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z', 'label' => 'Application tablette'];
                 }
                 if (\Illuminate\Support\Facades\Gate::allows('logistique-terrain') && auth()->user()->hasRole(\App\Services\Logistique\CodeReceptionService::ROLES_AUTORITE)) {

@@ -15,9 +15,12 @@ class AffectationController extends Controller
         private readonly PerimetreTerrain $perimetre,
     ) {}
 
+    /** Les éléments de remise et, à côté, les restitutions de l'utilisateur (P6-R9 : `elements` inchangé). */
     public function index(Request $request): JsonResponse
     {
-        return $this->reponse($this->affectations->pour($request->user()));
+        $utilisateur = $request->user();
+
+        return $this->reponse($this->affectations->pour($utilisateur), $this->affectations->restitutions($utilisateur));
     }
 
     /** Une décharge du périmètre ; inconnue ou hors périmètre : 404. */
@@ -29,9 +32,17 @@ class AffectationController extends Controller
         return $this->reponse($this->affectations->pour($utilisateur, $decharge));
     }
 
-    /** @param  list<array<string, mixed>>  $elements */
-    private function reponse(array $elements): JsonResponse
+    /**
+     * @param  list<array<string, mixed>>  $elements
+     * @param  list<array<string, mixed>>|null  $restitutions  absentes du détail d'une décharge
+     */
+    private function reponse(array $elements, ?array $restitutions = null): JsonResponse
     {
-        return response()->json(['genere_le' => now()->toIso8601String(), 'elements' => $elements]);
+        $corps = ['genere_le' => now()->toIso8601String(), 'elements' => $elements];
+        if ($restitutions !== null) {
+            $corps['restitutions'] = $restitutions;
+        }
+
+        return response()->json($corps);
     }
 }

@@ -191,19 +191,7 @@ class DeclarationService
                 return [$declaration, false];
             }, attempts: 3);
         } catch (UniqueConstraintViolationException $e) {
-            // Filet de concurrence : le même bloc de preuve ne sert qu'à une seule déclaration.
-            if (str_contains($e->getMessage(), 'bloc_empreinte')) {
-                $porteur = Declaration::where('bloc_empreinte', $preuve['bloc_empreinte'] ?? '')->value('id');
-                if ($porteur !== null) {
-                    Journal::noter('declaration', (int) $porteur, 'anomalie_preuve', null, [
-                        'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
-                    ], self::REFUS_BLOC_REUTILISE);
-                }
-
-                throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
-            }
-
-            throw $e;
+            [$declaration, $conflit] = $this->apresViolation($e, $cle, $remise, $mode, $empreinte, $preuve, $auteur);
         }
 
         if ($conflit) {
@@ -330,8 +318,9 @@ class DeclarationService
                 $actuelle, 'tablette', $signataire, array_column($lignes, null, 'materiel_id'), $cle, $horodatage, $preuve, $pieces, $gps,
             );
         } catch (UniqueConstraintViolationException $e) {
-            // Filet : une autre écriture de la même clé a échappé au verrou ; on retrouve celle qui a gagné.
-            $rejeu = str_contains($e->getMessage(), 'cle_idempotence') ? $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur) : null;
+            // Filet : une autre écriture de la même clé a échappé au verrou ; on retrouve celle qui a gagné, d'après la
+            // base (le message de l'erreur cite toutes les colonnes insérées).
+            $rejeu = $this->rejeuTablette($cle, $remise, $empreinte, $bloc, $auteur);
             if ($rejeu === null) {
                 throw $e;
             }
@@ -370,6 +359,41 @@ class DeclarationService
         } catch (RegleLogistique) {
             throw (new ModelNotFoundException)->setModel(Remise::class, [$remise->id]);
         }
+    }
+
+    /**
+     * Filet de concurrence, après une violation d'unicité : une écriture a échappé aux verrous. La base dit laquelle
+     * (le message de l'erreur cite toutes les colonnes insérées, il ne dit rien) : une déclaration de cette clé ⇒
+     * rejeu (même envoi) ou conflit ; sinon une déclaration portant ce bloc ⇒ preuve déjà utilisée ; sinon l'erreur.
+     *
+     * @param  array{bloc_empreinte?: ?string, signataire_user_id?: ?int}|null  $preuve
+     * @return array{0: Declaration, 1: bool} la déclaration et vrai pour un conflit de clé
+     */
+    private function apresViolation(UniqueConstraintViolationException $e, string $cle, Remise $remise, string $mode, string $empreinte, ?array $preuve, User $auteur): array
+    {
+        $existante = Declaration::where('cle_idempotence', $cle)->first();
+        if ($existante !== null) {
+            if ($this->memeEnvoi($existante, $empreinte, $preuve, $auteur)) {
+                return [$existante, false];
+            }
+            Journal::noter('declaration', $existante->id, 'anomalie_idempotence', null, [
+                'cle' => $cle, 'remise_id' => $remise->id, 'mode' => $mode, 'empreinte_recue' => $empreinte,
+            ], "Clé d'idempotence réutilisée pour un autre contenu.");
+
+            return [$existante, true];
+        }
+
+        $bloc = $preuve['bloc_empreinte'] ?? null;
+        $porteur = $bloc === null ? null : Declaration::where('bloc_empreinte', $bloc)->value('id');
+        if ($porteur !== null) {
+            Journal::noter('declaration', (int) $porteur, 'anomalie_preuve', null, [
+                'nature' => 'bloc_reutilise', 'signataire_user_id' => $preuve['signataire_user_id'] ?? null,
+            ], self::REFUS_BLOC_REUTILISE);
+
+            throw new RegleLogistique(self::REFUS_BLOC_REUTILISE);
+        }
+
+        throw $e;
     }
 
     /**

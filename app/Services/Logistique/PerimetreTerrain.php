@@ -61,6 +61,22 @@ class PerimetreTerrain
         return ['ids' => $propres->merge($delegues)->unique()->values(), 'delegues' => $delegues];
     }
 
+    /**
+     * Les destinataires dont l'utilisateur est l'autorité maintenant : ceux dont il est titulaire et ceux qu'une
+     * délégation en vigueur lui confie. Pas les sous-préfectures que voit un préfet : il n'en est pas l'autorité.
+     *
+     * @return Collection<int, int>
+     */
+    public function autoriteDe(User $utilisateur): Collection
+    {
+        if (! $utilisateur->actif || ! in_array($utilisateur->role, CodeReceptionService::ROLES_AUTORITE, true)) {
+            return collect();
+        }
+
+        return Destinataire::where('autorite_user_id', $utilisateur->id)->pluck('id')->map(fn ($id) => (int) $id)
+            ->merge($this->portee($utilisateur)['delegues'])->unique()->sort()->values();
+    }
+
     /** Décharges validées ou annulées visibles par l'utilisateur. */
     public function decharges(User $utilisateur): Builder
     {

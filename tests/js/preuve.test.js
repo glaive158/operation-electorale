@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { construireBloc, contenuPreuve, importerCle } from '../../resources/js/terrain/preuve.js';
+import { construireBloc, contenuPreuve, contenuPreuveRestitution, importerCle } from '../../resources/js/terrain/preuve.js';
 import { empreinte, json } from '../../resources/js/terrain/canonique.js';
 
 const subtle = globalThis.crypto.subtle;
@@ -105,6 +105,21 @@ test('preuve : vecteurs partagés avec PHP (contenuPreuve, json et empreinte)', 
         assert.equal(json(c), v.json, v.note);
         assert.equal(await empreinte(c), v.empreinte, v.note);
     }
+});
+
+test('preuve : vecteurs de restitution partagés avec PHP (contenuPreuveRestitution, json et empreinte)', async () => {
+    const vecteurs = JSON.parse(readFileSync(new URL('../fixtures/contenu-preuve-restitution.json', import.meta.url), 'utf8'));
+    assert.ok(vecteurs.length >= 2);
+    for (const v of vecteurs) {
+        const c = contenuPreuveRestitution(v.entree);
+        assert.equal(json(c), v.json, v.note);
+        assert.equal(await empreinte(c), v.empreinte, v.note);
+    }
+    // La saisie du nom est rognée par la tablette (le serveur reçoit le nom déjà rogné).
+    const [premier] = vecteurs;
+    const rogne = contenuPreuveRestitution({ ...premier.entree, signataire: { nom: `  ${premier.entree.signataire.nom} `, qualite: premier.entree.signataire.qualite } });
+    assert.equal(json(rogne), premier.json);
+    assert.throws(() => contenuPreuveRestitution({ ...premier.entree, lignes: [{ materiel_id: 3, restitue: 1.5 }] }), TypeError);
 });
 
 test('preuve : entrées invalides refusées sans produire de bloc', async () => {

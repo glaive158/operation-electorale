@@ -404,8 +404,9 @@ class RemiseService
                 return [$redistribution, true, false];
             }, attempts: 3);
         } catch (UniqueConstraintViolationException $e) {
-            // Filet de concurrence : une écriture de la même clé a échappé aux verrous ; on retrouve celle qui a gagné.
-            $existante = $cle === null || ! str_contains($e->getMessage(), 'cle_idempotence') ? null : Remise::where('cle_idempotence', $cle)->first();
+            // Filet de concurrence : une écriture de la même clé a échappé aux verrous ; on retrouve celle qui a gagné,
+            // d'après la base (le message de l'erreur cite toutes les colonnes insérées). Aucune ⇒ l'erreur.
+            $existante = $cle === null ? null : Remise::where('cle_idempotence', $cle)->first();
             if ($existante === null) {
                 throw $e;
             }
