@@ -47,6 +47,7 @@
                                 {{ $d['nom'] }}
                                 @if($lignesSp->isNotEmpty())
                                     <button type="button" @click="ouvert = !ouvert" x-bind:aria-expanded="ouvert.toString()" aria-expanded="false"
+                                            aria-label="Sous-préfectures de {{ $d['nom'] }} : {{ $lignesSp->count() }}"
                                             class="ml-2 text-xs font-normal text-sky-700 hover:underline">
                                         {{ $lignesSp->count() }} sous-préfecture(s)
                                         @if($lignesSp->where('source', 'sous_prefecture')->isNotEmpty()) · {{ $lignesSp->where('source', 'sous_prefecture')->count() }} réglage(s) propre(s) @endif
@@ -93,6 +94,7 @@
                             <td colspan="{{ $colonnes }}" class="px-5 py-3 font-medium text-slate-700">
                                 Sans département rattaché
                                 <button type="button" @click="ouvert = !ouvert" x-bind:aria-expanded="ouvert.toString()" aria-expanded="false"
+                                        aria-label="Sous-préfectures sans département rattaché : {{ $lignesSp->count() }}"
                                         class="ml-2 text-xs font-normal text-sky-700 hover:underline">{{ $lignesSp->count() }} sous-préfecture(s)</button>
                             </td>
                         </tr>
