@@ -281,6 +281,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('utilisateurs/{user}/code/reinitialisation', [CodeReceptionController::class, 'reinitialiser'])->whereNumber('user')->name('utilisateurs.code.reinitialiser');
 
             Route::put('cycles/{cycle}/circuit/{departement}', [CircuitController::class, 'update'])->whereNumber('departement')->name('circuit.update');
+            Route::post('cycles/{cycle}/circuit/sous-prefectures/{destinataire}', [CircuitController::class, 'sousPrefecture'])->whereNumber('destinataire')->name('circuit.sous-prefecture');
             Route::post('decharges/{decharge}/annulation', [DechargeController::class, 'annuler'])->name('decharges.annuler');
             Route::post('declarations/{declaration}/retenue', [ArbitrageController::class, 'retenir'])->name('declarations.retenir');
             Route::post('declarations/{declaration}/rejet', [ArbitrageController::class, 'rejeter'])->name('declarations.rejeter');

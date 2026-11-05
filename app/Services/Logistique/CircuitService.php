@@ -4,6 +4,7 @@ namespace App\Services\Logistique;
 
 use App\Exceptions\Logistique\RegleLogistique;
 use App\Models\Logistique\CircuitDepartement;
+use App\Models\Logistique\CircuitSousPrefecture;
 use App\Models\Logistique\Cycle;
 use App\Models\Logistique\Destinataire;
 use Illuminate\Support\Collection;
@@ -14,7 +15,8 @@ use LogicException;
 
 /**
  * Circuit de livraison du matériel : par le préfet (qui redistribue aux sous-préfectures) ou
- * direct, avec dérogation possible par département sur le circuit par défaut du cycle.
+ * direct, avec dérogation possible par département sur le circuit par défaut du cycle, et réglage
+ * propre à une sous-préfecture, prioritaire sur celui de son département.
  */
 class CircuitService
 {
@@ -72,18 +74,75 @@ class CircuitService
         }, attempts: 3);
     }
 
-    /** 'etranger' pour un poste ; sinon la dérogation du département, à défaut le circuit du cycle. */
+    /**
+     * Fixe le circuit propre d'une sous-préfecture ; null le supprime (elle suit de nouveau son département).
+     * Les décharges déjà validées gardent le circuit figé à leur validation.
+     */
+    public function definirSousPrefecture(Cycle $cycle, Destinataire $sousPrefecture, ?string $circuit, string $motif): void
+    {
+        $this->exigerAuteur();
+        if (! Gate::allows('logistique-administrer')) {
+            throw new RegleLogistique('Seul un responsable logistique peut modifier le circuit de livraison.');
+        }
+
+        $motif = trim($motif);
+        if ($motif === '' || mb_strlen($motif) > 500) {
+            throw new InvalidArgumentException('Le motif est obligatoire (500 caractères au plus).');
+        }
+        if ($circuit !== null && ! in_array($circuit, CircuitDepartement::CIRCUITS, true)) {
+            throw new InvalidArgumentException('Circuit inconnu (via_prefet ou direct).');
+        }
+
+        DB::transaction(function () use ($cycle, $sousPrefecture, $circuit, $motif) {
+            $actuel = Cycle::whereKey($cycle->id)->lockForUpdate()->first();
+            if ($actuel === null || ! $actuel->estOuvert()) {
+                throw new RegleLogistique('Cycle clôturé : circuit de livraison non modifiable.');
+            }
+
+            $destinataire = Destinataire::find($sousPrefecture->id);
+            if ($destinataire === null || $destinataire->type !== 'sous_prefecture') {
+                throw new InvalidArgumentException('Ce destinataire n\'est pas une sous-préfecture.');
+            }
+            if ($circuit === 'via_prefet'
+                && ($destinataire->prefecture_id === null || ! Destinataire::whereKey($destinataire->prefecture_id)->exists())) {
+                throw new RegleLogistique('Sous-préfecture sans préfecture parente : circuit via le préfet impossible.');
+            }
+
+            $existant = CircuitSousPrefecture::where('cycle_id', $actuel->id)
+                ->where('destinataire_id', $destinataire->id)->lockForUpdate()->first();
+            $avant = $this->resolution($actuel, $destinataire);
+
+            if ($circuit === null) {
+                $existant?->delete();
+            } elseif ($existant === null) {
+                CircuitSousPrefecture::create([
+                    'cycle_id' => $actuel->id, 'destinataire_id' => $destinataire->id,
+                    'circuit' => $circuit, 'user_id' => auth()->id(),
+                ]);
+            } else {
+                $existant->update(['circuit' => $circuit, 'user_id' => auth()->id()]);
+            }
+
+            $apres = $this->resolution($actuel, $destinataire);
+            Journal::noter('cycle', $actuel->id, 'definition_circuit_sous_prefecture', $avant + [
+                'cycle_id' => $actuel->id, 'destinataire_id' => $destinataire->id,
+            ], $apres + [
+                'cycle_id' => $actuel->id, 'destinataire_id' => $destinataire->id,
+            ], $motif);
+        }, attempts: 3);
+    }
+
+    /**
+     * 'etranger' pour un poste ; sinon le réglage propre de la sous-préfecture, à défaut la dérogation
+     * du département, à défaut le circuit du cycle.
+     */
     public function circuitPour(Cycle $cycle, Destinataire $destinataire): string
     {
         if ($destinataire->type === 'poste') {
             return 'etranger';
         }
 
-        $departementId = $this->departementDe($destinataire);
-        $derogation = $departementId === null ? null : CircuitDepartement::where('cycle_id', $cycle->id)
-            ->where('departement_id', $departementId)->value('circuit');
-
-        return $derogation ?? $cycle->circuit_defaut;
+        return $this->resolution($cycle, $destinataire)['circuit'];
     }
 
     /** Destinataire à qui la remise est faite : le préfet pour une sous-préfecture en circuit via le préfet. */
@@ -113,11 +172,70 @@ class CircuitService
         return Destinataire::where('type', 'prefecture')->whereNotNull('departement_id')->get()
             ->map(fn (Destinataire $p) => [
                 'departement_id' => (int) $p->departement_id,
-                'nom'            => $p->libelle,
-                'circuit'        => $derogations[$p->departement_id] ?? $cycle->circuit_defaut,
-                'derogation'     => $derogations->has($p->departement_id),
+                'nom' => $p->libelle,
+                'circuit' => $derogations[$p->departement_id] ?? $cycle->circuit_defaut,
+                'derogation' => $derogations->has($p->departement_id),
             ])
             ->sortBy('nom', SORT_NATURAL | SORT_FLAG_CASE)->values();
+    }
+
+    /**
+     * Une ligne par sous-préfecture destinataire, triée par nom, avec son circuit effectif et son origine ;
+     * departement_id est celui de sa préfecture (null sans préfecture parente). Quatre requêtes en tout.
+     *
+     * @return Collection<int, array{id:int, nom:string, departement_id:?int, circuit:string, source:string, reglage:?string}>
+     */
+    public function sousPrefectures(Cycle $cycle): Collection
+    {
+        $reglages = CircuitSousPrefecture::where('cycle_id', $cycle->id)->pluck('circuit', 'destinataire_id');
+        $derogations = CircuitDepartement::where('cycle_id', $cycle->id)->pluck('circuit', 'departement_id');
+        $departements = Destinataire::where('type', 'prefecture')->whereNotNull('departement_id')->pluck('departement_id', 'id');
+
+        return Destinataire::where('type', 'sous_prefecture')->get(['id', 'libelle', 'departement_id', 'prefecture_id'])
+            ->map(function (Destinataire $sp) use ($cycle, $reglages, $derogations, $departements) {
+                $departementId = $sp->departement_id ?? ($sp->prefecture_id === null ? null : $departements->get($sp->prefecture_id));
+                $departementId = $departementId === null ? null : (int) $departementId;
+                [$circuit, $source] = match (true) {
+                    $reglages->has($sp->id) => [$reglages[$sp->id], 'sous_prefecture'],
+                    $departementId !== null && $derogations->has($departementId) => [$derogations[$departementId], 'departement'],
+                    default => [$cycle->circuit_defaut, 'cycle'],
+                };
+
+                return [
+                    'id' => (int) $sp->id,
+                    'nom' => $sp->libelle,
+                    'departement_id' => $departementId,
+                    'circuit' => $circuit,
+                    'source' => $source,
+                    'reglage' => $reglages->get($sp->id),
+                ];
+            })
+            ->sortBy('nom', SORT_NATURAL | SORT_FLAG_CASE)->values();
+    }
+
+    /**
+     * Circuit effectif d'un destinataire hors poste et son origine : 'sous_prefecture' (réglage propre),
+     * 'departement' (dérogation) ou 'cycle' (circuit par défaut).
+     *
+     * @return array{circuit:string, source:string}
+     */
+    private function resolution(Cycle $cycle, Destinataire $destinataire): array
+    {
+        if ($destinataire->type === 'sous_prefecture') {
+            $propre = CircuitSousPrefecture::where('cycle_id', $cycle->id)
+                ->where('destinataire_id', $destinataire->id)->value('circuit');
+            if ($propre !== null) {
+                return ['circuit' => $propre, 'source' => 'sous_prefecture'];
+            }
+        }
+
+        $departementId = $this->departementDe($destinataire);
+        $derogation = $departementId === null ? null : CircuitDepartement::where('cycle_id', $cycle->id)
+            ->where('departement_id', $departementId)->value('circuit');
+
+        return $derogation === null
+            ? ['circuit' => $cycle->circuit_defaut, 'source' => 'cycle']
+            : ['circuit' => $derogation, 'source' => 'departement'];
     }
 
     /** Une sous-préfecture n'a pas de département propre : elle suit celui de sa préfecture. */
